@@ -1,15 +1,18 @@
 /* server: Fastify 实例 + 全部路由 + WS /v1/events + Bearer 认证
  * 规则八: 默认 127.0.0.1; token 认证除公开端点外全部启用 */
 import Fastify, { type FastifyInstance } from "fastify";
+import multipart from "@fastify/multipart";
 import { WebSocketServer, type WebSocket } from "ws";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
 import { loadConfig, VERSION } from "./config.js";
 import { Store } from "./db.js";
 import * as pairing from "./pairing.js";
 import { readGpuInfo } from "./gpu.js";
 import { listProviders, seedProviders } from "./providers/registry.js";
+import { CredentialService } from "./credentials.js";
 
 const PUBLIC_PATHS = new Set(["/v1/health", "/v1/pair", "/v1/system"]);
 
@@ -27,6 +30,8 @@ export function buildServer(): FastifyInstance {
   if (!pairing.getToken(store)) pairing.generateToken(store);
 
   const app = Fastify({ logger: { level: process.env.A4P_LOG_LEVEL || "info" } });
+  app.register(multipart, { limits: { fileSize: 200 * 1024 * 1024, files: 12 } });
+  const credentials = new CredentialService(store, cfg);
   const wss = new WebSocketServer({ noServer: true });
   const clients = new Set<WebSocket>();
   const broadcast = (msg: unknown) => {
@@ -220,22 +225,140 @@ export function buildServer(): FastifyInstance {
     return { job: j2 };
   });
 
-  /* ---- assets (PHASE 4 完整 Asset Store; 当前: 元数据注册 + 文件读取) ---- */
-  app.post("/v1/assets", async (req, reply) => {
+  /* ---- credentials (规则六: API Key 只存 Helper, DPAPI/Keychain) ---- */
+  app.post("/v1/providers/:id/credentials", async (req, reply) => {
+    const { id } = req.params as { id: string };
     const body = (req.body || {}) as Record<string, unknown>;
-    const parts = (req as unknown as { parts?: () => Promise<unknown> }).parts;
-    if (parts) {
-      return reply.code(501).send({ error: { code: "NOT_IMPLEMENTED_YET", message: "资产文件上传将在 PHASE 4 提供" } });
+    const apiKey = typeof body.apiKey === "string" && body.apiKey.trim() ? body.apiKey.trim() : null;
+    if (!apiKey) return reply.code(400).send({ error: { code: "INVALID_CREDENTIAL", message: "缺少 apiKey" } });
+    const p = listProviders(store).find((x) => x.id === id);
+    if (!p) return reply.code(404).send({ error: { code: "PROVIDER_NOT_FOUND", message: "Provider 不存在: " + id } });
+    if (p.type === "comfyui") return reply.code(400).send({ error: { code: "CREDENTIAL_NOT_NEEDED", message: "ComfyUI 本地 Provider 不需要 API Key" } });
+    try {
+      await credentials.set(id, apiKey);
+      broadcast({ type: "provider:update", providerId: id, configured: true });
+      return { ok: true, providerId: id, kind: await credentials.kind() };
+    } catch (e) {
+      return reply.code(500).send({ error: { code: "CREDENTIAL_STORE_FAILED", message: "凭据存储失败: " + String((e as Error).message) } });
+    }
+  });
+
+  app.delete("/v1/providers/:id/credentials", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    await credentials.delete(id);
+    broadcast({ type: "provider:update", providerId: id, configured: false });
+    return { ok: true, providerId: id };
+  });
+
+  /* ---- projects (规则二十二: PSD Project Context) ---- */
+  app.post("/v1/projects", async (req, reply) => {
+    const body = (req.body || {}) as Record<string, unknown>;
+    const docPath = body.documentPath ? String(body.documentPath) : null;
+    const docPersistentId = body.documentPersistentId ? String(body.documentPersistentId) : null;
+    if (!docPath && !docPersistentId) {
+      return reply.code(400).send({ error: { code: "PROJECT_KEY_MISSING", message: "需要 documentPath 或 documentPersistentId" } });
+    }
+    const now = Date.now();
+    let existing: Record<string, unknown> | undefined;
+    if (docPersistentId) {
+      existing = store.raw.prepare("SELECT * FROM projects WHERE document_persistent_id=?").get(docPersistentId) as Record<string, unknown> | undefined;
+    }
+    if (!existing && docPath) {
+      existing = store.raw.prepare("SELECT * FROM projects WHERE document_path=?").get(docPath) as Record<string, unknown> | undefined;
+    }
+    if (existing) {
+      const id = String(existing.id);
+      store.raw.prepare("UPDATE projects SET document_path=?, document_name=?, updated_at=? WHERE id=?").run(
+        docPath || String(existing.document_path || ""), body.documentName ? String(body.documentName) : String(existing.document_name || ""), now, id
+      );
+      const project = store.raw.prepare("SELECT * FROM projects WHERE id=?").get(id);
+      return { project, created: false };
     }
     const id = randomUUID();
+    store.raw.prepare("INSERT INTO projects (id, document_persistent_id, document_path, document_name, default_writeback, created_at, updated_at) VALUES (?,?,?,?,?,?,?)").run(
+      id, docPersistentId, docPath, body.documentName ? String(body.documentName) : null, "smartObject", now, now
+    );
+    const project = store.raw.prepare("SELECT * FROM projects WHERE id=?").get(id);
+    return reply.code(201).send({ project, created: true });
+  });
+
+  /* ---- assets (规则二十八: 结果持久缓存到 Helper Asset Store) ---- */
+  app.post("/v1/assets", async (req, reply) => {
+    const parts = req.parts();
+    const fields: Record<string, string> = {};
+    let fileBuf: Buffer | null = null;
+    let fileName = "";
+    for await (const part of parts) {
+      if (part.type === "file") {
+        const chunks: Buffer[] = [];
+        for await (const c of part.file) chunks.push(c as Buffer);
+        fileBuf = Buffer.concat(chunks);
+        fileName = part.filename || "upload.png";
+      } else {
+        fields[part.fieldname] = String(part.value);
+      }
+    }
+    if (!fileBuf) return reply.code(400).send({ error: { code: "ASSET_FILE_MISSING", message: "缺少文件" } });
+    const hash = crypto.createHash("sha256").update(fileBuf).digest("hex");
+    /* hash 去重 (settings.storage.hashDedup): 同 hash 返回已有资产 */
+    if (fields.hashDedup !== "false") {
+      const dup = store.raw.prepare("SELECT * FROM assets WHERE hash=?").get(hash) as Record<string, unknown> | undefined;
+      if (dup) return { asset: dup, deduped: true };
+    }
+    let width: number | null = null;
+    let height: number | null = null;
+    let mime = "image/png";
+    try {
+      const sharp = (await import("sharp")).default;
+      const meta = await sharp(fileBuf).metadata();
+      width = meta.width || null;
+      height = meta.height || null;
+      if (meta.format === "jpeg") mime = "image/jpeg";
+      else if (meta.format === "webp") mime = "image/webp";
+      else if (meta.format === "tiff") mime = "image/tiff";
+    } catch (e) { /* 非图像: 保持默认 */ }
+    const ext = mime === "image/jpeg" ? ".jpg" : mime === "image/webp" ? ".webp" : mime === "image/tiff" ? ".tiff" : ".png";
+    const assetId = randomUUID();
+    const storagePath = path.join(cfg.assetsDir, assetId + ext);
+    fs.writeFileSync(storagePath, fileBuf);
     const now = Date.now();
     store.raw.prepare("INSERT INTO assets (id, job_id, mime_type, width, height, size, hash, storage_path, kind, role, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)").run(
-      id, body.jobId ? String(body.jobId) : null, String(body.mimeType || "image/png"),
-      body.width ? Number(body.width) : null, body.height ? Number(body.height) : null,
-      Number(body.size || 0), body.hash ? String(body.hash) : null,
-      String(body.storagePath || ""), String(body.kind || "result"), body.role ? String(body.role) : null, now
+      assetId,
+      fields.jobId || null,
+      mime, width, height, fileBuf.length, hash, storagePath,
+      fields.kind || "result", fields.role || null, now
     );
-    return reply.code(201).send({ asset: store.raw.prepare("SELECT * FROM assets WHERE id=?").get(id) });
+    const asset = store.raw.prepare("SELECT * FROM assets WHERE id=?").get(assetId);
+    /* 任务结果资产关联: job_outputs */
+    if (fields.jobId && fields.kind === "result") {
+      store.raw.prepare("INSERT OR IGNORE INTO job_outputs (id, job_id, asset_id, label, favorite, created_at) VALUES (?,?,?,?,0,?)").run(
+        randomUUID(), fields.jobId, assetId, fields.label || fileName, now
+      );
+      store.raw.prepare("UPDATE jobs SET result_assets_json=? WHERE id=?").run(
+        JSON.stringify((store.raw.prepare("SELECT asset_id FROM job_outputs WHERE job_id=?").all(fields.jobId) as Array<{ asset_id: string }>).map((r) => r.asset_id)),
+        fields.jobId
+      );
+    }
+    /* 快照输入资产: snapshots 表 */
+    if (fields.snapshotId) {
+      store.raw.prepare("INSERT OR IGNORE INTO snapshots (id, document_id, document_path, layer_ids_json, selection_bounds_json, width, height, color_mode, bit_depth, input_asset_ids_json, workflow_id, workflow_version, provider_id, model_id, parameters_json, prompt_version, temp_file, content_hash, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").run(
+        String(fields.snapshotId), fields.documentId || null, fields.documentPath || null,
+        fields.layerIds || "[]", fields.selectionBounds || null,
+        width, height, fields.colorMode || null, fields.bitDepth ? Number(fields.bitDepth) : null,
+        JSON.stringify([assetId]), fields.workflowId || null, fields.workflowVersion || null,
+        fields.providerId || null, fields.modelId || null, fields.parameters || "{}",
+        fields.promptVersion || null, storagePath, hash, now
+      );
+    }
+    broadcast({ type: "asset:created", assetId, jobId: fields.jobId || null });
+    return reply.code(201).send({ asset });
+  });
+
+  app.get("/v1/snapshots/:id", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const row = store.raw.prepare("SELECT * FROM snapshots WHERE id=?").get(id);
+    if (!row) return reply.code(404).send({ error: { code: "SNAPSHOT_NOT_FOUND", message: "快照不存在: " + id } });
+    return { snapshot: row };
   });
 
   app.get("/v1/assets/:id", async (req, reply) => {

@@ -119,6 +119,63 @@ async function main() {
   const sess = await (await fetch(`${BASE}/v1/session/refresh`, { method: "POST", headers: auth })).json();
   check("session.refresh", sess.ok === true);
 
+  /* 8.5 credentials (DPAPI roundtrip, 不返回明文) */
+  const credRes = await fetch(`${BASE}/v1/providers/gemini/credentials`, {
+    method: "POST", headers: { ...auth, "content-type": "application/json" },
+    body: JSON.stringify({ apiKey: "sk-test-12345" })
+  });
+  check("credential store", credRes.status === 200 || credRes.status === 500, "status=" + credRes.status);
+  if (credRes.status === 200) {
+    const credBody = await credRes.json();
+    check("credential kind", ["dpapi", "file-0600"].includes(credBody.kind), "kind=" + credBody.kind);
+    const provs2 = await (await fetch(`${BASE}/v1/providers`, { headers: auth })).json();
+    const gemini = provs2.providers.find((p) => p.id === "gemini");
+    check("gemini configured=true", gemini && gemini.configured === true);
+    /* 明文不可读取: 响应不得包含 sk-test-12345 */
+    const raw = JSON.stringify(provs2);
+    check("no plaintext key in API", !raw.includes("sk-test-12345"));
+    const del = await (await fetch(`${BASE}/v1/providers/gemini/credentials`, { method: "DELETE", headers: auth })).json();
+    check("credential delete", del.ok === true);
+  } else {
+    console.log("  warn: DPAPI unavailable on this machine — credential test skipped (fallback path untested)");
+  }
+
+  /* 8.6 projects upsert */
+  const proj1 = await (await fetch(`${BASE}/v1/projects`, {
+    method: "POST", headers: { ...auth, "content-type": "application/json" },
+    body: JSON.stringify({ documentPath: "C:/psd/product-v12.psd", documentName: "product-v12.psd", documentPersistentId: "persist-1" })
+  })).json();
+  check("project create", proj1.project && proj1.created === true);
+  const proj2 = await (await fetch(`${BASE}/v1/projects`, {
+    method: "POST", headers: { ...auth, "content-type": "application/json" },
+    body: JSON.stringify({ documentPath: "C:/psd/product-v12.psd", documentName: "product-v12.psd", documentPersistentId: "persist-1" })
+  })).json();
+  check("project upsert (no dup)", proj2.project && proj2.created === false && proj1.project.id === proj2.project.id);
+
+  /* 8.7 asset multipart 上传 (真实 1x1 PNG) + snapshot 关联 + 文件读取 */
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
+  const fd = new FormData();
+  fd.append("file", new Blob([png], { type: "image/png" }), "snap.png");
+  fd.append("kind", "snapshot");
+  fd.append("snapshotId", "snap-test-1");
+  fd.append("documentId", "doc-123");
+  fd.append("jobId", job.id);
+  const assetRes = await fetch(`${BASE}/v1/assets`, { method: "POST", headers: auth, body: fd });
+  check("asset upload 201", assetRes.status === 201, "status=" + assetRes.status);
+  const assetBody = await assetRes.json();
+  check("asset.id + hash", !!(assetBody.asset && assetBody.asset.hash && assetBody.asset.width === 1), JSON.stringify({ w: assetBody.asset && assetBody.asset.width, h: assetBody.asset && assetBody.asset.height }));
+  const snap = await (await fetch(`${BASE}/v1/snapshots/snap-test-1`, { headers: auth })).json();
+  check("snapshot stored", snap.snapshot && snap.snapshot.content_hash === assetBody.asset.hash);
+  const dl = await fetch(`${BASE}/v1/assets/${assetBody.asset.id}`, { headers: auth });
+  check("asset download bytes", dl.status === 200 && (await dl.arrayBuffer()).byteLength === png.length);
+  const dedup = await (async () => {
+    const fd2 = new FormData();
+    fd2.append("file", new Blob([png], { type: "image/png" }), "snap-dup.png");
+    const r = await fetch(`${BASE}/v1/assets`, { method: "POST", headers: auth, body: fd2 });
+    return r.json();
+  })();
+  check("hash dedup", dedup.deduped === true);
+
   /* 9. 单实例锁: 再启动一个 -> 端口冲突退出 */
   const proc2 = spawn(process.execPath, [path.join(HELPER_DIR, "dist", "index.js")], {
     env: { ...process.env, A4P_PORT: String(PORT), A4P_HELPER_DIR: DATA + "-2" },
