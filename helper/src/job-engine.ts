@@ -292,6 +292,18 @@ export class JobEngine {
     const jNow = this.job(jobId);
     this.store.raw.prepare("UPDATE jobs SET result_assets_json=?, duration_ms=? WHERE id=?").run(JSON.stringify(assetIds), Date.now() - Number(jNow.created_at || Date.now()), jobId);
 
+    /* 成本/用量记录 (规则三十二: 本地记 GPU 时长, 云记费用; 不虚构货币) */
+    const usageId = crypto.randomUUID();
+    const duration = Date.now() - Number(jNow.created_at || Date.now());
+    this.store.raw.prepare(
+      "INSERT INTO usage_records (id, job_id, provider_id, provider_type, model_id, estimated_cost, actual_cost, currency, duration_ms, gpu_duration_ms, tokens_in, tokens_out, images_count, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+    ).run(
+      usageId, jobId, String(jNow.provider_id), String(jNow.provider_type), jNow.model_id ? String(jNow.model_id) : null,
+      null, null, null, duration,
+      String(jNow.provider_type) === "comfyui" ? duration : null,
+      null, null, assetIds.length, Date.now()
+    );
+
     /* 8. result_ready (等待 UXP 写回或 writeback-ready) */
     this.transition(jobId, "downloading", "result_ready", "结果已缓存，等待写回");
     this.activeRuns.delete(jobId);

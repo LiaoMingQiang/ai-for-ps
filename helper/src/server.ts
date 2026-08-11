@@ -558,6 +558,68 @@ export function buildServer(): FastifyInstance {
     };
   });
 
+  /* ---- workers + 成本中心 (规则二十九/三十一/三十二) ---- */
+  app.get("/v1/workers", async () => {
+    const gpu = await readGpuInfo();
+    const comfy = store.raw.prepare("SELECT base_url FROM providers WHERE id='local-comfy'").get() as { base_url: string | null } | undefined;
+    /* 本地 worker 自动同步 (规则三十一: 本地 4090 / Studio / 远程 ComfyUI) */
+    let queue = 0;
+    let latency: number | null = null;
+    if (comfy?.base_url) {
+      try {
+        const t0 = Date.now();
+        const q = await (await fetch(comfy.base_url + "/queue")).json() as { queue_running?: unknown[]; queue_pending?: unknown[] };
+        queue = (q.queue_running || []).length + (q.queue_pending || []).length;
+        latency = Date.now() - t0;
+      } catch (e) { /* offline */ }
+    }
+    const localWorker = {
+      id: "local-comfy",
+      name: gpu.gpuName ? "本地 " + gpu.gpuName : "本地 ComfyUI",
+      endpoint: comfy?.base_url || null,
+      gpu: gpu.gpuName,
+      vramMb: gpu.vramTotalMb,
+      status: gpu.available ? "online" : "offline",
+      latencyMs: latency,
+      capabilities: { workflows: true, mask: true, imageInput: true },
+      queue
+    };
+    const now = Date.now();
+    store.raw.prepare("INSERT OR REPLACE INTO worker_nodes (id, name, endpoint, gpu, vram_mb, status, latency_ms, capabilities_json, updated_at) VALUES (?,?,?,?,?,?,?,?,?)")
+      .run(localWorker.id, localWorker.name, localWorker.endpoint, localWorker.gpu, localWorker.vramMb, localWorker.status, localWorker.latencyMs, JSON.stringify(localWorker.capabilities), now);
+    const rows = store.raw.prepare("SELECT * FROM worker_nodes ORDER BY updated_at DESC").all();
+    return { workers: rows, local: localWorker };
+  });
+
+  app.post("/v1/workers/:id", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const body = (req.body || {}) as Record<string, unknown>;
+    const now = Date.now();
+    store.raw.prepare("INSERT OR REPLACE INTO worker_nodes (id, name, endpoint, gpu, vram_mb, status, latency_ms, capabilities_json, updated_at) VALUES (?,?,?,?,?,?,?,?,?)").run(
+      id,
+      body.name ? String(body.name) : id,
+      body.endpoint ? String(body.endpoint) : null,
+      body.gpu ? String(body.gpu) : null,
+      body.vramMb ? Number(body.vramMb) : null,
+      body.status ? String(body.status) : "offline",
+      body.latencyMs ? Number(body.latencyMs) : null,
+      JSON.stringify(body.capabilities || {}),
+      now
+    );
+    return { worker: store.raw.prepare("SELECT * FROM worker_nodes WHERE id=?").get(id) };
+  });
+
+  app.get("/v1/usage", async () => {
+    const rows = store.raw.prepare("SELECT provider_type, COUNT(*) AS jobs, SUM(duration_ms) AS total_ms, SUM(gpu_duration_ms) AS gpu_ms, SUM(images_count) AS images FROM usage_records GROUP BY provider_type").all() as Array<{ provider_type: string; jobs: number; total_ms: number | null; gpu_ms: number | null; images: number | null }>;
+    const byProvider = store.raw.prepare("SELECT provider_id, COUNT(*) AS jobs, SUM(duration_ms) AS total_ms FROM usage_records GROUP BY provider_id").all();
+    return {
+      summary: rows,
+      byProvider,
+      cloudCost: null,      /* 云 Provider 实际费用由 Provider 账单回填 (规则三十二: 不虚构) */
+      localGpuMs: rows.filter((r) => r.provider_type === "comfyui").reduce((a, r) => a + (r.gpu_ms || 0), 0)
+    };
+  });
+
   /* ---- session ---- */
   app.post("/v1/session/refresh", async () => ({ ok: true, refreshedAt: Date.now() }));
 

@@ -197,6 +197,15 @@ async function main() {
   check("lineage source doc", lin.lineage && lin.lineage.source && lin.lineage.source.documentId === "doc-123");
   check("lineage provider", lin.lineage && lin.lineage.provider && lin.lineage.provider.id === "local-comfy");
 
+  /* 8.10 workers + usage (规则二十九/三十一/三十二) */
+  const workers = await (await fetch(`${BASE}/v1/workers`, { headers: auth })).json();
+  check("local worker registered", Array.isArray(workers.workers) && workers.workers.some((w) => w.id === "local-comfy"), "n=" + (workers.workers || []).length);
+  check("worker has gpu/vram fields", workers.local && typeof workers.local.vramMb === "number");
+  const usage = await (await fetch(`${BASE}/v1/usage`, { headers: auth })).json();
+  check("usage summary array", Array.isArray(usage.summary));
+  check("usage localGpuMs number", typeof usage.localGpuMs === "number");
+  check("usage cloudCost null (不虚构)", usage.cloudCost === null);
+
   /* 9. 单实例锁: 再启动一个 -> 端口冲突退出 */
   const proc2 = spawn(process.execPath, [path.join(HELPER_DIR, "dist", "index.js")], {
     env: { ...process.env, A4P_PORT: String(PORT), A4P_HELPER_DIR: DATA + "-2" },
