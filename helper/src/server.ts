@@ -18,6 +18,7 @@ import { JobEngine } from "./job-engine.js";
 import { scanWorkflow } from "./workflow/scanner.js";
 import { importWorkflow, saveWorkflowVersion, checkDependencies } from "./workflow/importer.js";
 import { planRequest, executeTool, AgentAuditor, TOOL_REGISTRY, type AgentPlan } from "./agent/agent.js";
+import { imageMeta, mimeFromFormat } from "./image-meta.js";
 
 const PUBLIC_PATHS = new Set(["/v1/health", "/v1/pair", "/v1/system"]);
 
@@ -386,15 +387,12 @@ export function buildServer(): FastifyInstance {
     let width: number | null = null;
     let height: number | null = null;
     let mime = "image/png";
-    try {
-      const sharp = (await import("sharp")).default;
-      const meta = await sharp(fileBuf).metadata();
-      width = meta.width || null;
-      height = meta.height || null;
-      if (meta.format === "jpeg") mime = "image/jpeg";
-      else if (meta.format === "webp") mime = "image/webp";
-      else if (meta.format === "tiff") mime = "image/tiff";
-    } catch (e) { /* 非图像: 保持默认 */ }
+    const meta = imageMeta(fileBuf);
+    if (meta.format) {
+      width = meta.width;
+      height = meta.height;
+      mime = mimeFromFormat(meta.format);
+    }
     const ext = mime === "image/jpeg" ? ".jpg" : mime === "image/webp" ? ".webp" : mime === "image/tiff" ? ".tiff" : ".png";
     const assetId = randomUUID();
     const storagePath = path.join(cfg.assetsDir, assetId + ext);

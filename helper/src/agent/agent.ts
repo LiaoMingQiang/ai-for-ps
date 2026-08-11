@@ -179,15 +179,18 @@ export async function executeTool(tool: ToolDef, args: Record<string, unknown>, 
     return { status: "started", result: { jobId: job.id, status: job.status } };
   }
   if (tool.id === "resizeImage") {
-    /* Helper 端 sharp 缩放 (结果资产) */
-    const { default: sharp } = await import("sharp");
+    /* Helper 端缩放 (sharp 可选: 单文件 exe 无 native 依赖时明确报错) */
+    let sharpMod: any = null;
+    try { sharpMod = await import("sharp"); } catch (e) { /* sharp unavailable */ }
+    const sharpFn = sharpMod && (sharpMod.default || sharpMod);
+    if (typeof sharpFn !== "function") return { status: "error", result: { error: "SHARP_UNAVAILABLE: 精简版 Helper 不含图像缩放能力" } };
     const assetId = String(args.assetId || "");
     const a = ctx.store.raw.prepare("SELECT storage_path FROM assets WHERE id=?").get(assetId) as { storage_path: string } | undefined;
     if (!a) return { status: "error", result: { error: "ASSET_NOT_FOUND:" + assetId } };
     const w = Number(args.width), h = Number(args.height);
     if (!w || !h) return { status: "error", result: { error: "INVALID_SIZE" } };
     const outPath = a.storage_path.replace(/\.(png|jpg|jpeg|webp)$/i, "-resized.png");
-    await sharp(a.storage_path).resize(w, h).png().toFile(outPath);
+    await sharpFn(a.storage_path).resize(w, h).png().toFile(outPath);
     return { status: "completed", result: { storagePath: outPath } };
   }
   return { status: "error", result: { error: "UNKNOWN_TOOL:" + tool.id } };

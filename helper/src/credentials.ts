@@ -10,8 +10,18 @@ import type { Store } from "./db.js";
 
 export type CredentialKind = "dpapi" | "file-0600";
 
-/* src/credential.js (dev: src/credential.ts) -> helper/scripts/dpapi.ps1 */
-const DPAPI_SCRIPT = path.resolve(import.meta.dirname, "..", "scripts", "dpapi.ps1");
+/* 打包布局: <exe目录>/scripts/dpapi.ps1; 开发布局: helper/scripts/dpapi.ps1 */
+function resolveDpapiScript(): string {
+  const candidates = [
+    path.resolve(import.meta.dirname, "scripts", "dpapi.ps1"),
+    path.resolve(import.meta.dirname, "..", "scripts", "dpapi.ps1")
+  ];
+  for (const c of candidates) {
+    try { if (fs.existsSync(c)) return c; } catch (e) { /* noop */ }
+  }
+  return candidates[0];
+}
+const DPAPI_SCRIPT = resolveDpapiScript();
 
 function runPowerShell(args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {

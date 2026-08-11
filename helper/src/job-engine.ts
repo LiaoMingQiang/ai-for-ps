@@ -14,6 +14,7 @@ import type { ProviderManager } from "./providers/manager.js";
 import type { GenerationRequest } from "./providers/sdk.js";
 import { PROVIDER_ERROR_CODES as EC } from "./providers/sdk.js";
 import type { HelperContext } from "./server.js";
+import { imageMeta, mimeFromFormat } from "./image-meta.js";
 
 export const JOB_STATUSES = [
   "created", "validating", "snapshotting", "uploading", "queued", "running",
@@ -275,14 +276,12 @@ export class JobEngine {
       const storagePath = path.join(this.cfg.assetsDir, assetId + ext);
       fs.writeFileSync(storagePath, Buffer.from(r.bytes));
       let width: number | null = null, height: number | null = null, mime = "image/png";
-      try {
-        const sharp = (await import("sharp")).default;
-        const meta = await sharp(Buffer.from(r.bytes)).metadata();
-        width = meta.width || null;
-        height = meta.height || null;
-        if (meta.format === "jpeg") mime = "image/jpeg";
-        else if (meta.format === "webp") mime = "image/webp";
-      } catch (e) { /* non-image */ }
+      const meta = imageMeta(r.bytes);
+      if (meta.format) {
+        width = meta.width;
+        height = meta.height;
+        mime = mimeFromFormat(meta.format);
+      }
       this.store.raw.prepare("INSERT INTO assets (id, job_id, mime_type, width, height, size, hash, storage_path, kind, role, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)")
         .run(assetId, jobId, mime, width, height, r.bytes.length, hash, storagePath, "result", null, Date.now());
       this.store.raw.prepare("INSERT INTO job_outputs (id, job_id, asset_id, label, seed, width, height, favorite, created_at) VALUES (?,?,?,?,?,?,?,0,?)")
