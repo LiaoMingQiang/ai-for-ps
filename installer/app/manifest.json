@@ -2,11 +2,11 @@
   "manifestVersion": 5,
   "id": "com.aiforps.plugin.ai",
   "name": "AI for PS",
-  "version": "1.0.0",
+  "version": "0.9.0",
   "main": "index.html",
   "host": {
     "app": "PS",
-    "minVersion": "24.0.0"
+    "minVersion": "25.2.0"
   },
   "entrypoints": [
     {
@@ -42,15 +42,10 @@
         "http://127.0.0.1",
         "http://localhost",
         "ws://127.0.0.1",
-        "ws://localhost",
-        "https://api.openai.com",
-        "https://generativelanguage.googleapis.com",
-        "https://ark.cn-beijing.volces.com",
-        "https://dashscope.aliyuncs.com",
-        "https://api.runninghub.ai"
+        "ws://localhost"
       ]
     },
     "clipboard": "readAndWrite",
-    "localFileSystem": "fullAccess"
+    "localFileSystem": "request"
   }
 }

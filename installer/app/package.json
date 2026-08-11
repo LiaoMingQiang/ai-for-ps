@@ -1,10 +1,12 @@
 {
   "name": "ai-for-ps-uxp-plugin",
-  "version": "1.0.0",
+  "version": "0.9.0",
   "description": "AI for PS - Photoshop UXP plugin (PRD V3.0 / UI 3.0)",
   "main": "index.html",
   "scripts": {
-    "check": "node --check js/main.js && node --check js/ui/pages.js && node --check js/core/jobs.js && node --check js/ps/bridge.js && echo OK"
+    "validate": "node scripts/validate.js",
+    "lint": "node --check js/i18n.js && node --check js/utils.js && node --check js/state.js && node --check js/core/settings.js && node --check js/core/helper-client.js && node --check js/core/comfyui.js && node --check js/core/providers.js && node --check js/core/workflows.js && node --check js/core/jobs.js && node --check js/core/assets.js && node --check js/ps/context.js && node --check js/ps/bridge.js && node --check js/ui/compare.js && node --check js/ui/modals.js && node --check js/ui/router.js && node --check js/ui/page-generate.js && node --check js/ui/page-generate-actions.js && node --check js/ui/page-edit.js && node --check js/ui/page-workflows.js && node --check js/ui/page-tasks.js && node --check js/ui/page-history.js && node --check js/ui/page-assets.js && node --check js/ui/page-settings.js && node --check js/core/agent.js && node --check js/main.js && node --check src/entry.js && node --check helper/index.js && echo LINT-OK",
+    "test": "node ../test/e2e-core.mjs 18188"
   },
   "keywords": ["photoshop", "uxp", "ai", "comfyui"],
   "license": "UNLICENSED",

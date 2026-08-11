@@ -32,6 +32,11 @@
       .catch(function () { return { online: false }; });
   }
 
+  /* pair: 首次配对 — Helper 生成 token, UXP 存 SecureStorage/local settings (不存 API Key) */
+  function pair() {
+    return request("POST", "/v1/pair", { client: "uxp", version: "0.9.0" });
+  }
+
   function connectEvents() {
     try {
       if (typeof WebSocket === "undefined") return;
@@ -70,5 +75,5 @@
     return request("GET", "/v1/gpu").catch(function () { return null; });
   };
 
-  A4P.helper = { health: health, connectEvents: connectEvents, request: request, jobs: jobs, gpu: gpu };
+  A4P.helper = { health: health, pair: pair, connectEvents: connectEvents, request: request, jobs: jobs, gpu: gpu };
 })();
