@@ -17,7 +17,16 @@
       const active = layers[0] || null;
       const sel = doc.selection;
       let selectionBounds = null;
-      try { if (sel && sel.bounds && !sel.isCancelled) { selectionBounds = { left: sel.bounds.left.as("px"), top: sel.bounds.top.as("px"), right: sel.bounds.right.as("px"), bottom: sel.bounds.bottom.as("px") }; } } catch (e) { /* best-effort */ }
+      /* 官方 UXP: Selection.bounds 为 {top,left,bottom,right} 数字像素 (PS 25.0+), 非 UnitValue */
+      try {
+        if (sel && sel.bounds && !sel.isCancelled) {
+          const b = sel.bounds;
+          selectionBounds = {
+            left: Math.round(b.left), top: Math.round(b.top),
+            right: Math.round(b.right), bottom: Math.round(b.bottom)
+          };
+        }
+      } catch (e) { /* best-effort */ }
       return {
         documentId: doc.id,
         name: doc.name,
