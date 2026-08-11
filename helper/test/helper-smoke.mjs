@@ -176,6 +176,27 @@ async function main() {
   })();
   check("hash dedup", dedup.deduped === true);
 
+  /* 8.8 dependency center (真实 ComfyUI @8188 或离线空态) */
+  const deps = await (await fetch(`${BASE}/v1/dependencies`, { headers: auth })).json();
+  check("deps.comfyui.online bool", typeof deps.comfyui.online === "boolean");
+  check("deps.customNodes.count", typeof deps.customNodes.count === "number" && deps.customNodes.count >= 0, "count=" + deps.customNodes.count);
+  check("deps.models shape", Array.isArray(deps.models.checkpoints));
+  check("deps.gpu.vramTotalMb", typeof deps.gpu.vramTotalMb === "number");
+  if (deps.comfyui.online) console.log("  info ComfyUI:", deps.comfyui.version, "nodes:", deps.customNodes.count, "ckpts:", deps.models.checkpoints.length);
+
+  /* 8.9 project state + lineage (规则二十二/二十四) */
+  const st = await fetch(`${BASE}/v1/projects/${proj1.project.id}/state`, {
+    method: "POST", headers: { ...auth, "content-type": "application/json" },
+    body: JSON.stringify({ lastWorkflowId: "wf-test-1", defaultWriteback: "pixelLayer" })
+  });
+  const stBody = await st.json();
+  check("project state saved", stBody.project && stBody.project.last_workflow_id === "wf-test-1" && stBody.project.default_writeback === "pixelLayer");
+  const projJobs = await (await fetch(`${BASE}/v1/projects/${proj1.project.id}/jobs`, { headers: auth })).json();
+  check("project jobs filtered (no mix)", Array.isArray(projJobs.jobs) && projJobs.jobs.length === 0, "n=" + projJobs.jobs.length);
+  const lin = await (await fetch(`${BASE}/v1/jobs/${job.id}/lineage`, { headers: auth })).json();
+  check("lineage source doc", lin.lineage && lin.lineage.source && lin.lineage.source.documentId === "doc-123");
+  check("lineage provider", lin.lineage && lin.lineage.provider && lin.lineage.provider.id === "local-comfy");
+
   /* 9. 单实例锁: 再启动一个 -> 端口冲突退出 */
   const proc2 = spawn(process.execPath, [path.join(HELPER_DIR, "dist", "index.js")], {
     env: { ...process.env, A4P_PORT: String(PORT), A4P_HELPER_DIR: DATA + "-2" },

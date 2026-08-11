@@ -75,13 +75,14 @@ export class JobEngine {
     if (!view) throw new Error("PROVIDER_NOT_FOUND:" + providerId);
     if (!view.enabled && !view.configured) throw new Error("PROVIDER_NOT_CONFIGURED:" + providerId);
     const now = Date.now();
-    this.store.raw.prepare(`INSERT INTO jobs (id, status, provider_id, provider_type, workflow_id, model_id, inputs_json, parameters_json, snapshot_json, project_id, source_document_id, source_document_name, source_document_path, source_layer_ids_json, selection_bounds_json, canvas_width, canvas_height, color_mode, bit_depth, created_at, updated_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+    this.store.raw.prepare(`INSERT INTO jobs (id, status, provider_id, provider_type, workflow_id, model_id, inputs_json, parameters_json, snapshot_json, snapshot_id, project_id, source_document_id, source_document_name, source_document_path, source_layer_ids_json, selection_bounds_json, canvas_width, canvas_height, color_mode, bit_depth, created_at, updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
       id, "created", providerId, view.type,
       body.workflowId ? String(body.workflowId) : null,
       body.modelId ? String(body.modelId) : null,
       JSON.stringify(body.inputs || {}), JSON.stringify(body.parameters || {}),
       JSON.stringify(body.snapshot || {}),
+      (body.snapshot as { id?: unknown } | undefined)?.id ? String((body.snapshot as { id: unknown }).id) : null,
       body.projectId ? String(body.projectId) : null,
       body.sourceDocumentId ? String(body.sourceDocumentId) : null,
       body.sourceDocumentName ? String(body.sourceDocumentName) : null,

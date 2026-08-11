@@ -451,7 +451,34 @@ export function buildServer(): FastifyInstance {
     return { asset: row };
   });
 
-  /* ---- projects ---- */
+  /* ---- dependency center (规则二十一: 扫描 ComfyUI/custom nodes/模型/GPU) ---- */
+  app.get("/v1/dependencies", async () => {
+    const comfy = (store.raw.prepare("SELECT base_url FROM providers WHERE id='local-comfy'").get() as { base_url: string | null } | undefined)?.base_url || "http://127.0.0.1:8188";
+    const out: Record<string, unknown> = { comfyui: { online: false }, customNodes: { count: 0, list: [] }, models: { checkpoints: [], loras: [], vae: [] }, gpu: await readGpuInfo(), runtime: { node: process.version, platform: process.platform } };
+    try {
+      const stats = await (await fetch(comfy + "/system_stats")).json() as { system?: { comfyui_version?: string } };
+      out.comfyui = { online: true, version: stats.system?.comfyui_version || null };
+      const info = await (await fetch(comfy + "/object_info")).json() as Record<string, { input?: { required?: Record<string, unknown> } }>;
+      const nodeTypes = Object.keys(info).sort();
+      out.customNodes = { count: nodeTypes.length, list: nodeTypes };
+      const extract = (loader: string): string[] => {
+        const req = info[loader]?.input?.required || {};
+        for (const k of Object.keys(req)) {
+          const v = req[k];
+          if (Array.isArray(v) && Array.isArray(v[0])) return (v[0] as unknown[]).map(String);
+        }
+        return [];
+      };
+      out.models = {
+        checkpoints: extract("CheckpointLoaderSimple").concat(extract("CheckpointLoader")),
+        loras: extract("LoraLoader"),
+        vae: extract("VAELoader")
+      };
+    } catch (e) { /* ComfyUI 离线: 如实上报 */ }
+    return out;
+  });
+
+  /* ---- projects (规则二十二: PSD Project Context) ---- */
   app.get("/v1/projects", async () => {
     const rows = store.raw.prepare("SELECT * FROM projects ORDER BY updated_at DESC").all();
     return { projects: rows };
@@ -461,6 +488,74 @@ export function buildServer(): FastifyInstance {
     const row = store.raw.prepare("SELECT * FROM projects WHERE id=?").get(id);
     if (!row) return reply.code(404).send({ error: { code: "PROJECT_NOT_FOUND", message: "项目不存在: " + id } });
     return { project: row };
+  });
+
+  /* 项目状态: 恢复上次 Workflow/Provider/参数 (规则二十二: 不同 PSD 不混历史) */
+  app.post("/v1/projects/:id/state", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const row = store.raw.prepare("SELECT id FROM projects WHERE id=?").get(id);
+    if (!row) return reply.code(404).send({ error: { code: "PROJECT_NOT_FOUND", message: "项目不存在: " + id } });
+    const body = (req.body || {}) as Record<string, unknown>;
+    const COL: Record<string, string> = { lastWorkflowId: "last_workflow_id", lastPresetId: "last_preset_id", lastPromptId: "last_prompt_id", defaultWriteback: "default_writeback" };
+    const fields: string[] = [];
+    const params: Array<string | number> = [];
+    for (const k of Object.keys(COL)) {
+      if (body[k] !== undefined) {
+        fields.push(COL[k] + "=?");
+        params.push(String(body[k]));
+      }
+    }
+    if (fields.length) {
+      fields.push("updated_at=?");
+      params.push(Date.now(), id);
+      store.raw.prepare(`UPDATE projects SET ${fields.join(", ")} WHERE id=?`).run(...params);
+    }
+    const project = store.raw.prepare("SELECT * FROM projects WHERE id=?").get(id);
+    return { project };
+  });
+
+  /* 项目历史: 该 PSD 的任务 (不与其他文档混) */
+  app.get("/v1/projects/:id/jobs", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const row = store.raw.prepare("SELECT id FROM projects WHERE id=?").get(id);
+    if (!row) return reply.code(404).send({ error: { code: "PROJECT_NOT_FOUND", message: "项目不存在: " + id } });
+    const jobs = store.raw.prepare("SELECT id, status, provider_id, workflow_id, model_id, result_assets_json, created_at, updated_at FROM jobs WHERE project_id=? ORDER BY created_at DESC LIMIT 100").all(id);
+    return { projectId: id, jobs };
+  });
+
+  /* 生成血缘 (规则二十四: Layer -> Snapshot -> Workflow -> Job -> Asset -> Layer) */
+  app.get("/v1/jobs/:id/lineage", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const job = store.raw.prepare("SELECT * FROM jobs WHERE id=?").get(id) as Record<string, unknown> | undefined;
+    if (!job) return reply.code(404).send({ error: { code: "JOB_NOT_FOUND", message: "任务不存在: " + id } });
+    const outputRows = store.raw.prepare("SELECT o.id, o.asset_id, o.label, o.seed, o.favorite, a.hash, a.width, a.height, a.storage_path FROM job_outputs o LEFT JOIN assets a ON a.id = o.asset_id WHERE o.job_id=?").all(id);
+    let workflow = null;
+    if (job.workflow_id) {
+      workflow = store.raw.prepare("SELECT id, name, version, provider FROM workflows WHERE id=?").get(String(job.workflow_id));
+    }
+    let snapshot = null;
+    if (job.snapshot_id) {
+      snapshot = store.raw.prepare("SELECT * FROM snapshots WHERE id=?").get(String(job.snapshot_id));
+    }
+    return {
+      lineage: {
+        source: {
+          documentId: job.source_document_id,
+          documentName: job.source_document_name,
+          documentPath: job.source_document_path,
+          layerIds: (() => { try { return JSON.parse(String(job.source_layer_ids_json || "[]")); } catch (e) { return []; } })(),
+          selectionBounds: (() => { try { return job.selection_bounds_json ? JSON.parse(String(job.selection_bounds_json)) : null; } catch (e) { return null; } })()
+        },
+        snapshot,
+        workflow,
+        provider: { id: job.provider_id, type: job.provider_type },
+        modelId: job.model_id,
+        remoteJobId: job.remote_job_id,
+        outputs: outputRows,
+        status: job.status,
+        createdAt: job.created_at
+      }
+    };
   });
 
   /* ---- session ---- */
