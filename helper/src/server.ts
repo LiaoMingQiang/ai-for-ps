@@ -13,6 +13,8 @@ import * as pairing from "./pairing.js";
 import { readGpuInfo } from "./gpu.js";
 import { listProviders, seedProviders } from "./providers/registry.js";
 import { CredentialService } from "./credentials.js";
+import { scanWorkflow } from "./workflow/scanner.js";
+import { importWorkflow, saveWorkflowVersion, checkDependencies } from "./workflow/importer.js";
 
 const PUBLIC_PATHS = new Set(["/v1/health", "/v1/pair", "/v1/system"]);
 
@@ -127,7 +129,7 @@ export function buildServer(): FastifyInstance {
     return { ok: true, providerId: id, message: "配置存在" };
   });
 
-  /* ---- workflows (PHASE 8 完整实现; 当前骨架) ---- */
+  /* ---- workflows (PHASE 8: 导入/扫描/Studio/版本/依赖) ---- */
   app.get("/v1/workflows", async () => {
     const rows = store.raw.prepare("SELECT id, name, version, category, provider, created_at, updated_at FROM workflows ORDER BY updated_at DESC").all();
     return { workflows: rows };
@@ -136,7 +138,78 @@ export function buildServer(): FastifyInstance {
     const { id } = req.params as { id: string };
     const row = store.raw.prepare("SELECT * FROM workflows WHERE id=?").get(id);
     if (!row) return reply.code(404).send({ error: { code: "WORKFLOW_NOT_FOUND", message: "工作流不存在: " + id } });
-    return { workflow: row };
+    const bindings = store.raw.prepare("SELECT field_key, node_id, input_key, field_type, label, sort_order, group_name, default_value, display_condition FROM workflow_bindings WHERE workflow_id=? ORDER BY sort_order").all(id);
+    const versions = store.raw.prepare("SELECT id, version, workflow_json_hash, bindings_hash, lockfile_hash, changelog, author, created_at FROM workflow_versions WHERE workflow_id=? ORDER BY created_at DESC").all(id);
+    return { workflow: row, bindings, versions };
+  });
+
+  app.post("/v1/workflows/import", async (req, reply) => {
+    const body = (req.body || {}) as Record<string, unknown>;
+    try {
+      const result = importWorkflow(store, {
+        name: String(body.name || ""),
+        json: body.json,
+        category: body.category ? String(body.category) : undefined,
+        description: body.description ? String(body.description) : undefined,
+        provider: body.provider ? String(body.provider) : undefined,
+        author: body.author ? String(body.author) : undefined
+      });
+      broadcast({ type: "workflow:imported", workflowId: result.workflowId });
+      return reply.code(201).send({
+        workflowId: result.workflowId,
+        version: result.version,
+        fields: result.scan.fields.map((f) => ({ nodeId: f.nodeId, nodeType: f.nodeType, inputKey: f.inputKey, fieldType: f.fieldType, semantic: f.semantic || null, advanced: f.advanced })),
+        bindingsCount: result.bindingsCount,
+        dependenciesCount: result.dependenciesCount,
+        outputNodes: result.scan.outputNodes
+      });
+    } catch (e) {
+      const msg = String((e as Error).message);
+      const code = /^([A-Z_]+):/.exec(msg)?.[1] || "WORKFLOW_IMPORT_FAILED";
+      return reply.code(400).send({ error: { code, message: msg.replace(/^[A-Z_]+:\s*/, "") } });
+    }
+  });
+
+  app.post("/v1/workflows/:id/validate", async (req, reply) => {
+    const body = (req.body || {}) as Record<string, unknown>;
+    try {
+      const scan = scanWorkflow(body.json);
+      return { ok: true, fields: scan.fields.length, outputNodes: scan.outputNodes.length, dependencies: scan.dependencies };
+    } catch (e) {
+      return reply.code(400).send({ ok: false, error: { code: "WORKFLOW_INVALID", message: String((e as Error).message) } });
+    }
+  });
+
+  app.post("/v1/workflows/:id/bindings", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const body = (req.body || {}) as Record<string, unknown>;
+    try {
+      const r = saveWorkflowVersion(store, id, {
+        json: body.json !== undefined ? body.json : undefined,
+        bindings: Array.isArray(body.bindings) ? (body.bindings as Array<Record<string, unknown>>).map((b) => ({
+          fieldKey: String(b.fieldKey), nodeId: String(b.nodeId), inputKey: String(b.inputKey),
+          fieldType: String(b.fieldType || "STRING"), label: String(b.label || b.fieldKey),
+          sortOrder: Number(b.sortOrder || 0), groupName: String(b.groupName || "其他"), defaultValue: b.defaultValue
+        })) : undefined,
+        changelog: body.changelog ? String(body.changelog) : undefined,
+        author: body.author ? String(body.author) : undefined
+      });
+      broadcast({ type: "workflow:updated", workflowId: id, version: r.version });
+      return { workflowId: id, version: r.version };
+    } catch (e) {
+      const msg = String((e as Error).message);
+      const code = /^([A-Z_]+):/.exec(msg)?.[1] || "WORKFLOW_SAVE_FAILED";
+      return reply.code(400).send({ error: { code, message: msg.replace(/^[A-Z_]+:\s*/, "") } });
+    }
+  });
+
+  app.get("/v1/workflows/:id/dependencies", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const wf = store.raw.prepare("SELECT * FROM workflows WHERE id=?").get(id) as Record<string, unknown> | undefined;
+    if (!wf) return reply.code(404).send({ error: { code: "WORKFLOW_NOT_FOUND", message: "工作流不存在: " + id } });
+    const comfy = (store.raw.prepare("SELECT base_url FROM providers WHERE id='local-comfy'").get() as { base_url: string | null } | undefined)?.base_url || "http://127.0.0.1:8188";
+    const deps = await checkDependencies(store, id, comfy);
+    return { workflowId: id, dependencies: deps };
   });
 
   /* ---- jobs (PHASE 9 完整引擎; 当前: 表 CRUD + 状态机) ---- */
