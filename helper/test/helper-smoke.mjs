@@ -108,7 +108,7 @@ async function main() {
   check("job get + events", Array.isArray(jobGet.events) && jobGet.events.length >= 1);
 
   const cancel = await (await fetch(`${BASE}/v1/jobs/${job.id}/cancel`, { method: "POST", headers: auth })).json();
-  check("job cancel->cancel_requested", cancel.job && cancel.job.status === "cancel_requested");
+  check("job cancel -> cancel_requested/cancelled", cancel.job && ["cancel_requested", "cancelled"].includes(cancel.job.status), cancel.job && cancel.job.status);
 
   /* 7. gpu (真实 nvidia-smi 或空态) */
   const gpu = await (await fetch(`${BASE}/v1/gpu`, { headers: auth })).json();

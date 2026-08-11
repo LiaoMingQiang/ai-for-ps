@@ -13,6 +13,8 @@ import * as pairing from "./pairing.js";
 import { readGpuInfo } from "./gpu.js";
 import { listProviders, seedProviders } from "./providers/registry.js";
 import { CredentialService } from "./credentials.js";
+import { ProviderManager } from "./providers/manager.js";
+import { JobEngine } from "./job-engine.js";
 import { scanWorkflow } from "./workflow/scanner.js";
 import { importWorkflow, saveWorkflowVersion, checkDependencies } from "./workflow/importer.js";
 
@@ -33,7 +35,6 @@ export function buildServer(): FastifyInstance {
 
   const app = Fastify({ logger: { level: process.env.A4P_LOG_LEVEL || "info" } });
   app.register(multipart, { limits: { fileSize: 200 * 1024 * 1024, files: 12 } });
-  const credentials = new CredentialService(store, cfg);
   const wss = new WebSocketServer({ noServer: true });
   const clients = new Set<WebSocket>();
   const broadcast = (msg: unknown) => {
@@ -41,9 +42,26 @@ export function buildServer(): FastifyInstance {
     for (const c of clients) { try { if (c.readyState === 1) c.send(s); } catch (e) { /* noop */ } }
   };
   const ctx: HelperContext = { store, cfg, wsClients: clients, broadcast };
+  const credentials = new CredentialService(store, cfg);
+  const manager = new ProviderManager(store, credentials);
+  /* 测试/自定义 ComfyUI 端点: A4P_COMFY_URL 覆盖 local-comfy 的 base_url */
+  if (process.env.A4P_COMFY_URL) {
+    store.raw.prepare("UPDATE providers SET base_url=?, enabled=1 WHERE id='local-comfy'").run(process.env.A4P_COMFY_URL);
+  }
+  const engine = new JobEngine(store, manager, cfg, ctx);
+  /* 规则十五: 启动即恢复所有 non-terminal jobs (先查远端, 不重新提交) */
+  setTimeout(() => {
+    engine.recoverAll().then((n) => {
+      if (n) app.log.info(`[recover] ${n} job(s) recovered`);
+    }).catch((e) => app.log.error("[recover] failed: " + String(e)));
+  }, 500);
 
   /* ---- 认证: 除公开端点外都需要 Bearer token ---- */
   app.addHook("onRequest", async (req, reply) => {
+    /* 空 body 的 JSON POST (cancel/retry 等): 清除 content-type 避免 Fastify 报空 body 错误 */
+    if (req.headers["content-length"] === "0" && /json/i.test(req.headers["content-type"] || "")) {
+      delete req.headers["content-type"];
+    }
     const url = (req.url || "").split("?")[0];
     if (PUBLIC_PATHS.has(url)) return;
     if (!pairing.verifyToken(store, req.headers.authorization)) {
@@ -212,36 +230,19 @@ export function buildServer(): FastifyInstance {
     return { workflowId: id, dependencies: deps };
   });
 
-  /* ---- jobs (PHASE 9 完整引擎; 当前: 表 CRUD + 状态机) ---- */
+  /* ---- jobs (PHASE 9: JobEngine 状态机 + 恢复 + 安全取消) ---- */
   app.post("/v1/jobs", async (req, reply) => {
     const body = (req.body || {}) as Record<string, unknown>;
-    const id = randomUUID();
-    const providerId = String(body.providerId || "local-comfy");
-    const now = Date.now();
-    store.raw.prepare(`INSERT INTO jobs (id, status, provider_id, provider_type, workflow_id, model_id, inputs_json, parameters_json, snapshot_json, project_id, source_document_id, source_document_name, source_document_path, source_layer_ids_json, selection_bounds_json, canvas_width, canvas_height, color_mode, bit_depth, created_at, updated_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
-      id, "created", providerId,
-      (listProviders(store).find((p) => p.id === providerId)?.type) || "comfyui",
-      body.workflowId ? String(body.workflowId) : null,
-      body.modelId ? String(body.modelId) : null,
-      JSON.stringify(body.inputs || {}), JSON.stringify(body.parameters || {}),
-      JSON.stringify(body.snapshot || {}),
-      body.projectId ? String(body.projectId) : null,
-      body.sourceDocumentId ? String(body.sourceDocumentId) : null,
-      body.sourceDocumentName ? String(body.sourceDocumentName) : null,
-      body.sourceDocumentPath ? String(body.sourceDocumentPath) : null,
-      JSON.stringify(body.sourceLayerIds || []),
-      body.selectionBounds ? JSON.stringify(body.selectionBounds) : null,
-      body.canvasWidth ? Number(body.canvasWidth) : null,
-      body.canvasHeight ? Number(body.canvasHeight) : null,
-      body.colorMode ? String(body.colorMode) : null,
-      body.bitDepth ? Number(body.bitDepth) : null,
-      now, now
-    );
-    store.raw.prepare("INSERT INTO job_events (job_id, from_status, to_status, detail, created_at) VALUES (?,?,?,?,?)").run(id, null, "created", "job created", now);
-    const job = store.raw.prepare("SELECT * FROM jobs WHERE id=?").get(id);
-    broadcast({ type: "job:update", job });
-    return reply.code(201).send({ job });
+    try {
+      const job = await engine.create(body);
+      return reply.code(201).send({ job });
+    } catch (e) {
+      const err = e as Error & { code?: string };
+      const code = err.code || (err.message && /^[A-Z_]+:/.test(err.message) ? err.message.split(":")[0] : "JOB_CREATE_FAILED");
+      const msg = String(err.message || e).replace(/^[A-Z_]+:\s*/, "");
+      const status = code === "PROVIDER_NOT_CONFIGURED" ? 409 : code === "PROVIDER_NOT_FOUND" ? 404 : 400;
+      return reply.code(status).send({ error: { code, message: msg } });
+    }
   });
 
   app.get("/v1/jobs", async (req) => {
@@ -264,38 +265,41 @@ export function buildServer(): FastifyInstance {
 
   app.post("/v1/jobs/:id/cancel", async (req, reply) => {
     const { id } = req.params as { id: string };
-    const job = store.raw.prepare("SELECT * FROM jobs WHERE id=?").get(id) as Record<string, unknown> | undefined;
-    if (!job) return reply.code(404).send({ error: { code: "JOB_NOT_FOUND", message: "任务不存在: " + id } });
-    const status = String(job.status);
-    if (["completed", "failed", "cancelled", "retryable_writeback_failure"].includes(status)) {
-      return reply.code(409).send({ error: { code: "JOB_NOT_CANCELLABLE", message: "任务已处于终态: " + status } });
+    try {
+      const job = await engine.cancel(id);
+      return { job };
+    } catch (e) {
+      const msg = String((e as Error).message);
+      if (/^JOB_NOT_FOUND/.test(msg)) return reply.code(404).send({ error: { code: "JOB_NOT_FOUND", message: "任务不存在: " + id } });
+      if (/^JOB_NOT_CANCELLABLE/.test(msg)) return reply.code(409).send({ error: { code: "JOB_NOT_CANCELLABLE", message: msg.replace(/^JOB_NOT_CANCELLABLE:\s*/, "") } });
+      return reply.code(400).send({ error: { code: "CANCEL_FAILED", message: msg } });
     }
-    store.raw.prepare("UPDATE jobs SET status='cancel_requested', updated_at=? WHERE id=?").run(Date.now(), id);
-    store.raw.prepare("INSERT INTO job_events (job_id, from_status, to_status, detail, created_at) VALUES (?,?,?,?,?)").run(id, status, "cancel_requested", "cancel requested", Date.now());
-    const j2 = store.raw.prepare("SELECT * FROM jobs WHERE id=?").get(id);
-    broadcast({ type: "job:update", job: j2 });
-    return { job: j2 };
   });
 
   app.post("/v1/jobs/:id/retry", async (req, reply) => {
     const { id } = req.params as { id: string };
-    const job = store.raw.prepare("SELECT * FROM jobs WHERE id=?").get(id) as Record<string, unknown> | undefined;
-    if (!job) return reply.code(404).send({ error: { code: "JOB_NOT_FOUND", message: "任务不存在: " + id } });
-    store.raw.prepare("UPDATE jobs SET status='created', remote_job_id=NULL, error_json=NULL, updated_at=? WHERE id=?").run(Date.now(), id);
-    store.raw.prepare("INSERT INTO job_events (job_id, from_status, to_status, detail, created_at) VALUES (?,?,?,?,?)").run(id, String(job.status), "created", "retry requested", Date.now());
-    const j2 = store.raw.prepare("SELECT * FROM jobs WHERE id=?").get(id);
-    broadcast({ type: "job:update", job: j2 });
-    return { job: j2 };
+    try {
+      const job = await engine.retry(id);
+      return { job };
+    } catch (e) {
+      const msg = String((e as Error).message);
+      if (/^JOB_NOT_FOUND/.test(msg)) return reply.code(404).send({ error: { code: "JOB_NOT_FOUND", message: "任务不存在: " + id } });
+      if (/^JOB_NOT_RETRYABLE/.test(msg)) return reply.code(409).send({ error: { code: "JOB_NOT_RETRYABLE", message: msg.replace(/^JOB_NOT_RETRYABLE:\s*/, "") } });
+      return reply.code(400).send({ error: { code: "RETRY_FAILED", message: msg } });
+    }
   });
 
   app.post("/v1/jobs/:id/writeback-ready", async (req, reply) => {
     const { id } = req.params as { id: string };
-    const job = store.raw.prepare("SELECT * FROM jobs WHERE id=?").get(id) as Record<string, unknown> | undefined;
-    if (!job) return reply.code(404).send({ error: { code: "JOB_NOT_FOUND", message: "任务不存在: " + id } });
-    store.raw.prepare("UPDATE jobs SET status='writeback_pending', updated_at=? WHERE id=?").run(Date.now(), id);
-    const j2 = store.raw.prepare("SELECT * FROM jobs WHERE id=?").get(id);
-    broadcast({ type: "job:update", job: j2 });
-    return { job: j2 };
+    const body = (req.body || {}) as { success?: boolean; layerId?: string | null; layerName?: string | null; error?: string };
+    try {
+      const job = await engine.markWriteback(id, { success: body.success !== false, layerId: body.layerId, layerName: body.layerName, error: body.error });
+      return { job };
+    } catch (e) {
+      const msg = String((e as Error).message);
+      if (/^JOB_NOT_FOUND/.test(msg)) return reply.code(404).send({ error: { code: "JOB_NOT_FOUND", message: "任务不存在: " + id } });
+      return reply.code(409).send({ error: { code: "JOB_NOT_WRITEBACKABLE", message: msg.replace(/^JOB_NOT_WRITEBACKABLE:\s*/, "") } });
+    }
   });
 
   /* ---- credentials (规则六: API Key 只存 Helper, DPAPI/Keychain) ---- */
