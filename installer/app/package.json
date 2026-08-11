@@ -1,0 +1,12 @@
+{
+  "name": "ai-for-ps-uxp-plugin",
+  "version": "1.0.0",
+  "description": "AI for PS - Photoshop UXP plugin (PRD V3.0 / UI 3.0)",
+  "main": "index.html",
+  "scripts": {
+    "check": "node --check js/main.js && node --check js/ui/pages.js && node --check js/core/jobs.js && node --check js/ps/bridge.js && echo OK"
+  },
+  "keywords": ["photoshop", "uxp", "ai", "comfyui"],
+  "license": "UNLICENSED",
+  "private": true
+}
