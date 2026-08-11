@@ -206,6 +206,39 @@ async function main() {
   check("usage localGpuMs number", typeof usage.localGpuMs === "number");
   check("usage cloudCost null (不虚构)", usage.cloudCost === null);
 
+  /* 8.11 agent (规则三十三/三十四: plan -> 批准 -> 执行 -> 审计) */
+  const planRes = await fetch(`${BASE}/v1/agent/plan`, {
+    method: "POST", headers: { ...auth, "content-type": "application/json" },
+    body: JSON.stringify({ intent: "给当前产品图层抠图生成蒙版", providerId: "local-comfy" })
+  });
+  const planBody = await planRes.json();
+  check("agent plan 200", planRes.status === 200, "status=" + planRes.status);
+  check("plan steps >= 3", Array.isArray(planBody.plan && planBody.plan.steps) && planBody.plan.steps.length >= 3, "n=" + (planBody.plan && planBody.plan.steps.length));
+  check("plan step has provider/estCost/psdModification", planBody.plan.steps.every((s) => "provider" in s && "estCost" in s && "psdModification" in s));
+  check("plan requiresPhotoshop flag", typeof planBody.plan.requiresPhotoshop === "boolean");
+  const auditId = planBody.auditId;
+  check("audit id returned", typeof auditId === "string");
+
+  const denied = await fetch(`${BASE}/v1/agent/execute`, {
+    method: "POST", headers: { ...auth, "content-type": "application/json" },
+    body: JSON.stringify({ auditId, approved: false })
+  });
+  check("execute without approval -> 403", denied.status === 403, "status=" + denied.status);
+  const auditDenied = await (await fetch(`${BASE}/v1/agent/audit/${auditId}`, { headers: auth })).json();
+  check("audit status rejected", auditDenied.audit && auditDenied.audit.status === "rejected");
+
+  const exe = await fetch(`${BASE}/v1/agent/execute`, {
+    method: "POST", headers: { ...auth, "content-type": "application/json" },
+    body: JSON.stringify({ auditId, approved: true })
+  });
+  const exeBody = await exe.json();
+  check("execute approved 200", exe.status === 200, "status=" + exe.status);
+  check("results recorded per step", Array.isArray(exeBody.results) && exeBody.results.length >= 3, "n=" + (exeBody.results || []).length);
+  const psStep = (exeBody.results || []).find((r) => r.tool === "captureActiveLayer");
+  check("PS tool delegated to UXP (not faked)", psStep && psStep.status === "delegated" && psStep.delegateToUxp, JSON.stringify(psStep).slice(0, 120));
+  const auditDone = await (await fetch(`${BASE}/v1/agent/audit/${auditId}`, { headers: auth })).json();
+  check("audit completed + toolsExecuted logged", auditDone.audit && auditDone.audit.status === "completed" && JSON.parse(auditDone.audit.tools_executed_json).length >= 3);
+
   /* 9. 单实例锁: 再启动一个 -> 端口冲突退出 */
   const proc2 = spawn(process.execPath, [path.join(HELPER_DIR, "dist", "index.js")], {
     env: { ...process.env, A4P_PORT: String(PORT), A4P_HELPER_DIR: DATA + "-2" },

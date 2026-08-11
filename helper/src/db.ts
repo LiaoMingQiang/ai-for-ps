@@ -5,7 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { HelperConfig } from "./config.js";
 
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 const MIGRATIONS: Array<{ version: number; sql: string }> = [
   {
@@ -242,6 +242,24 @@ const MIGRATIONS: Array<{ version: number; sql: string }> = [
       images_count INTEGER,
       created_at INTEGER NOT NULL
     );
+    `
+  },
+  {
+    version: 2,
+    sql: `
+    CREATE TABLE IF NOT EXISTS agent_audit (
+      id TEXT PRIMARY KEY,
+      status TEXT NOT NULL,                -- requested | planned | approved | executing | completed | rejected | failed
+      agent_request_json TEXT NOT NULL DEFAULT '{}',
+      agent_plan_json TEXT NOT NULL DEFAULT '{}',
+      approved_plan_json TEXT NOT NULL DEFAULT '{}',
+      tools_executed_json TEXT NOT NULL DEFAULT '[]',
+      tool_results_json TEXT NOT NULL DEFAULT '[]',
+      writeback_result_json TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+    UPDATE settings SET value='2' WHERE key='schema_version';
     `
   }
 ];

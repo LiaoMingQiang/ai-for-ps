@@ -17,6 +17,7 @@ import { ProviderManager } from "./providers/manager.js";
 import { JobEngine } from "./job-engine.js";
 import { scanWorkflow } from "./workflow/scanner.js";
 import { importWorkflow, saveWorkflowVersion, checkDependencies } from "./workflow/importer.js";
+import { planRequest, executeTool, AgentAuditor, TOOL_REGISTRY, type AgentPlan } from "./agent/agent.js";
 
 const PUBLIC_PATHS = new Set(["/v1/health", "/v1/pair", "/v1/system"]);
 
@@ -618,6 +619,64 @@ export function buildServer(): FastifyInstance {
       cloudCost: null,      /* 云 Provider 实际费用由 Provider 账单回填 (规则三十二: 不虚构) */
       localGpuMs: rows.filter((r) => r.provider_type === "comfyui").reduce((a, r) => a + (r.gpu_ms || 0), 0)
     };
+  });
+
+  /* ---- agent (规则三十三/三十四: 受控工具 + Plan + 批准 + 审计) ---- */
+  const auditor = new AgentAuditor(store);
+  app.get("/v1/agent/tools", async () => ({ tools: TOOL_REGISTRY }));
+
+  app.post("/v1/agent/plan", async (req, reply) => {
+    const body = (req.body || {}) as Record<string, unknown>;
+    if (!body.intent || !String(body.intent).trim()) {
+      return reply.code(400).send({ error: { code: "AGENT_INTENT_MISSING", message: "缺少意图描述" } });
+    }
+    const plan = planRequest({
+      intent: String(body.intent),
+      providerId: body.providerId ? String(body.providerId) : undefined,
+      modelId: body.modelId ? String(body.modelId) : undefined,
+      workflowId: body.workflowId ? String(body.workflowId) : undefined,
+      prompt: body.prompt ? String(body.prompt) : undefined
+    });
+    const auditId = auditor.create("planned", body, plan);
+    return { planId: plan.planId, auditId, plan };
+  });
+
+  app.post("/v1/agent/execute", async (req, reply) => {
+    const body = (req.body || {}) as Record<string, unknown>;
+    const auditId = body.auditId ? String(body.auditId) : null;
+    if (!auditId) return reply.code(400).send({ error: { code: "AGENT_AUDIT_MISSING", message: "缺少 auditId（必须先 plan）" } });
+    if (body.approved !== true) {
+      if (auditId) auditor.update(auditId, { status: "rejected" });
+      return reply.code(403).send({ error: { code: "AGENT_NOT_APPROVED", message: "计划未获批准，拒绝执行" } });
+    }
+    const audit = store.raw.prepare("SELECT * FROM agent_audit WHERE id=?").get(auditId) as Record<string, unknown> | undefined;
+    if (!audit) return reply.code(404).send({ error: { code: "AGENT_AUDIT_NOT_FOUND", message: "审计记录不存在" } });
+    let plan: AgentPlan | null = null;
+    try { plan = JSON.parse(String(audit.agent_plan_json || "{}")) as AgentPlan; } catch (e) { /* noop */ }
+    if (!plan || !plan.steps?.length) return reply.code(409).send({ error: { code: "AGENT_PLAN_EMPTY", message: "计划为空" } });
+    auditor.update(auditId, { status: "executing", approvedPlan: plan });
+    const results = [];
+    for (const step of plan.steps) {
+      const def = TOOL_REGISTRY.find((t) => t.id === step.tool);
+      if (!def) continue;
+      try {
+        const r = await executeTool(def, step.args, { store, engine });
+        results.push({ tool: step.tool, ...r });
+        auditor.update(auditId, { toolExecuted: { tool: step.tool, args: step.args, result: r } });
+      } catch (e) {
+        results.push({ tool: step.tool, status: "error", result: { error: String((e as Error).message) } });
+        auditor.update(auditId, { toolExecuted: { tool: step.tool, args: step.args, result: { error: String((e as Error).message) } } });
+      }
+    }
+    auditor.update(auditId, { status: "completed" });
+    return { auditId, results };
+  });
+
+  app.get("/v1/agent/audit/:id", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const row = store.raw.prepare("SELECT * FROM agent_audit WHERE id=?").get(id);
+    if (!row) return reply.code(404).send({ error: { code: "AGENT_AUDIT_NOT_FOUND", message: "审计记录不存在" } });
+    return { audit: row };
   });
 
   /* ---- session ---- */
