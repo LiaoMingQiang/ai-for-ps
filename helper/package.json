@@ -12,7 +12,7 @@
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node test/helper-smoke.mjs"
+    "test": "node test/helper-smoke.mjs 33157 && node test/comfyui.integration.mjs 18189 && node test/openai.integration.mjs"
   },
   "dependencies": {
     "@fastify/multipart": "^10.1.0",

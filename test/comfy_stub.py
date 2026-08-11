@@ -65,7 +65,7 @@ def node(name, required):
 async def handle_object_info(_req):
     return cors(web.json_response({
         "CheckpointLoaderSimple": node("CheckpointLoaderSimple", {
-            "ckpt_name": [["stub-flux1-dev.safetensors"], ["stub-sdxl.safetensors"], ["stub-realistic-v12.safetensors"]]}),
+            "ckpt_name": [["stub-flux1-dev.safetensors", "stub-sdxl.safetensors", "stub-realistic-v12.safetensors"], {}]}),
         "CLIPTextEncode": node("CLIPTextEncode", {"text": ["STRING", {"multiline": True}], "clip": ["CLIP"]}),
         "KSampler": node("KSampler", {
             "sampler_name": [["euler"], ["dpmpp_2m"], ["dpmpp_sde"]],
@@ -81,20 +81,51 @@ async def handle_object_info(_req):
 KNOWN = {"CheckpointLoaderSimple", "CLIPTextEncode", "KSampler", "EmptyLatentImage",
          "VAEEncode", "VAEDecode", "LoadImage", "SaveImage"}
 
+# --- 队列/取消/WS 状态 (PHASE 6 integration test 支持) ---
+queue_running = []   # [[number, prompt_id, wf]]
+queue_pending = []   # [[number, prompt_id, wf]]
+interrupted = []     # 记录 interrupt 调用
+ws_clients = set()
+ws_delete_log = []   # 记录 WS delete 消息收到的 prompt_id
+exec_sleep = 2.5     # 默认执行时长
 
-async def finish_prompt(prompt_id, wf):
-    """模拟执行：2.5s 后产出 1 张图，写入 history。"""
+
+async def finish_prompt(prompt_id, wf, sleep_s=None):
+    """模拟执行: sleep_s 后产出 1 张图, 写入 history; 期间发 WS progress 消息。"""
     global seq
-    await asyncio.sleep(2.5)
+    s = sleep_s if sleep_s is not None else exec_sleep
+    steps = 20
+    for i in range(1, steps + 1):
+        await asyncio.sleep(s / steps)
+        # 官方 progress 结构: { type:"progress", data:{ value, max, prompt_id, node } }
+        for c in list(ws_clients):
+            try:
+                await c.send_json({"type": "progress", "data": {"value": i, "max": steps,
+                                                                 "prompt_id": prompt_id, "node": 10}})
+            except Exception:
+                pass
+        if prompt_id in interrupted:
+            history[prompt_id] = {"prompt": wf, "status": {"status_str": "error", "completed": False,
+                                                           "messages": [["execution_interrupted", {}]]}, "outputs": {}}
+            queue_running.clear()
+            pending.pop(prompt_id, None)
+            return
     seq += 1
     fn = "aiforps_%s_%04d_.png" % (prompt_id, seq)
     generated[fn] = make_png()
     pending.pop(prompt_id, None)
+    queue_running.clear()
     images = [{"filename": fn, "subfolder": "", "type": "output"}]
     last_node = [nid for nid, n in wf.items() if n.get("class_type") == "SaveImage"]
     outputs = {last_node[0]: {"images": images}} if last_node else {}
     history[prompt_id] = {"prompt": wf, "status": {"status_str": "success", "completed": True,
                                                    "messages": [["execution_success", {}]]}, "outputs": outputs}
+    for c in list(ws_clients):
+        try:
+            await c.send_json({"type": "executed", "data": {"node": 99, "prompt_id": prompt_id,
+                                                            "output": {"images": images}}})
+        except Exception:
+            pass
 
 
 async def handle_prompt(req):
@@ -110,8 +141,44 @@ async def handle_prompt(req):
     global seq
     seq += 1
     pid = "stub-%d-%d" % (seq, int(asyncio.get_event_loop().time() * 1000))
-    pending[pid] = asyncio.ensure_future(finish_prompt(pid, wf))
+    if queue_running:
+        queue_pending.append([seq, pid, wf])
+    else:
+        queue_running.append([seq, pid, wf])
+        pending[pid] = asyncio.ensure_future(finish_prompt(pid, wf))
     return cors(web.json_response({"prompt_id": pid, "number": seq, "node_errors": {}}))
+
+
+async def handle_queue(_req):
+    return cors(web.json_response({"queue_running": queue_running, "queue_pending": queue_pending}))
+
+
+async def handle_interrupt(_req):
+    if queue_running:
+        interrupted.append(queue_running[0][1])   # 记录被 interrupt 的 prompt_id
+    return cors(web.json_response({"ok": True}))
+
+
+async def handle_ws(_req):
+    ws = web.WebSocketResponse()
+    await ws.prepare(_req)
+    ws_clients.add(ws)
+    try:
+        async for msg in ws:
+            if msg.type == web.WSMsgType.TEXT:
+                try:
+                    m = json.loads(msg.data)
+                    if "delete" in m:
+                        ids = m["delete"]
+                        ws_delete_log.extend(ids)
+                        for item in list(queue_pending):
+                            if item[1] in ids:
+                                queue_pending.remove(item)
+                except Exception:
+                    pass
+    finally:
+        ws_clients.discard(ws)
+    return ws
 
 
 async def handle_upload(req):
@@ -146,18 +213,6 @@ async def handle_view(req):
     return cors(web.Response(status=404))
 
 
-async def handle_interrupt(_req):
-    return cors(web.json_response({"ok": True}))
-
-
-async def handle_ws(_req):
-    # 无 WS 支持 -> 立即关闭，前端自动回退轮询
-    ws = web.WebSocketResponse()
-    await ws.prepare(_req)
-    await ws.close()
-    return ws
-
-
 app = web.Application()
 app.router.add_options("/{tail:.*}", handle_options)
 app.router.add_get("/system_stats", handle_stats)
@@ -166,6 +221,7 @@ app.router.add_post("/prompt", handle_prompt)
 app.router.add_post("/upload/image", handle_upload)
 app.router.add_get("/history", handle_history)
 app.router.add_get("/history/{id}", handle_history)
+app.router.add_get("/queue", handle_queue)
 app.router.add_get("/view", handle_view)
 app.router.add_post("/interrupt", handle_interrupt)
 app.router.add_get("/ws", handle_ws)
