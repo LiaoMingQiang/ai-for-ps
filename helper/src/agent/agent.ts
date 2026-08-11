@@ -104,7 +104,7 @@ export function planRequest(request: { intent: string; providerId?: string; mode
     }
     if (s.tool === "runWorkflow" && request.workflowId) args.workflowId = request.workflowId;
     const def = TOOL_REGISTRY.find((t) => t.id === s.tool);
-    const provider = s.provider || (def && !def.requiresPhotoshop ? (request.providerId || "本地") : undefined);
+    const provider = s.provider || (def && !def.requiresPhotoshop ? (request.providerId || "本地") : "Photoshop");
     /* 成本估算 (规则三十三: 云上传显示估算; 本地不虚构货币) */
     let estCost: string | null = null;
     if (s.cloudUpload) estCost = provider && provider !== "本地" && provider !== "本地 ComfyUI" ? "约 ¥0.01–0.05/次（按 Provider 计费）" : "本地 GPU（无货币费用）";
