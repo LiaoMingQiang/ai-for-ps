@@ -52,7 +52,8 @@ async function main() {
     process.exit(1);
   }
   /* 0. token */
-  const pair = await (await fetch(`${BASE}/v1/pair`, { method: "POST" })).json();
+  const _pair_req = await (await fetch(`${BASE}/v1/pair/request`, { method: "POST" })).json();
+  const pair = await (await fetch(`${BASE}/v1/pair/confirm`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ challenge: _pair_req.challenge }) })).json();
   const auth = { Authorization: "Bearer " + pair.token, "content-type": "application/json" };
 
   /* 1. 导入 (场景 11: 识别全部标准字段) */

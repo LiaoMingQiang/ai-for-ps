@@ -58,7 +58,8 @@ async function main() {
   check("health.lanMode=false", health.lanMode === false, JSON.stringify(health.lanMode));
 
   /* 2. pair */
-  const pair = await (await fetch(`${BASE}/v1/pair`, { method: "POST", body: "{}" })).json();
+  const _pair_req = await (await fetch(`${BASE}/v1/pair/request`, { method: "POST" })).json();
+  const pair = await (await fetch(`${BASE}/v1/pair/confirm`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ challenge: _pair_req.challenge }) })).json();
   check("pair.token", typeof pair.token === "string" && pair.token.startsWith("a4p_"), pair.token ? "token len " + pair.token.length : "");
   const TOKEN = pair.token;
 
@@ -78,6 +79,23 @@ async function main() {
   }
   const comfy = providers.providers.find((p) => p.type === "comfyui");
   check("comfy capabilities.workflows", !!(comfy && comfy.capabilities && comfy.capabilities.workflows));
+
+  /* 4.1 PHASE 11-14: PATCH / models / capabilities / test 真实化 */
+  const patchRes = await fetch(`${BASE}/v1/providers/${comfy.id}`, {
+    method: "PATCH", headers: { ...auth, "content-type": "application/json" },
+    body: JSON.stringify({ enabled: true, baseUrl: "http://127.0.0.1:8188", config: { defaultModel: "stub-flux1-dev.safetensors" } })
+  });
+  const patched = await patchRes.json();
+  check("PATCH provider 200", patchRes.status === 200, "status=" + patchRes.status);
+  check("PATCH enabled persisted", patched.provider && patched.provider.enabled === true);
+  const cfgAfter = await (await fetch(`${BASE}/v1/providers/${comfy.id}`, { headers: auth })).json();
+  check("PATCH baseUrl persisted", cfgAfter.provider && cfgAfter.provider.baseUrl === "http://127.0.0.1:8188");
+  const models = await (await fetch(`${BASE}/v1/providers/${comfy.id}/models`, { headers: auth })).json();
+  check("models real (non-empty, adapter.listModels)", Array.isArray(models.models) && models.models.length > 0, "n=" + (models.models || []).length + " first=" + JSON.stringify((models.models || [])[0] || null).slice(0, 80));
+  const caps = await (await fetch(`${BASE}/v1/providers/${comfy.id}/capabilities`, { headers: auth })).json();
+  check("capabilities from adapter", caps.capabilities && typeof caps.capabilities.imageInput === "boolean" && "workflows" in caps.capabilities);
+  const tst = await (await fetch(`${BASE}/v1/providers/${comfy.id}/test`, { method: "POST", headers: auth })).json();
+  check("test real connection (latencyMs number)", tst.ok === true && typeof tst.latencyMs === "number", "ok=" + tst.ok + " latency=" + tst.latencyMs + " msg=" + (tst.message || ""));
 
   /* 5. 错误 token -> 401 */
   const badAuth = await fetch(`${BASE}/v1/providers`, { headers: { Authorization: "Bearer wrong" } });

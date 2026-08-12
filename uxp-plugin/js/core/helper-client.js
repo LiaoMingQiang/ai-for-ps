@@ -3,13 +3,33 @@
   const BASE = function () { return A4P.settings.get("connection", "helperUrl") || "http://127.0.0.1:33057"; };
   let ws = null;
   let reconnectTimer = null;
+  let tokenCache = null;   /* 内存缓存; 真相源 = SecureStorage (PHASE 15) */
 
   function headers(extra) {
     const h = { "Content-Type": "application/json" };
-    const tok = A4P.settings.get("connection", "helperToken");
-    if (tok) h["Authorization"] = "Bearer " + tok;
+    if (tokenCache) h["Authorization"] = "Bearer " + tokenCache;
     if (extra) Object.keys(extra).forEach(function (k) { h[k] = extra[k]; });
     return h;
+  }
+
+  /* 启动时从 SecureStorage 加载配对 token */
+  function loadToken() {
+    if (tokenCache) return Promise.resolve(tokenCache);
+    if (!A4P.utils || !A4P.utils.secureGet) return Promise.resolve(null);
+    return A4P.utils.secureGet("a4p.helperToken").then(function (t) {
+      if (t) tokenCache = t;
+      return t;
+    }).catch(function () { return null; });
+  }
+
+  /* 兼容旧设置 (localStorage 时代的 token 迁移到 SecureStorage) */
+  function migrateLegacyToken() {
+    const old = A4P.settings.get("connection", "helperToken");
+    if (old && !tokenCache) {
+      tokenCache = old;
+      if (A4P.utils && A4P.utils.secureSet) A4P.utils.secureSet("a4p.helperToken", old);
+      A4P.settings.set("connection", "helperToken", ""); /* 清除明文来源 */
+    }
   }
 
   function request(method, path, body) {
@@ -32,16 +52,39 @@
       .catch(function () { return { online: false }; });
   }
 
-  /* pair: 首次配对 — Helper 生成 token, UXP 存 SecureStorage/local settings (不存 API Key) */
+  /* pair: PHASE 16 两段式 — request 拿 challenge, confirm 换长期 token (存 SecureStorage) */
   function pair() {
-    return request("POST", "/v1/pair", { client: "uxp", version: "0.9.0" });
+    return requestPublic("POST", "/v1/pair/request", { client: "uxp", version: "0.9.0" }).then(function (r) {
+      if (r && r.paired) return { paired: true, alreadyPaired: true };
+      if (!r || !r.challenge) throw new Error("配对请求失败：" + (r && r.error ? r.error.message : "无 challenge"));
+      return requestPublic("POST", "/v1/pair/confirm", { challenge: r.challenge })
+        .then(function (c) {
+          if (!c || !c.token) throw new Error("配对确认失败：" + (c && c.error ? c.error.message : "无 token"));
+          tokenCache = c.token;
+          if (A4P.utils && A4P.utils.secureSet) A4P.utils.secureSet("a4p.helperToken", c.token);
+          return { paired: true, token: c.token };
+        });
+    });
+  }
+
+  /* 公开端点 (无 token) */
+  function requestPublic(method, path, body) {
+    const url = BASE() + path;
+    const opts = { method: method, headers: { "Content-Type": "application/json" } };
+    if (body !== undefined) opts.body = JSON.stringify(body);
+    return fetch(url, opts).then(function (res) {
+      return res.json().catch(function () { return { ok: false }; }).then(function (j) {
+        j._status = res.status;
+        return j;
+      });
+    });
   }
 
   function connectEvents() {
     try {
       if (typeof WebSocket === "undefined") return;
       if (ws && (ws.readyState === 0 || ws.readyState === 1)) return;
-      const url = BASE().replace(/^http/, "ws") + "/v1/events?token=" + encodeURIComponent(A4P.settings.get("connection", "helperToken") || "");
+      const url = BASE().replace(/^http/, "ws") + "/v1/events?token=" + encodeURIComponent(tokenCache || "");
       ws = new WebSocket(url);
       ws.onopen = function () { A4P.store.emit("helper:events", { type: "connected" }); };
       ws.onmessage = function (ev) {
@@ -138,5 +181,5 @@
     return request("GET", "/v1/gpu").catch(function () { return null; });
   };
 
-  A4P.helper = { health: health, pair: pair, connectEvents: connectEvents, request: request, jobs: jobs, assets: assets, providers: providers, workflows: workflows, projects: projects, agent: agent, deps: deps, gpu: gpu };
+  A4P.helper = { health: health, pair: pair, loadToken: loadToken, migrateLegacyToken: migrateLegacyToken, connectEvents: connectEvents, request: request, jobs: jobs, assets: assets, providers: providers, workflows: workflows, projects: projects, agent: agent, deps: deps, gpu: gpu };
 })();

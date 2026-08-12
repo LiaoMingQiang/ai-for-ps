@@ -59,5 +59,43 @@
       })).then(function (files) { return files; });
     }).catch(function () { return null; });
   }
-  A4P.utils = { $: $, $$: $$, val: val, uid: uid, fmtTime: fmtTime, debounce: debounce, clamp: clamp, escapeHtml: escapeHtml, sha256Str: sha256Str, isUxpRuntime: isUxpRuntime, pickImageFiles: pickImageFiles };
+  /* PHASE 15: 敏感凭据存储 — UXP SecureStorage (session-scoped encrypted); 浏览器 dev-preview fallback localStorage
+   * helperToken 绝不进入 settings/localStorage 的 settings 持久化 (state.js 已过滤) */
+  function secureGet(key) {
+    const req = (typeof window !== "undefined" && window.require) ? window.require : null;
+    if (!req) return Promise.resolve(null);
+    try {
+      const SS = req("uxp").storage && req("uxp").storage.SecureStorage;
+      if (SS) return Promise.resolve(new SS().getItem(key));
+    } catch (e) { /* fallback */ }
+    try {
+      const v = window.localStorage ? window.localStorage.getItem("a4p.secure." + key) : null;
+      return Promise.resolve(v);
+    } catch (e) { return Promise.resolve(null); }
+  }
+  function secureSet(key, value) {
+    const req = (typeof window !== "undefined" && window.require) ? window.require : null;
+    if (!req) return Promise.resolve(false);
+    try {
+      const SS = req("uxp").storage && req("uxp").storage.SecureStorage;
+      if (SS) return Promise.resolve(new SS().setItem(key, value));
+    } catch (e) { /* fallback */ }
+    try {
+      if (window.localStorage) window.localStorage.setItem("a4p.secure." + key, value);
+      return Promise.resolve(true);
+    } catch (e) { return Promise.resolve(false); }
+  }
+  function secureRemove(key) {
+    const req = (typeof window !== "undefined" && window.require) ? window.require : null;
+    if (!req) return Promise.resolve(false);
+    try {
+      const SS = req("uxp").storage && req("uxp").storage.SecureStorage;
+      if (SS) return Promise.resolve(new SS().removeItem(key));
+    } catch (e) { /* fallback */ }
+    try {
+      if (window.localStorage) window.localStorage.removeItem("a4p.secure." + key);
+      return Promise.resolve(true);
+    } catch (e) { return Promise.resolve(false); }
+  }
+  A4P.utils = { $: $, $$: $$, val: val, uid: uid, fmtTime: fmtTime, debounce: debounce, clamp: clamp, escapeHtml: escapeHtml, sha256Str: sha256Str, isUxpRuntime: isUxpRuntime, pickImageFiles: pickImageFiles, secureGet: secureGet, secureSet: secureSet, secureRemove: secureRemove };
 })();

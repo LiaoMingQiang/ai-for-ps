@@ -69,7 +69,8 @@ async function waitJobStatus(jobId, auth, want, timeoutMs) {
 
 async function main() {
   if (!(await waitHealth())) { console.log("[binding.integration] FAIL: helper start"); process.exit(1); }
-  const pair = await (await fetch(`${BASE}/v1/pair`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })).json();
+  const _pair_req = await (await fetch(`${BASE}/v1/pair/request`, { method: "POST" })).json();
+  const pair = await (await fetch(`${BASE}/v1/pair/confirm`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ challenge: _pair_req.challenge }) })).json();
   const auth = { Authorization: "Bearer " + pair.token, "content-type": "application/json" };
 
   /* 1. 导入 workflow */
@@ -125,8 +126,7 @@ async function main() {
   proc = startHelper();
   if (!(await waitHealth())) { check("helper restart", false, "no health"); }
   else {
-    const pair2 = await (await fetch(`${BASE}/v1/pair`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })).json();
-    const auth2 = { Authorization: "Bearer " + pair2.token, "content-type": "application/json" };
+    const auth2 = auth; /* pairing token 存 SQLite, 重启后仍有效 (PHASE 16), 无需重新配对 */
     const after = await (await fetch(`${BASE}/v1/workflows/${wfId}`, { headers: auth2 })).json();
     check("workflow persists after restart", !!after.workflow && after.workflow.id === wfId, after.workflow && after.workflow.id);
     check("version persists", Array.isArray(after.versions) && after.versions.length >= 1);

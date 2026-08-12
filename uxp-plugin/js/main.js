@@ -58,26 +58,35 @@ A4P.main = (function () {
     return Promise.resolve();
   }
 
-  /* 4. pairHelper: 有 token 即视为已配对; 无 token 时请求 /v1/pair (helper 离线则保持未配对) */
+  /* 4. pairHelper: 有 token (SecureStorage) 即视为已配对; 无 token 时两段式配对 (PHASE 15/16) */
   function pairHelper() {
     try {
-      var tok = A4P.settings.get("connection", "helperToken");
-      if (tok) return Promise.resolve({ paired: true });
-      if (!A4P.helper || !A4P.helper.pair) return Promise.resolve({ paired: false, reason: "no-helper-client" });
-      return A4P.helper.pair().then(function (r) {
-        if (r && r.token) {
-          A4P.settings.set("connection", "helperToken", r.token);
-          A4P.store.persist();
-          return { paired: true };
-        }
-        A4P.state.helper.paired = false;
-        A4P.store.emit("helper:status", A4P.state.helper);
-        return { paired: false, reason: "pair-rejected" };
-      }).catch(function () {
-        A4P.state.helper.paired = false;
-        A4P.store.emit("helper:status", A4P.state.helper);
-        return { paired: false, reason: "helper-offline" };
-      });
+      if (!A4P.helper) return Promise.resolve({ paired: false, reason: "no-helper-client" });
+      return (A4P.helper.loadToken ? A4P.helper.loadToken() : Promise.resolve(null))
+        .then(function (tok) {
+          if (tok) return { paired: true };
+          if (A4P.helper.migrateLegacyToken) A4P.helper.migrateLegacyToken();
+          if (A4P.helper.loadToken) return A4P.helper.loadToken().then(function (t2) { return t2 ? { paired: true } : null; });
+          return null;
+        })
+        .then(function (r) {
+          if (r) return r;
+          if (!A4P.helper.pair) return { paired: false, reason: "no-pair-fn" };
+          return A4P.helper.pair().then(function (pr) {
+            if (pr && pr.paired) {
+              A4P.state.helper.paired = true;
+              A4P.store.emit("helper:status", A4P.state.helper);
+              return { paired: true };
+            }
+            A4P.state.helper.paired = false;
+            A4P.store.emit("helper:status", A4P.state.helper);
+            return { paired: false, reason: "pair-rejected" };
+          }).catch(function () {
+            A4P.state.helper.paired = false;
+            A4P.store.emit("helper:status", A4P.state.helper);
+            return { paired: false, reason: "helper-offline" };
+          });
+        });
     } catch (e) { return Promise.resolve({ paired: false, reason: "error" }); }
   }
 

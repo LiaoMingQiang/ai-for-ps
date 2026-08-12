@@ -354,4 +354,18 @@ export class ComfyUIAdapter implements ProviderAdapter {
     if (!res.ok) throw new ProviderError(EC.COMFY_OFFLINE, "ComfyUI " + path + " -> " + res.status);
     return res.json();
   }
+
+  /* PHASE 13: 真实连通性测试 — DNS/HTTP + /system_stats + 延迟 */
+  async testConnection(): Promise<{ ok: boolean; latencyMs?: number; code?: string; message?: string }> {
+    const t0 = Date.now();
+    try {
+      const res = await fetch(this.baseUrl + "/system_stats");
+      const latencyMs = Date.now() - t0;
+      if (!res.ok) return { ok: false, latencyMs, code: "COMFY_HTTP_" + res.status, message: "ComfyUI 返回 HTTP " + res.status };
+      const j = (await res.json()) as { system?: { comfyui_version?: string } };
+      return { ok: true, latencyMs, message: "ComfyUI " + (j.system?.comfyui_version || "在线") };
+    } catch (e) {
+      return { ok: false, latencyMs: Date.now() - t0, code: "COMFY_OFFLINE", message: "无法连接 ComfyUI (" + this.baseUrl + ")" };
+    }
+  }
 }

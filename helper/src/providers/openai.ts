@@ -162,4 +162,23 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     if (!job || job.status !== "completed") throw new ProviderError(EC.JOB_LOST, "任务无结果: " + remoteJobId);
     return job.results;
   }
+
+  /* PHASE 13: 真实连通性测试 — HTTP + Auth (GET /models 带凭据) */
+  async testConnection(): Promise<{ ok: boolean; latencyMs?: number; code?: string; message?: string }> {
+    if (!this.apiKey) return { ok: false, code: EC.NOT_CONFIGURED, message: "未配置 API Key" };
+    const t0 = Date.now();
+    try {
+      const base = (this.baseUrl || "").replace(/\/$/, "");
+      const res = await fetch(base + "/models", {
+        headers: { authorization: "Bearer " + this.apiKey }
+      });
+      const latencyMs = Date.now() - t0;
+      if (res.status === 401 || res.status === 403) return { ok: false, latencyMs, code: EC.AUTH_FAILED, message: "API Key 无效 (HTTP " + res.status + ")" };
+      if (res.status === 429) return { ok: false, latencyMs, code: EC.RATE_LIMIT, message: "请求频率超限 (HTTP 429)" };
+      if (!res.ok) return { ok: false, latencyMs, code: "PROVIDER_HTTP_" + res.status, message: "端点返回 HTTP " + res.status };
+      return { ok: true, latencyMs, message: "OpenAI Compatible 在线 (" + this.baseUrl + ")" };
+    } catch (e) {
+      return { ok: false, latencyMs: Date.now() - t0, code: "PROVIDER_OFFLINE", message: "无法连接端点 (" + this.baseUrl + ")" };
+    }
+  }
 }

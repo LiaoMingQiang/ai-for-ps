@@ -54,7 +54,8 @@ async function waitJob(jobId, want, timeoutMs = 30000) {
 let _auth = null;
 async function getAuth() {
   if (_auth) return _auth;
-  const pair = await (await fetch(`${BASE}/v1/pair`, { method: "POST" })).json();
+  const _pair_req = await (await fetch(`${BASE}/v1/pair/request`, { method: "POST" })).json();
+  const pair = await (await fetch(`${BASE}/v1/pair/confirm`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ challenge: _pair_req.challenge }) })).json();
   _auth = { Authorization: "Bearer " + pair.token, "content-type": "application/json" };
   return _auth;
 }

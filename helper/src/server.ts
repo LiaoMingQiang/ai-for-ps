@@ -20,7 +20,7 @@ import { importWorkflow, saveWorkflowVersion, checkDependencies, applyWorkflowBi
 import { planRequest, executeTool, AgentAuditor, TOOL_REGISTRY, type AgentPlan } from "./agent/agent.js";
 import { imageMeta, mimeFromFormat } from "./image-meta.js";
 
-const PUBLIC_PATHS = new Set(["/v1/health", "/v1/pair", "/v1/system"]);
+const PUBLIC_PATHS = new Set(["/v1/health", "/v1/pair/request", "/v1/pair/confirm", "/v1/system"]);
 
 export interface HelperContext {
   store: Store;
@@ -33,7 +33,9 @@ export function buildServer(): FastifyInstance {
   const cfg = loadConfig();
   const store = new Store(cfg);
   seedProviders(store);
-  if (!pairing.getToken(store)) pairing.generateToken(store);
+  if (!pairing.getToken(store)) { /* token 在 confirm 时生成; 这里只确保 nonce 就绪 */ }
+  pairing.ensureNonce(store);
+  const startedAt = Date.now(); /* PHASE 16: 配对窗口基准 */
 
   const app = Fastify({ logger: { level: process.env.A4P_LOG_LEVEL || "info" } });
   app.register(multipart, { limits: { fileSize: 200 * 1024 * 1024, files: 12 } });
@@ -94,11 +96,20 @@ export function buildServer(): FastifyInstance {
     lanMode: cfg.host !== "127.0.0.1"
   }));
 
-  app.post("/v1/pair", async (req) => {
-    const body = (req.body || {}) as Record<string, unknown>;
-    if (body.rotate === true) { const t = pairing.rotateToken(store); return { paired: true, token: t, rotated: true }; }
-    const t = pairing.getToken(store) || pairing.generateToken(store);
-    return { paired: true, token: t, version: VERSION };
+  app.post("/v1/pair/request", async () => {
+    return pairing.pairRequest(store, startedAt);
+  });
+
+  app.post("/v1/pair/confirm", async (req, reply) => {
+    const body = (req.body || {}) as { challenge?: string };
+    const r = pairing.pairConfirm(store, body.challenge);
+    if (!r.ok) return reply.code(409).send({ error: { code: r.code, message: r.message } });
+    return { paired: true, token: r.token };
+  });
+
+  /* 兼容: 旧版单步 /v1/pair 已关闭 (PHASE 16: 禁止任意 localhost 客户端直接拿长期 token) */
+  app.post("/v1/pair", async (_req, reply) => {
+    return reply.code(409).send({ error: { code: "PAIRING_CHALLENGE_REQUIRED", message: "请使用 /v1/pair/request + /v1/pair/confirm 两段式配对" } });
   });
 
   app.get("/v1/system", async () => {
@@ -120,6 +131,13 @@ export function buildServer(): FastifyInstance {
 
   app.get("/v1/providers", async () => ({ providers: listProviders(store) }));
 
+  app.get("/v1/providers/:id", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const p = listProviders(store).find((x) => x.id === id);
+    if (!p) return reply.code(404).send({ error: { code: "PROVIDER_NOT_FOUND", message: "Provider 不存在: " + id } });
+    return { provider: p };
+  });
+
   app.get("/v1/providers/:id/models", async (req, reply) => {
     const { id } = req.params as { id: string };
     const p = listProviders(store).find((x) => x.id === id);
@@ -127,26 +145,84 @@ export function buildServer(): FastifyInstance {
     if (!p.enabled && !p.configured) {
       return reply.code(409).send({ error: { code: "PROVIDER_NOT_CONFIGURED", message: "Provider 尚未配置", providerId: id } });
     }
-    /* PHASE 6/7: 真实模型列表; 当前返回空列表 + configured 状态 */
-    return { providerId: id, models: [], configured: p.configured };
+    /* PHASE 12: 真实模型列表 — adapter.listModels() (禁止假空数组) */
+    try {
+      const adapter = await manager.adapter(id);
+      const models = await adapter.listModels();
+      return { providerId: id, models, supported: true, configured: p.configured };
+    } catch (e) {
+      const code = (e as { code?: string }).code || "PROVIDER_ERROR";
+      if (code === "PROVIDER_NOT_CONFIGURED") {
+        return reply.code(409).send({ error: { code, message: "Provider 尚未配置（需要 API Key / 端点）", providerId: id } });
+      }
+      /* 不支持自动列模型或查询失败: 如实上报, 允许手动模型 (规则十二) */
+      return { providerId: id, models: [], supported: false, manualModelAllowed: true, configured: p.configured, error: { code, message: String((e as Error).message) } };
+    }
   });
 
   app.get("/v1/providers/:id/capabilities", async (req, reply) => {
     const { id } = req.params as { id: string };
     const p = listProviders(store).find((x) => x.id === id);
     if (!p) return reply.code(404).send({ error: { code: "PROVIDER_NOT_FOUND", message: "Provider 不存在: " + id } });
-    return { providerId: id, capabilities: p.capabilities };
+    /* PHASE 14: capabilities 唯一来源 = adapter.getCapabilities() */
+    try {
+      const adapter = await manager.adapter(id);
+      const caps = await adapter.getCapabilities();
+      return { providerId: id, capabilities: caps, configured: p.configured, enabled: p.enabled };
+    } catch (e) {
+      const code = (e as { code?: string }).code || "PROVIDER_ERROR";
+      if (code === "PROVIDER_NOT_CONFIGURED") {
+        return reply.code(409).send({ error: { code, message: "Provider 尚未配置", providerId: id } });
+      }
+      return reply.code(500).send({ error: { code, message: String((e as Error).message) } });
+    }
   });
 
   app.post("/v1/providers/:id/test", async (req, reply) => {
     const { id } = req.params as { id: string };
     const p = listProviders(store).find((x) => x.id === id);
     if (!p) return reply.code(404).send({ error: { code: "PROVIDER_NOT_FOUND", message: "Provider 不存在: " + id } });
-    /* PHASE 6/7: 真实连通性测试; 当前: 未配置即失败 */
-    if (!p.configured) {
-      return { ok: false, providerId: id, error: { code: "PROVIDER_NOT_CONFIGURED", message: "Provider 尚未配置" } };
+    /* PHASE 13: 真实连通性测试 — DNS/HTTP/Auth/Endpoint (adapter.testConnection) */
+    try {
+      const adapter = await manager.adapter(id);
+      if (!adapter.testConnection) {
+        return { ok: false, providerId: id, latencyMs: null, error: { code: "PROVIDER_TEST_UNSUPPORTED", message: "该 Provider 未实现连通性测试" } };
+      }
+      const r = await adapter.testConnection();
+      return { ok: r.ok, providerId: id, latencyMs: r.latencyMs ?? null, code: r.code || null, message: r.message || null };
+    } catch (e) {
+      const code = (e as { code?: string }).code || "PROVIDER_ERROR";
+      if (code === "PROVIDER_NOT_CONFIGURED") {
+        return { ok: false, providerId: id, latencyMs: null, error: { code, message: "Provider 尚未配置（需要 API Key / 端点）" } };
+      }
+      return { ok: false, providerId: id, latencyMs: null, error: { code, message: String((e as Error).message) } };
     }
-    return { ok: true, providerId: id, message: "配置存在" };
+  });
+
+  /* PHASE 11: Provider 设置 — 更新 enabled/baseUrl/config (defaultModel 存 config_json) */
+  app.patch("/v1/providers/:id", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const p = listProviders(store).find((x) => x.id === id);
+    if (!p) return reply.code(404).send({ error: { code: "PROVIDER_NOT_FOUND", message: "Provider 不存在: " + id } });
+    const body = (req.body || {}) as Record<string, unknown>;
+    const fields: string[] = [];
+    const params: Array<string | number> = [];
+    if (body.enabled !== undefined) { fields.push("enabled=?"); params.push(body.enabled ? 1 : 0); }
+    if (body.baseUrl !== undefined) { fields.push("base_url=?"); params.push(body.baseUrl ? String(body.baseUrl) : ""); }
+    if (body.name !== undefined) { fields.push("name=?"); params.push(String(body.name)); }
+    if (body.config !== undefined) {
+      const row = store.raw.prepare("SELECT config_json FROM providers WHERE id=?").get(id) as { config_json: string | null } | undefined;
+      let cfg: Record<string, unknown> = {};
+      try { cfg = JSON.parse(String(row?.config_json || "{}")); } catch (e) { /* noop */ }
+      const patch = body.config as Record<string, unknown>;
+      if (patch.defaultModel !== undefined) cfg.defaultModel = String(patch.defaultModel);
+      Object.keys(patch).forEach((k) => { if (k !== "defaultModel") cfg[k] = patch[k]; });
+      fields.push("config_json=?"); params.push(JSON.stringify(cfg));
+    }
+    if (!fields.length) return reply.code(400).send({ error: { code: "PROVIDER_PATCH_EMPTY", message: "没有可更新的字段" } });
+    fields.push("updated_at=?"); params.push(Date.now(), id);
+    store.raw.prepare(`UPDATE providers SET ${fields.join(", ")} WHERE id=?`).run(...params);
+    return { provider: listProviders(store).find((x) => x.id === id) };
   });
 
   /* ---- workflows (PHASE 8: 导入/扫描/Studio/版本/依赖) ---- */

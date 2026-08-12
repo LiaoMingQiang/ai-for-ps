@@ -101,13 +101,15 @@ async function main() {
     process.exit(1);
   }
   /* 配对 */
-  const pair = await (await realFetch(`http://127.0.0.1:${PORT}/v1/pair`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })).json();
+  const _pairReq = await (await realFetch(`http://127.0.0.1:${PORT}/v1/pair/request`, { method: "POST" })).json();
+  const pair = await (await realFetch(`http://127.0.0.1:${PORT}/v1/pair/confirm`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ challenge: _pairReq.challenge }) })).json();
   const token = pair.token;
 
   bootA4P();
   const A4P = sandbox.A4P;
   A4P.settings.set("connection", "helperUrl", `http://127.0.0.1:${PORT}`);
   A4P.settings.set("connection", "helperToken", token);
+  A4P.helper.migrateLegacyToken(); /* PHASE 15: token -> SecureStorage (浏览器沙箱 fallback) */
 
   /* ---- 1. create -> POST /v1/jobs ---- */
   console.log("[1] create job -> Helper (非 ComfyUI)");

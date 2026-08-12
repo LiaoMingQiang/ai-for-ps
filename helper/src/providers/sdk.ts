@@ -85,6 +85,8 @@ export interface ProviderAdapter {
   cancel(remoteJobId: string): Promise<CancelResult>;
   recover(remoteJobId: string): Promise<RemoteJobState>;
   downloadResults(remoteJobId: string): Promise<ResultAsset[]>;
+  /* PHASE 13: 真实连通性测试 (DNS/HTTP/Auth/Endpoint) */
+  testConnection?(): Promise<{ ok: boolean; latencyMs?: number; code?: string; message?: string }>;
 }
 
 /* 统一错误码 (规则三十七) */
