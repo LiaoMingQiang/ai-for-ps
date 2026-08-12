@@ -42640,7 +42640,7 @@ var import_node_crypto9 = __toESM(require("node:crypto"), 1);
 // dist/db.js
 var import_node_sqlite = require("node:sqlite");
 var import_node_fs2 = __toESM(require("node:fs"), 1);
-var SCHEMA_VERSION = 2;
+var SCHEMA_VERSION = 3;
 var MIGRATIONS = [
   {
     version: 1,
@@ -42895,6 +42895,13 @@ var MIGRATIONS = [
     );
     UPDATE settings SET value='2' WHERE key='schema_version';
     `
+  },
+  {
+    version: 3,
+    sql: `
+    ALTER TABLE workflows ADD COLUMN workflow_json TEXT;
+    UPDATE settings SET value='3' WHERE key='schema_version';
+    `
   }
 ];
 var Store = class {
@@ -42960,17 +42967,63 @@ var Store = class {
 // dist/pairing.js
 var import_node_crypto = __toESM(require("node:crypto"), 1);
 var TOKEN_KEY = "pairing.token";
+var NONCE_KEY = "pairing.nonce";
+var PAIRED_KEY = "pairing.pairedAt";
+var NONCE_TTL_MS = 12e4;
+var PAIR_WINDOW_MS = 10 * 6e4;
 function getToken(store) {
   const row = store.raw.prepare("SELECT value FROM settings WHERE key=?").get(TOKEN_KEY);
   return row ? row.value : null;
 }
-function generateToken(store) {
+function isPaired(store) {
+  const row = store.raw.prepare("SELECT value FROM settings WHERE key=?").get(PAIRED_KEY);
+  return !!row && Number(row.value) > 0;
+}
+function ensureNonce(store, now = Date.now()) {
+  const row = store.raw.prepare("SELECT value FROM settings WHERE key=?").get(NONCE_KEY);
+  if (row) {
+    try {
+      const j = JSON.parse(row.value);
+      if (j.expiresAt > now)
+        return j.nonce;
+    } catch (e) {
+    }
+  }
+  const nonce = import_node_crypto.default.randomBytes(24).toString("hex");
+  store.raw.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").run(NONCE_KEY, JSON.stringify({ nonce, expiresAt: now + NONCE_TTL_MS }));
+  return nonce;
+}
+function pairRequest(store, startedAt, now = Date.now()) {
+  if (isPaired(store))
+    return { paired: true, pairedAt: Number(store.raw.prepare("SELECT value FROM settings WHERE key=?").get(PAIRED_KEY).value) };
+  if (now - startedAt > PAIR_WINDOW_MS)
+    return { paired: false, expiresInMs: 0 };
+  const nonce = ensureNonce(store, now);
+  return { paired: false, challenge: nonce, expiresInMs: NONCE_TTL_MS };
+}
+function pairConfirm(store, challenge, now = Date.now()) {
+  if (isPaired(store))
+    return { ok: false, code: "PAIRING_ALREADY_PAIRED", message: "\u5DF2\u914D\u5BF9\uFF0C\u516C\u5F00\u914D\u5BF9\u901A\u9053\u5DF2\u5173\u95ED" };
+  if (!challenge || typeof challenge !== "string")
+    return { ok: false, code: "PAIRING_CHALLENGE_MISSING", message: "\u7F3A\u5C11 challenge" };
+  const row = store.raw.prepare("SELECT value FROM settings WHERE key=?").get(NONCE_KEY);
+  if (!row)
+    return { ok: false, code: "PAIRING_NO_CHALLENGE", message: "\u914D\u5BF9\u7A97\u53E3\u5DF2\u8FC7\u671F\uFF0C\u8BF7\u91CD\u542F Helper \u540E\u91CD\u8BD5" };
+  let stored;
+  try {
+    stored = JSON.parse(row.value);
+  } catch (e) {
+    return { ok: false, code: "PAIRING_NO_CHALLENGE", message: "\u914D\u5BF9\u72B6\u6001\u635F\u574F" };
+  }
+  if (stored.expiresAt < now)
+    return { ok: false, code: "PAIRING_CHALLENGE_EXPIRED", message: "\u914D\u5BF9\u7A97\u53E3\u5DF2\u8FC7\u671F\uFF0C\u8BF7\u91CD\u542F Helper \u540E\u91CD\u8BD5" };
+  if (challenge !== stored.nonce)
+    return { ok: false, code: "PAIRING_CHALLENGE_INVALID", message: "challenge \u4E0D\u5339\u914D" };
   const tok = "a4p_" + import_node_crypto.default.randomBytes(24).toString("hex");
   store.raw.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").run(TOKEN_KEY, tok);
-  return tok;
-}
-function rotateToken(store) {
-  return generateToken(store);
+  store.raw.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").run(PAIRED_KEY, String(now));
+  store.raw.prepare("DELETE FROM settings WHERE key=?").run(NONCE_KEY);
+  return { ok: true, token: tok };
 }
 function verifyToken(store, header) {
   const tok = getToken(store);
@@ -43431,7 +43484,7 @@ var ComfyUIAdapter = class {
     return nodes;
   }
   async submit(request) {
-    const wf = this.buildWorkflow(request);
+    const wf = request.workflowJson ? request.workflowJson : this.buildWorkflow(request);
     return this.submitRaw(wf);
   }
   /* 原始 workflow 提交 + 官方错误解析 (node_errors / OOM) */
@@ -43629,6 +43682,20 @@ var ComfyUIAdapter = class {
       throw new ProviderError(PROVIDER_ERROR_CODES.COMFY_OFFLINE, "ComfyUI " + path5 + " -> " + res.status);
     return res.json();
   }
+  /* PHASE 13: 真实连通性测试 — DNS/HTTP + /system_stats + 延迟 */
+  async testConnection() {
+    const t0 = Date.now();
+    try {
+      const res = await fetch(this.baseUrl + "/system_stats");
+      const latencyMs = Date.now() - t0;
+      if (!res.ok)
+        return { ok: false, latencyMs, code: "COMFY_HTTP_" + res.status, message: "ComfyUI \u8FD4\u56DE HTTP " + res.status };
+      const j = await res.json();
+      return { ok: true, latencyMs, message: "ComfyUI " + (j.system?.comfyui_version || "\u5728\u7EBF") };
+    } catch (e) {
+      return { ok: false, latencyMs: Date.now() - t0, code: "COMFY_OFFLINE", message: "\u65E0\u6CD5\u8FDE\u63A5 ComfyUI (" + this.baseUrl + ")" };
+    }
+  }
 };
 
 // dist/providers/openai.js
@@ -43788,6 +43855,28 @@ var OpenAICompatibleAdapter = class {
     if (!job || job.status !== "completed")
       throw new ProviderError(PROVIDER_ERROR_CODES.JOB_LOST, "\u4EFB\u52A1\u65E0\u7ED3\u679C: " + remoteJobId);
     return job.results;
+  }
+  /* PHASE 13: 真实连通性测试 — HTTP + Auth (GET /models 带凭据) */
+  async testConnection() {
+    if (!this.apiKey)
+      return { ok: false, code: PROVIDER_ERROR_CODES.NOT_CONFIGURED, message: "\u672A\u914D\u7F6E API Key" };
+    const t0 = Date.now();
+    try {
+      const base = (this.baseUrl || "").replace(/\/$/, "");
+      const res = await fetch(base + "/models", {
+        headers: { authorization: "Bearer " + this.apiKey }
+      });
+      const latencyMs = Date.now() - t0;
+      if (res.status === 401 || res.status === 403)
+        return { ok: false, latencyMs, code: PROVIDER_ERROR_CODES.AUTH_FAILED, message: "API Key \u65E0\u6548 (HTTP " + res.status + ")" };
+      if (res.status === 429)
+        return { ok: false, latencyMs, code: PROVIDER_ERROR_CODES.RATE_LIMIT, message: "\u8BF7\u6C42\u9891\u7387\u8D85\u9650 (HTTP 429)" };
+      if (!res.ok)
+        return { ok: false, latencyMs, code: "PROVIDER_HTTP_" + res.status, message: "\u7AEF\u70B9\u8FD4\u56DE HTTP " + res.status };
+      return { ok: true, latencyMs, message: "OpenAI Compatible \u5728\u7EBF (" + this.baseUrl + ")" };
+    } catch (e) {
+      return { ok: false, latencyMs: Date.now() - t0, code: "PROVIDER_OFFLINE", message: "\u65E0\u6CD5\u8FDE\u63A5\u7AEF\u70B9 (" + this.baseUrl + ")" };
+    }
   }
 };
 
@@ -44130,7 +44219,7 @@ var ProviderManager = class {
 };
 
 // dist/job-engine.js
-var import_node_crypto5 = __toESM(require("node:crypto"), 1);
+var import_node_crypto6 = __toESM(require("node:crypto"), 1);
 var import_node_fs4 = __toESM(require("node:fs"), 1);
 var import_node_path3 = __toESM(require("node:path"), 1);
 
@@ -44195,482 +44284,8 @@ function mimeFromFormat(format) {
   }
 }
 
-// dist/job-engine.js
-var TERMINAL = /* @__PURE__ */ new Set(["completed", "cancelled", "failed", "provider_failure", "download_failure", "retryable_writeback_failure", "rollback_uncertain"]);
-var RETRYABLE_FAILURES = /* @__PURE__ */ new Set(["provider_failure", "download_failure", "failed", "retryable_writeback_failure"]);
-var JobEngine = class {
-  store;
-  manager;
-  cfg;
-  ctx;
-  activeRuns = /* @__PURE__ */ new Map();
-  concurrency = 0;
-  maxConcurrency = 4;
-  constructor(store, manager, cfg2, ctx) {
-    this.store = store;
-    this.manager = manager;
-    this.cfg = cfg2;
-    this.ctx = ctx;
-  }
-  /* ---------- 状态迁移 ---------- */
-  transition(jobId, from, to, detail) {
-    const now = Date.now();
-    this.store.raw.prepare("UPDATE jobs SET status=?, updated_at=? WHERE id=?").run(to, now, jobId);
-    this.store.raw.prepare("INSERT INTO job_events (job_id, from_status, to_status, detail, created_at) VALUES (?,?,?,?,?)").run(jobId, from, to, detail, now);
-    const job = this.store.raw.prepare("SELECT * FROM jobs WHERE id=?").get(jobId);
-    this.ctx.broadcast({ type: "job:update", job });
-    return job;
-  }
-  fail(jobId, from, code, message, retryable) {
-    const to = retryable ? "provider_failure" : "failed";
-    const now = Date.now();
-    this.store.raw.prepare("UPDATE jobs SET status=?, error_json=?, updated_at=? WHERE id=?").run(to, JSON.stringify({ code, message, retryable, diagnosticId: import_node_crypto5.default.randomBytes(4).toString("hex") }), now, jobId);
-    this.store.raw.prepare("INSERT INTO job_events (job_id, from_status, to_status, detail, created_at) VALUES (?,?,?,?,?)").run(jobId, from, to, message, now);
-    const job = this.store.raw.prepare("SELECT * FROM jobs WHERE id=?").get(jobId);
-    this.ctx.broadcast({ type: "job:update", job });
-    return job;
-  }
-  job(jobId) {
-    const j = this.store.raw.prepare("SELECT * FROM jobs WHERE id=?").get(jobId);
-    if (!j)
-      throw new Error("JOB_NOT_FOUND:" + jobId);
-    return j;
-  }
-  /* ---------- 创建 + 启动 ---------- */
-  async create(body) {
-    const id = import_node_crypto5.default.randomUUID();
-    const providerId = String(body.providerId || "local-comfy");
-    const view = this.manager.view(providerId);
-    if (!view)
-      throw new Error("PROVIDER_NOT_FOUND:" + providerId);
-    if (!view.enabled && !view.configured)
-      throw new Error("PROVIDER_NOT_CONFIGURED:" + providerId);
-    const now = Date.now();
-    this.store.raw.prepare(`INSERT INTO jobs (id, status, provider_id, provider_type, workflow_id, model_id, inputs_json, parameters_json, snapshot_json, snapshot_id, project_id, source_document_id, source_document_name, source_document_path, source_layer_ids_json, selection_bounds_json, canvas_width, canvas_height, color_mode, bit_depth, created_at, updated_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, "created", providerId, view.type, body.workflowId ? String(body.workflowId) : null, body.modelId ? String(body.modelId) : null, JSON.stringify(body.inputs || {}), JSON.stringify(body.parameters || {}), JSON.stringify(body.snapshot || {}), body.snapshot?.id ? String(body.snapshot.id) : null, body.projectId ? String(body.projectId) : null, body.sourceDocumentId ? String(body.sourceDocumentId) : null, body.sourceDocumentName ? String(body.sourceDocumentName) : null, body.sourceDocumentPath ? String(body.sourceDocumentPath) : null, JSON.stringify(body.sourceLayerIds || []), body.selectionBounds ? JSON.stringify(body.selectionBounds) : null, body.canvasWidth ? Number(body.canvasWidth) : null, body.canvasHeight ? Number(body.canvasHeight) : null, body.colorMode ? String(body.colorMode) : null, body.bitDepth ? Number(body.bitDepth) : null, now, now);
-    this.store.raw.prepare("INSERT INTO job_events (job_id, from_status, to_status, detail, created_at) VALUES (?,?,?,?,?)").run(id, null, "created", "job created", now);
-    const job = this.store.raw.prepare("SELECT * FROM jobs WHERE id=?").get(id);
-    if (this.concurrency >= this.maxConcurrency) {
-      this.transition(id, "created", "created", "waiting for concurrency slot");
-      this.scheduleQueued(id);
-      return job;
-    }
-    this.concurrency++;
-    this.run(id).finally(() => {
-      this.concurrency = Math.max(0, this.concurrency - 1);
-    });
-    return job;
-  }
-  pendingStart = /* @__PURE__ */ new Set();
-  scheduleQueued(jobId) {
-    if (this.pendingStart.has(jobId))
-      return;
-    this.pendingStart.add(jobId);
-    const timer = setInterval(() => {
-      if (this.concurrency < this.maxConcurrency) {
-        clearInterval(timer);
-        this.pendingStart.delete(jobId);
-        const j = this.job(jobId);
-        if (String(j.status) === "created") {
-          this.concurrency++;
-          this.run(jobId).finally(() => {
-            this.concurrency = Math.max(0, this.concurrency - 1);
-          });
-        }
-      }
-    }, 2e3);
-  }
-  /* ---------- 主执行管线 ----------
-   * resumeFrom: 恢复模式 (规则十五) — "downloading" 跳过提交直接下载; "running" 恢复监控 */
-  async run(jobId, resumeFrom) {
-    const job0 = this.job(jobId);
-    const providerId = String(job0.provider_id);
-    const view = this.manager.view(providerId);
-    if (!view) {
-      this.fail(jobId, String(job0.status), "PROVIDER_NOT_FOUND", "Provider \u4E0D\u5B58\u5728: " + providerId, false);
-      return;
-    }
-    let adapter;
-    try {
-      adapter = await this.manager.adapter(providerId);
-    } catch (e) {
-      this.fail(jobId, String(job0.status), e.code || "PROVIDER_FAILED", e.message, true);
-      return;
-    }
-    let request;
-    let remoteJobId;
-    if (resumeFrom === "downloading") {
-      request = this.buildRequest(job0, view);
-      remoteJobId = job0.remote_job_id ? String(job0.remote_job_id) : null;
-      if (!remoteJobId) {
-        this.fail(jobId, String(job0.status), "JOB_LOST", "\u6062\u590D\u5931\u8D25: \u7F3A\u5C11 remoteJobId", true);
-        return;
-      }
-      await this.downloadPhase(jobId, adapter, remoteJobId, request);
-      return;
-    }
-    if (resumeFrom === "running") {
-      request = this.buildRequest(job0, view);
-      remoteJobId = job0.remote_job_id ? String(job0.remote_job_id) : null;
-      if (!remoteJobId) {
-        this.fail(jobId, String(job0.status), "JOB_LOST", "\u6062\u590D\u5931\u8D25: \u7F3A\u5C11 remoteJobId", true);
-        return;
-      }
-      const runState2 = {};
-      this.activeRuns.set(jobId, runState2);
-      try {
-        await this.pollUntilDone(jobId, adapter, remoteJobId, runState2);
-      } catch (e) {
-        const err = e;
-        this.fail(jobId, "running", err.code || "PROVIDER_FAILED", err.message, true);
-        return;
-      }
-      const j = this.job(jobId);
-      if (String(j.status) !== "running")
-        return;
-      await this.downloadPhase(jobId, adapter, remoteJobId, request);
-      return;
-    }
-    this.transition(jobId, String(job0.status), "validating", "\u6821\u9A8C Provider \u4E0E\u8F93\u5165");
-    request = this.buildRequest(job0, view);
-    try {
-      const v = await adapter.validate(request);
-      if (!v.ok) {
-        this.fail(jobId, "validating", v.errors[0]?.code || "WORKFLOW_INVALID", v.errors.map((e) => e.message).join("; "), false);
-        return;
-      }
-    } catch (e) {
-      this.fail(jobId, "validating", e.code || "PROVIDER_FAILED", e.message, true);
-      return;
-    }
-    this.transition(jobId, "validating", "snapshotting", "\u68C0\u67E5\u5FEB\u7167\u8D44\u4EA7");
-    const inputAssetIds = (request.inputs.imageAssetIds || []).filter(Boolean);
-    for (const aid of inputAssetIds) {
-      const a = this.store.raw.prepare("SELECT storage_path FROM assets WHERE id=?").get(aid);
-      if (!a || !import_node_fs4.default.existsSync(a.storage_path)) {
-        this.fail(jobId, "snapshotting", "ASSET_MISSING", "\u8F93\u5165\u8D44\u4EA7\u4E0D\u5B58\u5728: " + aid, false);
-        return;
-      }
-    }
-    try {
-      if (view.type === "comfyui" && inputAssetIds.length) {
-        this.transition(jobId, "snapshotting", "uploading", "\u4E0A\u4F20\u8F93\u5165\u56FE\u50CF (" + inputAssetIds.length + ")");
-        const comfy = adapter;
-        const uploaded = [];
-        for (const aid of inputAssetIds) {
-          const a = this.store.raw.prepare("SELECT storage_path, mime_type FROM assets WHERE id=?").get(aid);
-          if (!a)
-            continue;
-          const bytes = new Uint8Array(import_node_fs4.default.readFileSync(a.storage_path));
-          const ext = a.mime_type === "image/jpeg" ? ".jpg" : a.mime_type === "image/webp" ? ".webp" : ".png";
-          const name = await comfy.uploadImage(bytes, aid + ext);
-          uploaded.push(name);
-        }
-        request.inputs.imageAssetIds = uploaded;
-      }
-    } catch (e) {
-      this.fail(jobId, "uploading", e.code || "UPLOAD_FAILED", e.message, true);
-      return;
-    }
-    this.transition(jobId, inputAssetIds.length ? "uploading" : "snapshotting", "queued", "\u63D0\u4EA4\u5230 " + providerId);
-    try {
-      const remote = await adapter.submit(request);
-      remoteJobId = remote.remoteJobId;
-      this.store.raw.prepare("UPDATE jobs SET remote_job_id=? WHERE id=?").run(remoteJobId, jobId);
-    } catch (e) {
-      const err = e;
-      this.fail(jobId, "queued", err.code || "SUBMIT_FAILED", err.message, err.retryable !== false);
-      return;
-    }
-    this.transition(jobId, "queued", "running", "\u8FDC\u7AEF\u6267\u884C\u4E2D");
-    const runState = {};
-    this.activeRuns.set(jobId, runState);
-    try {
-      await this.pollUntilDone(jobId, adapter, remoteJobId, runState);
-    } catch (e) {
-      const err = e;
-      this.fail(jobId, "running", err.code || "PROVIDER_FAILED", err.message, true);
-      return;
-    }
-    const jAfter = this.job(jobId);
-    if (String(jAfter.status) !== "running")
-      return;
-    await this.downloadPhase(jobId, adapter, remoteJobId, request);
-  }
-  /* 下载阶段 (步骤 6-8) */
-  async downloadPhase(jobId, adapter, remoteJobId, request) {
-    this.transition(jobId, String(this.job(jobId).status), "downloading", "\u4E0B\u8F7D\u7ED3\u679C");
-    let results;
-    try {
-      results = await adapter.downloadResults(remoteJobId);
-    } catch (e) {
-      const err = e;
-      this.fail(jobId, "downloading", err.code || "ASSET_DOWNLOAD_FAILED", err.message, true);
-      return;
-    }
-    if (!results.length) {
-      this.fail(jobId, "downloading", "COMFY_NO_OUTPUT", "\u4EFB\u52A1\u5B8C\u6210\u4F46\u65E0\u8F93\u51FA\u56FE\u50CF", false);
-      return;
-    }
-    const assetIds = [];
-    for (const r of results) {
-      if (!r.bytes)
-        continue;
-      const assetId = import_node_crypto5.default.randomUUID();
-      const hash = import_node_crypto5.default.createHash("sha256").update(Buffer.from(r.bytes)).digest("hex");
-      const ext = r.filename.toLowerCase().endsWith(".jpg") || r.filename.toLowerCase().endsWith(".jpeg") ? ".jpg" : r.filename.toLowerCase().endsWith(".webp") ? ".webp" : ".png";
-      const storagePath = import_node_path3.default.join(this.cfg.assetsDir, assetId + ext);
-      import_node_fs4.default.writeFileSync(storagePath, Buffer.from(r.bytes));
-      let width = null, height = null, mime = "image/png";
-      const meta = imageMeta(r.bytes);
-      if (meta.format) {
-        width = meta.width;
-        height = meta.height;
-        mime = mimeFromFormat(meta.format);
-      }
-      this.store.raw.prepare("INSERT INTO assets (id, job_id, mime_type, width, height, size, hash, storage_path, kind, role, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)").run(assetId, jobId, mime, width, height, r.bytes.length, hash, storagePath, "result", null, Date.now());
-      this.store.raw.prepare("INSERT INTO job_outputs (id, job_id, asset_id, label, seed, width, height, favorite, created_at) VALUES (?,?,?,?,?,?,?,0,?)").run(import_node_crypto5.default.randomUUID(), jobId, assetId, r.filename, this.seedOf(jobId), width, height, Date.now());
-      assetIds.push(assetId);
-    }
-    const jNow = this.job(jobId);
-    this.store.raw.prepare("UPDATE jobs SET result_assets_json=?, duration_ms=? WHERE id=?").run(JSON.stringify(assetIds), Date.now() - Number(jNow.created_at || Date.now()), jobId);
-    const usageId = import_node_crypto5.default.randomUUID();
-    const duration = Date.now() - Number(jNow.created_at || Date.now());
-    this.store.raw.prepare("INSERT INTO usage_records (id, job_id, provider_id, provider_type, model_id, estimated_cost, actual_cost, currency, duration_ms, gpu_duration_ms, tokens_in, tokens_out, images_count, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)").run(usageId, jobId, String(jNow.provider_id), String(jNow.provider_type), jNow.model_id ? String(jNow.model_id) : null, null, null, null, duration, String(jNow.provider_type) === "comfyui" ? duration : null, null, null, assetIds.length, Date.now());
-    this.transition(jobId, "downloading", "result_ready", "\u7ED3\u679C\u5DF2\u7F13\u5B58\uFF0C\u7B49\u5F85\u5199\u56DE");
-    this.activeRuns.delete(jobId);
-    this.ctx.broadcast({ type: "job:result", jobId, assetIds });
-  }
-  seedOf(jobId) {
-    try {
-      const j = this.job(jobId);
-      const p = JSON.parse(String(j.parameters_json || "{}"));
-      return typeof p.seed === "number" ? p.seed : null;
-    } catch (e) {
-      return null;
-    }
-  }
-  buildRequest(job, view) {
-    let inputs = {};
-    let params = {};
-    try {
-      inputs = JSON.parse(String(job.inputs_json || "{}"));
-    } catch (e) {
-    }
-    try {
-      params = JSON.parse(String(job.parameters_json || "{}"));
-    } catch (e) {
-    }
-    return {
-      providerId: String(job.provider_id),
-      workflowId: job.workflow_id ? String(job.workflow_id) : void 0,
-      modelId: job.model_id ? String(job.model_id) : void 0,
-      inputs: {
-        prompt: inputs.prompt ? String(inputs.prompt) : void 0,
-        negativePrompt: inputs.negativePrompt ? String(inputs.negativePrompt) : void 0,
-        imageAssetIds: Array.isArray(inputs.imageAssetIds) ? inputs.imageAssetIds : void 0,
-        maskAssetId: inputs.maskAssetId ? String(inputs.maskAssetId) : void 0,
-        referenceImages: Array.isArray(inputs.referenceImages) ? inputs.referenceImages : void 0
-      },
-      parameters: params
-    };
-  }
-  /* 轮询直到 completed (或失败/取消) */
-  pollUntilDone(jobId, adapter, remoteJobId, runState) {
-    return new Promise((resolve, reject) => {
-      const stopProgress = "connectProgress" in adapter ? adapter.connectProgress(remoteJobId, (f) => {
-        const j = this.job(jobId);
-        if (String(j.status) === "running") {
-          this.store.raw.prepare("UPDATE jobs SET updated_at=? WHERE id=?").run(Date.now(), jobId);
-          this.ctx.broadcast({ type: "job:progress", jobId, progress: Math.round(f * 100) });
-        }
-      }) : void 0;
-      runState.stopProgress = stopProgress;
-      const timer = setInterval(async () => {
-        const j = this.job(jobId);
-        const status = String(j.status);
-        if (status === "cancel_requested") {
-          clearInterval(timer);
-          if (stopProgress) {
-            try {
-              stopProgress();
-            } catch (e) {
-            }
-          }
-          this.doCancel(jobId, remoteJobId).then(() => resolve()).catch((e) => reject(e));
-          return;
-        }
-        if (status !== "running") {
-          clearInterval(timer);
-          if (stopProgress) {
-            try {
-              stopProgress();
-            } catch (e) {
-            }
-          }
-          resolve();
-          return;
-        }
-        try {
-          const st = await adapter.getStatus(remoteJobId);
-          if (st.status === "completed") {
-            clearInterval(timer);
-            if (stopProgress) {
-              try {
-                stopProgress();
-              } catch (e) {
-              }
-            }
-            this.transition(jobId, "running", "running", "\u8FDC\u7AEF\u5B8C\u6210");
-            resolve();
-          } else if (st.status === "failed") {
-            clearInterval(timer);
-            if (stopProgress) {
-              try {
-                stopProgress();
-              } catch (e) {
-              }
-            }
-            const err = st.error || { code: "PROVIDER_FAILED", message: "\u8FDC\u7AEF\u6267\u884C\u5931\u8D25" };
-            const code = /OOM|out of memory/i.test(err.message) ? PROVIDER_ERROR_CODES.COMFY_OOM : err.code;
-            this.fail(jobId, "running", code, err.message, false);
-            resolve();
-          } else if (st.status === "unknown") {
-            clearInterval(timer);
-            if (stopProgress) {
-              try {
-                stopProgress();
-              } catch (e) {
-              }
-            }
-            this.fail(jobId, "running", "JOB_LOST", "\u8FDC\u7AEF\u4EFB\u52A1\u4E22\u5931: " + remoteJobId, true);
-            resolve();
-          }
-        } catch (e) {
-        }
-      }, 2e3);
-    });
-  }
-  /* ---------- 取消 (规则十三: 经 adapter 安全取消) ---------- */
-  async cancel(jobId) {
-    const job = this.job(jobId);
-    const status = String(job.status);
-    if (TERMINAL.has(status))
-      throw new Error("JOB_NOT_CANCELLABLE:" + status);
-    this.transition(jobId, status, "cancel_requested", "\u53D6\u6D88\u8BF7\u6C42\u5DF2\u8BB0\u5F55");
-    if (this.activeRuns.has(jobId)) {
-      return this.job(jobId);
-    }
-    const remoteJobId = job.remote_job_id ? String(job.remote_job_id) : null;
-    if (remoteJobId) {
-      await this.doCancel(jobId, remoteJobId);
-    } else {
-      this.transition(jobId, "cancel_requested", "cancelled", "\u672A\u63D0\u4EA4\u8FDC\u7AEF, \u76F4\u63A5\u53D6\u6D88");
-    }
-    return this.job(jobId);
-  }
-  async doCancel(jobId, remoteJobId) {
-    try {
-      const view = this.manager.view(String(this.job(jobId).provider_id));
-      const adapter = await this.manager.adapter(String(view?.id || this.job(jobId).provider_id));
-      const r = await adapter.cancel(remoteJobId);
-      this.transition(jobId, "cancel_requested", "cancelled", "\u5DF2\u53D6\u6D88: " + (r.message || ""));
-    } catch (e) {
-      this.transition(jobId, "cancel_requested", "cancelled", "\u53D6\u6D88\u8BF7\u6C42\u5DF2\u63A5\u53D7 (\u8FDC\u7AEF\u786E\u8BA4\u5931\u8D25: " + String(e.message) + ")");
-    }
-  }
-  /* ---------- 重试 ---------- */
-  async retry(jobId) {
-    const job = this.job(jobId);
-    const status = String(job.status);
-    if (!RETRYABLE_FAILURES.has(status) && status !== "cancelled")
-      throw new Error("JOB_NOT_RETRYABLE:" + status);
-    this.store.raw.prepare("UPDATE jobs SET status='created', remote_job_id=NULL, error_json=NULL, result_assets_json='[]', updated_at=? WHERE id=?").run(Date.now(), jobId);
-    this.store.raw.prepare("INSERT INTO job_events (job_id, from_status, to_status, detail, created_at) VALUES (?,?,?,?,?)").run(jobId, status, "created", "retry requested", Date.now());
-    const j2 = this.job(jobId);
-    this.ctx.broadcast({ type: "job:update", job: j2 });
-    if (this.concurrency < this.maxConcurrency) {
-      this.concurrency++;
-      this.run(jobId).finally(() => {
-        this.concurrency = Math.max(0, this.concurrency - 1);
-      });
-    } else {
-      this.scheduleQueued(jobId);
-    }
-    return j2;
-  }
-  /* ---------- 写回状态 (规则五: AI 成功与写回成功严格区分) ---------- */
-  async markWriteback(jobId, body) {
-    const job = this.job(jobId);
-    const status = String(job.status);
-    if (status !== "result_ready" && status !== "writeback_pending" && status !== "retryable_writeback_failure") {
-      throw new Error("JOB_NOT_WRITEBACKABLE:" + status);
-    }
-    if (body.success) {
-      this.transition(jobId, status, "completed", "\u5199\u56DE\u6210\u529F" + (body.layerName ? ": " + body.layerName : ""));
-    } else {
-      this.transition(jobId, status, "retryable_writeback_failure", "\u5199\u56DE\u5931\u8D25: " + (body.error || "\u672A\u77E5\u539F\u56E0") + " (\u7ED3\u679C\u4FDD\u7559, \u53EF\u91CD\u65B0\u5199\u56DE)");
-    }
-    return this.job(jobId);
-  }
-  /* ---------- 恢复 (规则十五/七) ---------- */
-  async recoverAll() {
-    const rows = this.store.raw.prepare("SELECT id, status, remote_job_id, provider_id FROM jobs WHERE status NOT IN ('completed','cancelled','failed','provider_failure','download_failure','retryable_writeback_failure','rollback_uncertain')").all();
-    let recovered = 0;
-    for (const row of rows) {
-      recovered++;
-      const jobId = row.id;
-      if (row.status === "cancel_requested") {
-        if (row.remote_job_id)
-          await this.doCancel(jobId, row.remote_job_id);
-        else
-          this.transition(jobId, "cancel_requested", "cancelled", "\u6062\u590D: \u5B8C\u6210\u53D6\u6D88");
-        continue;
-      }
-      if (!row.remote_job_id) {
-        this.transition(jobId, row.status, "created", "\u6062\u590D: \u4EFB\u52A1\u4ECE\u672A\u63D0\u4EA4, \u91CD\u65B0\u6267\u884C");
-        this.concurrency++;
-        this.run(jobId).finally(() => {
-          this.concurrency = Math.max(0, this.concurrency - 1);
-        });
-        continue;
-      }
-      try {
-        const view = this.manager.view(row.provider_id);
-        if (!view) {
-          this.fail(jobId, row.status, "PROVIDER_NOT_FOUND", "Provider \u4E0D\u5B58\u5728", false);
-          continue;
-        }
-        const adapter = await this.manager.adapter(row.provider_id);
-        const st = await adapter.recover(row.remote_job_id);
-        if (st.status === "completed") {
-          this.transition(jobId, row.status, "downloading", "\u6062\u590D: \u8FDC\u7AEF\u5DF2\u5B8C\u6210, \u4E0B\u8F7D\u7ED3\u679C (\u4E0D\u91CD\u65B0\u63D0\u4EA4)");
-          this.concurrency++;
-          this.run(jobId, "downloading").finally(() => {
-            this.concurrency = Math.max(0, this.concurrency - 1);
-          });
-        } else if (st.status === "running" || st.status === "queued") {
-          this.transition(jobId, row.status, "running", "\u6062\u590D: \u8FDC\u7AEF\u4ECD\u5728\u6267\u884C (\u4E0D\u91CD\u65B0\u63D0\u4EA4)");
-          this.concurrency++;
-          this.run(jobId, "running").finally(() => {
-            this.concurrency = Math.max(0, this.concurrency - 1);
-          });
-        } else if (st.status === "failed") {
-          this.fail(jobId, row.status, st.error?.code || "PROVIDER_FAILED", st.error?.message || "\u8FDC\u7AEF\u6267\u884C\u5931\u8D25", false);
-        } else {
-          this.fail(jobId, row.status, "JOB_LOST", "\u8FDC\u7AEF\u4EFB\u52A1\u4E0D\u5B58\u5728 (provider_lost)", true);
-        }
-      } catch (e) {
-        this.fail(jobId, row.status, e.code || "RECOVER_FAILED", e.message, true);
-      }
-    }
-    return recovered;
-  }
-  activeCount() {
-    const row = this.store.raw.prepare("SELECT COUNT(*) AS n FROM jobs WHERE status NOT IN ('completed','cancelled','failed','provider_failure','download_failure','retryable_writeback_failure','rollback_uncertain')").get();
-    return Number(row.n);
-  }
-};
+// dist/workflow/importer.js
+var import_node_crypto5 = __toESM(require("node:crypto"), 1);
 
 // dist/workflow/scanner.js
 var NODE_HINTS = [
@@ -44908,7 +44523,6 @@ function defaultBindings(scan) {
 }
 
 // dist/workflow/importer.js
-var import_node_crypto6 = __toESM(require("node:crypto"), 1);
 function importWorkflow(store, body) {
   const name = (body.name || "").trim();
   if (!name)
@@ -44925,20 +44539,20 @@ function importWorkflow(store, body) {
     throw new Error("WORKFLOW_NO_OUTPUT: \u672A\u68C0\u6D4B\u5230\u8F93\u51FA\u8282\u70B9 (SaveImage/PreviewImage)");
   }
   const now = Date.now();
-  const workflowId = "wf_" + import_node_crypto6.default.randomBytes(6).toString("hex");
-  const jsonHash = import_node_crypto6.default.createHash("sha256").update(JSON.stringify(body.json)).digest("hex");
+  const workflowId = "wf_" + import_node_crypto5.default.randomBytes(6).toString("hex");
+  const jsonHash = import_node_crypto5.default.createHash("sha256").update(JSON.stringify(body.json)).digest("hex");
   store.raw.exec("BEGIN;");
   try {
-    store.raw.prepare("INSERT INTO workflows (id, name, version, category, description, provider, source_json_hash, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)").run(workflowId, name, "1.0.0", body.category || "\u672A\u5206\u7C7B", body.description || null, body.provider || "comfyui", jsonHash, now, now);
-    store.raw.prepare("INSERT INTO workflow_versions (id, workflow_id, version, workflow_json_hash, bindings_hash, lockfile_hash, changelog, author, created_at) VALUES (?,?,?,?,?,?,?,?,?)").run("wv_" + import_node_crypto6.default.randomBytes(6).toString("hex"), workflowId, "1.0.0", jsonHash, null, JSON.stringify(scan.lockfile).length ? import_node_crypto6.default.createHash("sha256").update(JSON.stringify(scan.lockfile)).digest("hex") : null, "\u521D\u59CB\u5BFC\u5165", body.author || "import", now);
+    store.raw.prepare("INSERT INTO workflows (id, name, version, category, description, provider, source_json_hash, workflow_json, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)").run(workflowId, name, "1.0.0", body.category || "\u672A\u5206\u7C7B", body.description || null, body.provider || "comfyui", jsonHash, JSON.stringify(body.json), now, now);
+    store.raw.prepare("INSERT INTO workflow_versions (id, workflow_id, version, workflow_json_hash, bindings_hash, lockfile_hash, changelog, author, created_at) VALUES (?,?,?,?,?,?,?,?,?)").run("wv_" + import_node_crypto5.default.randomBytes(6).toString("hex"), workflowId, "1.0.0", jsonHash, null, JSON.stringify(scan.lockfile).length ? import_node_crypto5.default.createHash("sha256").update(JSON.stringify(scan.lockfile)).digest("hex") : null, "\u521D\u59CB\u5BFC\u5165", body.author || "import", now);
     const bindings = defaultBindings(scan);
     const insBinding = store.raw.prepare("INSERT INTO workflow_bindings (id, workflow_id, field_key, node_id, input_key, field_type, label, sort_order, group_name, default_value, display_condition) VALUES (?,?,?,?,?,?,?,?,?,?,?)");
     for (const b of bindings) {
-      insBinding.run("wb_" + import_node_crypto6.default.randomBytes(6).toString("hex"), workflowId, b.fieldKey, b.nodeId, b.inputKey, b.fieldType, b.label, b.sortOrder, b.groupName, b.defaultValue === null ? null : JSON.stringify(b.defaultValue), b.displayCondition);
+      insBinding.run("wb_" + import_node_crypto5.default.randomBytes(6).toString("hex"), workflowId, b.fieldKey, b.nodeId, b.inputKey, b.fieldType, b.label, b.sortOrder, b.groupName, b.defaultValue === null ? null : JSON.stringify(b.defaultValue), b.displayCondition);
     }
     const insDep = store.raw.prepare("INSERT INTO workflow_dependencies (id, workflow_id, kind, name, min_version, status, detail, created_at) VALUES (?,?,?,?,?,?,?,?)");
     for (const d of scan.dependencies) {
-      insDep.run("wd_" + import_node_crypto6.default.randomBytes(6).toString("hex"), workflowId, d.kind, d.name, null, "unknown", null, now);
+      insDep.run("wd_" + import_node_crypto5.default.randomBytes(6).toString("hex"), workflowId, d.kind, d.name, null, "unknown", null, now);
     }
     store.raw.exec("COMMIT;");
   } catch (e) {
@@ -44953,6 +44567,28 @@ function importWorkflow(store, body) {
     dependenciesCount: scan.dependencies.length
   };
 }
+function applyWorkflowBindings(workflowJson, bindings, values) {
+  const out = JSON.parse(JSON.stringify(workflowJson || {}));
+  for (const b of bindings || []) {
+    const node = out[b.node_id];
+    if (!node || !node.inputs)
+      continue;
+    if (!(b.input_key in node.inputs))
+      continue;
+    let v = values[b.field_key];
+    if (v === void 0 || v === null) {
+      try {
+        v = b.default_value ? JSON.parse(b.default_value) : null;
+      } catch (e) {
+        v = b.default_value;
+      }
+    }
+    if (v === void 0 || v === null)
+      continue;
+    node.inputs[b.input_key] = v;
+  }
+  return out;
+}
 function saveWorkflowVersion(store, workflowId, body) {
   const wf = store.raw.prepare("SELECT * FROM workflows WHERE id=?").get(workflowId);
   if (!wf)
@@ -44965,23 +44601,23 @@ function saveWorkflowVersion(store, workflowId, body) {
   try {
     if (body.json !== void 0) {
       const scan = scanWorkflow(body.json);
-      jsonHash = import_node_crypto6.default.createHash("sha256").update(JSON.stringify(body.json)).digest("hex");
-      store.raw.prepare("UPDATE workflows SET source_json_hash=?, updated_at=? WHERE id=?").run(jsonHash, now, workflowId);
+      jsonHash = import_node_crypto5.default.createHash("sha256").update(JSON.stringify(body.json)).digest("hex");
+      store.raw.prepare("UPDATE workflows SET source_json_hash=?, workflow_json=?, updated_at=? WHERE id=?").run(jsonHash, JSON.stringify(body.json), now, workflowId);
       store.raw.prepare("DELETE FROM workflow_dependencies WHERE workflow_id=?").run(workflowId);
       const insDep = store.raw.prepare("INSERT INTO workflow_dependencies (id, workflow_id, kind, name, min_version, status, detail, created_at) VALUES (?,?,?,?,?,?,?,?)");
       for (const d of scan.dependencies) {
-        insDep.run("wd_" + import_node_crypto6.default.randomBytes(6).toString("hex"), workflowId, d.kind, d.name, null, "unknown", null, now);
+        insDep.run("wd_" + import_node_crypto5.default.randomBytes(6).toString("hex"), workflowId, d.kind, d.name, null, "unknown", null, now);
       }
     }
     if (body.bindings) {
       store.raw.prepare("DELETE FROM workflow_bindings WHERE workflow_id=?").run(workflowId);
       const insBinding = store.raw.prepare("INSERT INTO workflow_bindings (id, workflow_id, field_key, node_id, input_key, field_type, label, sort_order, group_name, default_value, display_condition) VALUES (?,?,?,?,?,?,?,?,?,?,?)");
       for (const b of body.bindings) {
-        insBinding.run("wb_" + import_node_crypto6.default.randomBytes(6).toString("hex"), workflowId, b.fieldKey, b.nodeId, b.inputKey, b.fieldType, b.label, b.sortOrder, b.groupName, b.defaultValue === null ? null : JSON.stringify(b.defaultValue), null);
+        insBinding.run("wb_" + import_node_crypto5.default.randomBytes(6).toString("hex"), workflowId, b.fieldKey, b.nodeId, b.inputKey, b.fieldType, b.label, b.sortOrder, b.groupName, b.defaultValue === null ? null : JSON.stringify(b.defaultValue), null);
       }
     }
-    const bindingsHash = import_node_crypto6.default.createHash("sha256").update(JSON.stringify(store.raw.prepare("SELECT field_key,node_id,input_key FROM workflow_bindings WHERE workflow_id=?").all(workflowId))).digest("hex");
-    store.raw.prepare("INSERT INTO workflow_versions (id, workflow_id, version, workflow_json_hash, bindings_hash, lockfile_hash, changelog, author, created_at) VALUES (?,?,?,?,?,?,?,?,?)").run("wv_" + import_node_crypto6.default.randomBytes(6).toString("hex"), workflowId, newVersion, jsonHash, bindingsHash, null, body.changelog || "\u66F4\u65B0", body.author || "studio", now);
+    const bindingsHash = import_node_crypto5.default.createHash("sha256").update(JSON.stringify(store.raw.prepare("SELECT field_key,node_id,input_key FROM workflow_bindings WHERE workflow_id=?").all(workflowId))).digest("hex");
+    store.raw.prepare("INSERT INTO workflow_versions (id, workflow_id, version, workflow_json_hash, bindings_hash, lockfile_hash, changelog, author, created_at) VALUES (?,?,?,?,?,?,?,?,?)").run("wv_" + import_node_crypto5.default.randomBytes(6).toString("hex"), workflowId, newVersion, jsonHash, bindingsHash, null, body.changelog || "\u66F4\u65B0", body.author || "studio", now);
     store.raw.prepare("UPDATE workflows SET version=?, updated_at=? WHERE id=?").run(newVersion, now, workflowId);
     store.raw.exec("COMMIT;");
   } catch (e) {
@@ -45028,6 +44664,496 @@ async function checkDependencies(store, workflowId, comfyBaseUrl) {
     };
   });
 }
+
+// dist/job-engine.js
+var TERMINAL = /* @__PURE__ */ new Set(["completed", "cancelled", "failed", "provider_failure", "download_failure", "retryable_writeback_failure", "rollback_uncertain"]);
+var RETRYABLE_FAILURES = /* @__PURE__ */ new Set(["provider_failure", "download_failure", "failed", "retryable_writeback_failure"]);
+var JobEngine = class {
+  store;
+  manager;
+  cfg;
+  ctx;
+  activeRuns = /* @__PURE__ */ new Map();
+  concurrency = 0;
+  maxConcurrency = 4;
+  constructor(store, manager, cfg2, ctx) {
+    this.store = store;
+    this.manager = manager;
+    this.cfg = cfg2;
+    this.ctx = ctx;
+  }
+  /* ---------- 状态迁移 ---------- */
+  transition(jobId, from, to, detail) {
+    const now = Date.now();
+    this.store.raw.prepare("UPDATE jobs SET status=?, updated_at=? WHERE id=?").run(to, now, jobId);
+    this.store.raw.prepare("INSERT INTO job_events (job_id, from_status, to_status, detail, created_at) VALUES (?,?,?,?,?)").run(jobId, from, to, detail, now);
+    const job = this.store.raw.prepare("SELECT * FROM jobs WHERE id=?").get(jobId);
+    this.ctx.broadcast({ type: "job:update", job });
+    return job;
+  }
+  fail(jobId, from, code, message, retryable) {
+    const to = retryable ? "provider_failure" : "failed";
+    const now = Date.now();
+    this.store.raw.prepare("UPDATE jobs SET status=?, error_json=?, updated_at=? WHERE id=?").run(to, JSON.stringify({ code, message, retryable, diagnosticId: import_node_crypto6.default.randomBytes(4).toString("hex") }), now, jobId);
+    this.store.raw.prepare("INSERT INTO job_events (job_id, from_status, to_status, detail, created_at) VALUES (?,?,?,?,?)").run(jobId, from, to, message, now);
+    const job = this.store.raw.prepare("SELECT * FROM jobs WHERE id=?").get(jobId);
+    this.ctx.broadcast({ type: "job:update", job });
+    return job;
+  }
+  job(jobId) {
+    const j = this.store.raw.prepare("SELECT * FROM jobs WHERE id=?").get(jobId);
+    if (!j)
+      throw new Error("JOB_NOT_FOUND:" + jobId);
+    return j;
+  }
+  /* ---------- 创建 + 启动 ---------- */
+  async create(body) {
+    const id = import_node_crypto6.default.randomUUID();
+    const providerId = String(body.providerId || "local-comfy");
+    const view = this.manager.view(providerId);
+    if (!view)
+      throw new Error("PROVIDER_NOT_FOUND:" + providerId);
+    if (!view.enabled && !view.configured)
+      throw new Error("PROVIDER_NOT_CONFIGURED:" + providerId);
+    const now = Date.now();
+    this.store.raw.prepare(`INSERT INTO jobs (id, status, provider_id, provider_type, workflow_id, model_id, inputs_json, parameters_json, snapshot_json, snapshot_id, project_id, source_document_id, source_document_name, source_document_path, source_layer_ids_json, selection_bounds_json, canvas_width, canvas_height, color_mode, bit_depth, created_at, updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, "created", providerId, view.type, body.workflowId ? String(body.workflowId) : null, body.modelId ? String(body.modelId) : null, JSON.stringify(body.inputs || {}), JSON.stringify(body.parameters || {}), JSON.stringify(body.snapshot || {}), body.snapshot?.id ? String(body.snapshot.id) : null, body.projectId ? String(body.projectId) : null, body.sourceDocumentId ? String(body.sourceDocumentId) : null, body.sourceDocumentName ? String(body.sourceDocumentName) : null, body.sourceDocumentPath ? String(body.sourceDocumentPath) : null, JSON.stringify(body.sourceLayerIds || []), body.selectionBounds ? JSON.stringify(body.selectionBounds) : null, body.canvasWidth ? Number(body.canvasWidth) : null, body.canvasHeight ? Number(body.canvasHeight) : null, body.colorMode ? String(body.colorMode) : null, body.bitDepth ? Number(body.bitDepth) : null, now, now);
+    this.store.raw.prepare("INSERT INTO job_events (job_id, from_status, to_status, detail, created_at) VALUES (?,?,?,?,?)").run(id, null, "created", "job created", now);
+    const job = this.store.raw.prepare("SELECT * FROM jobs WHERE id=?").get(id);
+    if (this.concurrency >= this.maxConcurrency) {
+      this.transition(id, "created", "created", "waiting for concurrency slot");
+      this.scheduleQueued(id);
+      return job;
+    }
+    this.concurrency++;
+    this.run(id).finally(() => {
+      this.concurrency = Math.max(0, this.concurrency - 1);
+    });
+    return job;
+  }
+  pendingStart = /* @__PURE__ */ new Set();
+  scheduleQueued(jobId) {
+    if (this.pendingStart.has(jobId))
+      return;
+    this.pendingStart.add(jobId);
+    const timer = setInterval(() => {
+      if (this.concurrency < this.maxConcurrency) {
+        clearInterval(timer);
+        this.pendingStart.delete(jobId);
+        const j = this.job(jobId);
+        if (String(j.status) === "created") {
+          this.concurrency++;
+          this.run(jobId).finally(() => {
+            this.concurrency = Math.max(0, this.concurrency - 1);
+          });
+        }
+      }
+    }, 2e3);
+  }
+  /* ---------- 主执行管线 ----------
+   * resumeFrom: 恢复模式 (规则十五) — "downloading" 跳过提交直接下载; "running" 恢复监控 */
+  async run(jobId, resumeFrom) {
+    const job0 = this.job(jobId);
+    const providerId = String(job0.provider_id);
+    const view = this.manager.view(providerId);
+    if (!view) {
+      this.fail(jobId, String(job0.status), "PROVIDER_NOT_FOUND", "Provider \u4E0D\u5B58\u5728: " + providerId, false);
+      return;
+    }
+    let adapter;
+    try {
+      adapter = await this.manager.adapter(providerId);
+    } catch (e) {
+      this.fail(jobId, String(job0.status), e.code || "PROVIDER_FAILED", e.message, true);
+      return;
+    }
+    let request;
+    let remoteJobId;
+    if (resumeFrom === "downloading") {
+      request = this.buildRequest(job0, view);
+      remoteJobId = job0.remote_job_id ? String(job0.remote_job_id) : null;
+      if (!remoteJobId) {
+        this.fail(jobId, String(job0.status), "JOB_LOST", "\u6062\u590D\u5931\u8D25: \u7F3A\u5C11 remoteJobId", true);
+        return;
+      }
+      await this.downloadPhase(jobId, adapter, remoteJobId, request);
+      return;
+    }
+    if (resumeFrom === "running") {
+      request = this.buildRequest(job0, view);
+      remoteJobId = job0.remote_job_id ? String(job0.remote_job_id) : null;
+      if (!remoteJobId) {
+        this.fail(jobId, String(job0.status), "JOB_LOST", "\u6062\u590D\u5931\u8D25: \u7F3A\u5C11 remoteJobId", true);
+        return;
+      }
+      const runState2 = {};
+      this.activeRuns.set(jobId, runState2);
+      try {
+        await this.pollUntilDone(jobId, adapter, remoteJobId, runState2);
+      } catch (e) {
+        const err = e;
+        this.fail(jobId, "running", err.code || "PROVIDER_FAILED", err.message, true);
+        return;
+      }
+      const j = this.job(jobId);
+      if (String(j.status) !== "running")
+        return;
+      await this.downloadPhase(jobId, adapter, remoteJobId, request);
+      return;
+    }
+    this.transition(jobId, String(job0.status), "validating", "\u6821\u9A8C Provider \u4E0E\u8F93\u5165");
+    request = this.buildRequest(job0, view);
+    try {
+      const v = await adapter.validate(request);
+      if (!v.ok) {
+        this.fail(jobId, "validating", v.errors[0]?.code || "WORKFLOW_INVALID", v.errors.map((e) => e.message).join("; "), false);
+        return;
+      }
+    } catch (e) {
+      this.fail(jobId, "validating", e.code || "PROVIDER_FAILED", e.message, true);
+      return;
+    }
+    this.transition(jobId, "validating", "snapshotting", "\u68C0\u67E5\u5FEB\u7167\u8D44\u4EA7");
+    const inputAssetIds = (request.inputs.imageAssetIds || []).filter(Boolean);
+    for (const aid of inputAssetIds) {
+      const a = this.store.raw.prepare("SELECT storage_path FROM assets WHERE id=?").get(aid);
+      if (!a || !import_node_fs4.default.existsSync(a.storage_path)) {
+        this.fail(jobId, "snapshotting", "ASSET_MISSING", "\u8F93\u5165\u8D44\u4EA7\u4E0D\u5B58\u5728: " + aid, false);
+        return;
+      }
+    }
+    try {
+      if (view.type === "comfyui" && inputAssetIds.length) {
+        this.transition(jobId, "snapshotting", "uploading", "\u4E0A\u4F20\u8F93\u5165\u56FE\u50CF (" + inputAssetIds.length + ")");
+        const comfy = adapter;
+        const uploaded = [];
+        for (const aid of inputAssetIds) {
+          const a = this.store.raw.prepare("SELECT storage_path, mime_type FROM assets WHERE id=?").get(aid);
+          if (!a)
+            continue;
+          const bytes = new Uint8Array(import_node_fs4.default.readFileSync(a.storage_path));
+          const ext = a.mime_type === "image/jpeg" ? ".jpg" : a.mime_type === "image/webp" ? ".webp" : ".png";
+          const name = await comfy.uploadImage(bytes, aid + ext);
+          uploaded.push(name);
+        }
+        request.inputs.imageAssetIds = uploaded;
+      }
+    } catch (e) {
+      this.fail(jobId, "uploading", e.code || "UPLOAD_FAILED", e.message, true);
+      return;
+    }
+    this.transition(jobId, inputAssetIds.length ? "uploading" : "snapshotting", "queued", "\u63D0\u4EA4\u5230 " + providerId);
+    try {
+      const remote = await adapter.submit(request);
+      remoteJobId = remote.remoteJobId;
+      this.store.raw.prepare("UPDATE jobs SET remote_job_id=? WHERE id=?").run(remoteJobId, jobId);
+    } catch (e) {
+      const err = e;
+      this.fail(jobId, "queued", err.code || "SUBMIT_FAILED", err.message, err.retryable !== false);
+      return;
+    }
+    this.transition(jobId, "queued", "running", "\u8FDC\u7AEF\u6267\u884C\u4E2D");
+    const runState = {};
+    this.activeRuns.set(jobId, runState);
+    try {
+      await this.pollUntilDone(jobId, adapter, remoteJobId, runState);
+    } catch (e) {
+      const err = e;
+      this.fail(jobId, "running", err.code || "PROVIDER_FAILED", err.message, true);
+      return;
+    }
+    const jAfter = this.job(jobId);
+    if (String(jAfter.status) !== "running")
+      return;
+    await this.downloadPhase(jobId, adapter, remoteJobId, request);
+  }
+  /* 下载阶段 (步骤 6-8) */
+  async downloadPhase(jobId, adapter, remoteJobId, request) {
+    this.transition(jobId, String(this.job(jobId).status), "downloading", "\u4E0B\u8F7D\u7ED3\u679C");
+    let results;
+    try {
+      results = await adapter.downloadResults(remoteJobId);
+    } catch (e) {
+      const err = e;
+      this.fail(jobId, "downloading", err.code || "ASSET_DOWNLOAD_FAILED", err.message, true);
+      return;
+    }
+    if (!results.length) {
+      this.fail(jobId, "downloading", "COMFY_NO_OUTPUT", "\u4EFB\u52A1\u5B8C\u6210\u4F46\u65E0\u8F93\u51FA\u56FE\u50CF", false);
+      return;
+    }
+    const assetIds = [];
+    for (const r of results) {
+      if (!r.bytes)
+        continue;
+      const assetId = import_node_crypto6.default.randomUUID();
+      const hash = import_node_crypto6.default.createHash("sha256").update(Buffer.from(r.bytes)).digest("hex");
+      const ext = r.filename.toLowerCase().endsWith(".jpg") || r.filename.toLowerCase().endsWith(".jpeg") ? ".jpg" : r.filename.toLowerCase().endsWith(".webp") ? ".webp" : ".png";
+      const storagePath = import_node_path3.default.join(this.cfg.assetsDir, assetId + ext);
+      import_node_fs4.default.writeFileSync(storagePath, Buffer.from(r.bytes));
+      let width = null, height = null, mime = "image/png";
+      const meta = imageMeta(r.bytes);
+      if (meta.format) {
+        width = meta.width;
+        height = meta.height;
+        mime = mimeFromFormat(meta.format);
+      }
+      this.store.raw.prepare("INSERT INTO assets (id, job_id, mime_type, width, height, size, hash, storage_path, kind, role, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)").run(assetId, jobId, mime, width, height, r.bytes.length, hash, storagePath, "result", null, Date.now());
+      this.store.raw.prepare("INSERT INTO job_outputs (id, job_id, asset_id, label, seed, width, height, favorite, created_at) VALUES (?,?,?,?,?,?,?,0,?)").run(import_node_crypto6.default.randomUUID(), jobId, assetId, r.filename, this.seedOf(jobId), width, height, Date.now());
+      assetIds.push(assetId);
+    }
+    const jNow = this.job(jobId);
+    this.store.raw.prepare("UPDATE jobs SET result_assets_json=?, duration_ms=? WHERE id=?").run(JSON.stringify(assetIds), Date.now() - Number(jNow.created_at || Date.now()), jobId);
+    const usageId = import_node_crypto6.default.randomUUID();
+    const duration = Date.now() - Number(jNow.created_at || Date.now());
+    this.store.raw.prepare("INSERT INTO usage_records (id, job_id, provider_id, provider_type, model_id, estimated_cost, actual_cost, currency, duration_ms, gpu_duration_ms, tokens_in, tokens_out, images_count, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)").run(usageId, jobId, String(jNow.provider_id), String(jNow.provider_type), jNow.model_id ? String(jNow.model_id) : null, null, null, null, duration, String(jNow.provider_type) === "comfyui" ? duration : null, null, null, assetIds.length, Date.now());
+    this.transition(jobId, "downloading", "result_ready", "\u7ED3\u679C\u5DF2\u7F13\u5B58\uFF0C\u7B49\u5F85\u5199\u56DE");
+    this.activeRuns.delete(jobId);
+    this.ctx.broadcast({ type: "job:result", jobId, assetIds });
+  }
+  seedOf(jobId) {
+    try {
+      const j = this.job(jobId);
+      const p = JSON.parse(String(j.parameters_json || "{}"));
+      return typeof p.seed === "number" ? p.seed : null;
+    } catch (e) {
+      return null;
+    }
+  }
+  buildRequest(job, view) {
+    let inputs = {};
+    let params = {};
+    try {
+      inputs = JSON.parse(String(job.inputs_json || "{}"));
+    } catch (e) {
+    }
+    try {
+      params = JSON.parse(String(job.parameters_json || "{}"));
+    } catch (e) {
+    }
+    let workflowJson;
+    if (job.workflow_id) {
+      try {
+        const wf = this.store.raw.prepare("SELECT workflow_json FROM workflows WHERE id=?").get(String(job.workflow_id));
+        if (wf?.workflow_json) {
+          const parsed = JSON.parse(String(wf.workflow_json));
+          const bindings = this.store.raw.prepare("SELECT field_key, node_id, input_key, field_type, default_value FROM workflow_bindings WHERE workflow_id=?").all(String(job.workflow_id));
+          workflowJson = applyWorkflowBindings(parsed, bindings, params);
+        }
+      } catch (e) {
+      }
+    }
+    return {
+      providerId: String(job.provider_id),
+      workflowId: job.workflow_id ? String(job.workflow_id) : void 0,
+      workflowJson,
+      modelId: job.model_id ? String(job.model_id) : void 0,
+      inputs: {
+        prompt: inputs.prompt ? String(inputs.prompt) : void 0,
+        negativePrompt: inputs.negativePrompt ? String(inputs.negativePrompt) : void 0,
+        imageAssetIds: Array.isArray(inputs.imageAssetIds) ? inputs.imageAssetIds : void 0,
+        maskAssetId: inputs.maskAssetId ? String(inputs.maskAssetId) : void 0,
+        referenceImages: Array.isArray(inputs.referenceImages) ? inputs.referenceImages : void 0
+      },
+      parameters: params
+    };
+  }
+  /* 轮询直到 completed (或失败/取消) */
+  pollUntilDone(jobId, adapter, remoteJobId, runState) {
+    return new Promise((resolve, reject) => {
+      const stopProgress = "connectProgress" in adapter ? adapter.connectProgress(remoteJobId, (f) => {
+        const j = this.job(jobId);
+        if (String(j.status) === "running") {
+          this.store.raw.prepare("UPDATE jobs SET updated_at=? WHERE id=?").run(Date.now(), jobId);
+          this.ctx.broadcast({ type: "job:progress", jobId, progress: Math.round(f * 100) });
+        }
+      }) : void 0;
+      runState.stopProgress = stopProgress;
+      const timer = setInterval(async () => {
+        const j = this.job(jobId);
+        const status = String(j.status);
+        if (status === "cancel_requested") {
+          clearInterval(timer);
+          if (stopProgress) {
+            try {
+              stopProgress();
+            } catch (e) {
+            }
+          }
+          this.doCancel(jobId, remoteJobId).then(() => resolve()).catch((e) => reject(e));
+          return;
+        }
+        if (status !== "running") {
+          clearInterval(timer);
+          if (stopProgress) {
+            try {
+              stopProgress();
+            } catch (e) {
+            }
+          }
+          resolve();
+          return;
+        }
+        try {
+          const st = await adapter.getStatus(remoteJobId);
+          if (st.status === "completed") {
+            clearInterval(timer);
+            if (stopProgress) {
+              try {
+                stopProgress();
+              } catch (e) {
+              }
+            }
+            this.transition(jobId, "running", "running", "\u8FDC\u7AEF\u5B8C\u6210");
+            resolve();
+          } else if (st.status === "failed") {
+            clearInterval(timer);
+            if (stopProgress) {
+              try {
+                stopProgress();
+              } catch (e) {
+              }
+            }
+            const err = st.error || { code: "PROVIDER_FAILED", message: "\u8FDC\u7AEF\u6267\u884C\u5931\u8D25" };
+            const code = /OOM|out of memory/i.test(err.message) ? PROVIDER_ERROR_CODES.COMFY_OOM : err.code;
+            this.fail(jobId, "running", code, err.message, false);
+            resolve();
+          } else if (st.status === "unknown") {
+            clearInterval(timer);
+            if (stopProgress) {
+              try {
+                stopProgress();
+              } catch (e) {
+              }
+            }
+            this.fail(jobId, "running", "JOB_LOST", "\u8FDC\u7AEF\u4EFB\u52A1\u4E22\u5931: " + remoteJobId, true);
+            resolve();
+          }
+        } catch (e) {
+        }
+      }, 2e3);
+    });
+  }
+  /* ---------- 取消 (规则十三: 经 adapter 安全取消) ---------- */
+  async cancel(jobId) {
+    const job = this.job(jobId);
+    const status = String(job.status);
+    if (TERMINAL.has(status))
+      throw new Error("JOB_NOT_CANCELLABLE:" + status);
+    this.transition(jobId, status, "cancel_requested", "\u53D6\u6D88\u8BF7\u6C42\u5DF2\u8BB0\u5F55");
+    if (this.activeRuns.has(jobId)) {
+      return this.job(jobId);
+    }
+    const remoteJobId = job.remote_job_id ? String(job.remote_job_id) : null;
+    if (remoteJobId) {
+      await this.doCancel(jobId, remoteJobId);
+    } else {
+      this.transition(jobId, "cancel_requested", "cancelled", "\u672A\u63D0\u4EA4\u8FDC\u7AEF, \u76F4\u63A5\u53D6\u6D88");
+    }
+    return this.job(jobId);
+  }
+  async doCancel(jobId, remoteJobId) {
+    try {
+      const view = this.manager.view(String(this.job(jobId).provider_id));
+      const adapter = await this.manager.adapter(String(view?.id || this.job(jobId).provider_id));
+      const r = await adapter.cancel(remoteJobId);
+      this.transition(jobId, "cancel_requested", "cancelled", "\u5DF2\u53D6\u6D88: " + (r.message || ""));
+    } catch (e) {
+      this.transition(jobId, "cancel_requested", "cancelled", "\u53D6\u6D88\u8BF7\u6C42\u5DF2\u63A5\u53D7 (\u8FDC\u7AEF\u786E\u8BA4\u5931\u8D25: " + String(e.message) + ")");
+    }
+  }
+  /* ---------- 重试 ---------- */
+  async retry(jobId) {
+    const job = this.job(jobId);
+    const status = String(job.status);
+    if (!RETRYABLE_FAILURES.has(status) && status !== "cancelled")
+      throw new Error("JOB_NOT_RETRYABLE:" + status);
+    this.store.raw.prepare("UPDATE jobs SET status='created', remote_job_id=NULL, error_json=NULL, result_assets_json='[]', updated_at=? WHERE id=?").run(Date.now(), jobId);
+    this.store.raw.prepare("INSERT INTO job_events (job_id, from_status, to_status, detail, created_at) VALUES (?,?,?,?,?)").run(jobId, status, "created", "retry requested", Date.now());
+    const j2 = this.job(jobId);
+    this.ctx.broadcast({ type: "job:update", job: j2 });
+    if (this.concurrency < this.maxConcurrency) {
+      this.concurrency++;
+      this.run(jobId).finally(() => {
+        this.concurrency = Math.max(0, this.concurrency - 1);
+      });
+    } else {
+      this.scheduleQueued(jobId);
+    }
+    return j2;
+  }
+  /* ---------- 写回状态 (规则五: AI 成功与写回成功严格区分) ---------- */
+  async markWriteback(jobId, body) {
+    const job = this.job(jobId);
+    const status = String(job.status);
+    if (status !== "result_ready" && status !== "writeback_pending" && status !== "retryable_writeback_failure") {
+      throw new Error("JOB_NOT_WRITEBACKABLE:" + status);
+    }
+    if (body.success) {
+      this.transition(jobId, status, "completed", "\u5199\u56DE\u6210\u529F" + (body.layerName ? ": " + body.layerName : ""));
+    } else {
+      this.transition(jobId, status, "retryable_writeback_failure", "\u5199\u56DE\u5931\u8D25: " + (body.error || "\u672A\u77E5\u539F\u56E0") + " (\u7ED3\u679C\u4FDD\u7559, \u53EF\u91CD\u65B0\u5199\u56DE)");
+    }
+    return this.job(jobId);
+  }
+  /* ---------- 恢复 (规则十五/七) ---------- */
+  async recoverAll() {
+    const rows = this.store.raw.prepare("SELECT id, status, remote_job_id, provider_id FROM jobs WHERE status NOT IN ('completed','cancelled','failed','provider_failure','download_failure','retryable_writeback_failure','rollback_uncertain')").all();
+    let recovered = 0;
+    for (const row of rows) {
+      recovered++;
+      const jobId = row.id;
+      if (row.status === "cancel_requested") {
+        if (row.remote_job_id)
+          await this.doCancel(jobId, row.remote_job_id);
+        else
+          this.transition(jobId, "cancel_requested", "cancelled", "\u6062\u590D: \u5B8C\u6210\u53D6\u6D88");
+        continue;
+      }
+      if (!row.remote_job_id) {
+        this.transition(jobId, row.status, "created", "\u6062\u590D: \u4EFB\u52A1\u4ECE\u672A\u63D0\u4EA4, \u91CD\u65B0\u6267\u884C");
+        this.concurrency++;
+        this.run(jobId).finally(() => {
+          this.concurrency = Math.max(0, this.concurrency - 1);
+        });
+        continue;
+      }
+      try {
+        const view = this.manager.view(row.provider_id);
+        if (!view) {
+          this.fail(jobId, row.status, "PROVIDER_NOT_FOUND", "Provider \u4E0D\u5B58\u5728", false);
+          continue;
+        }
+        const adapter = await this.manager.adapter(row.provider_id);
+        const st = await adapter.recover(row.remote_job_id);
+        if (st.status === "completed") {
+          this.transition(jobId, row.status, "downloading", "\u6062\u590D: \u8FDC\u7AEF\u5DF2\u5B8C\u6210, \u4E0B\u8F7D\u7ED3\u679C (\u4E0D\u91CD\u65B0\u63D0\u4EA4)");
+          this.concurrency++;
+          this.run(jobId, "downloading").finally(() => {
+            this.concurrency = Math.max(0, this.concurrency - 1);
+          });
+        } else if (st.status === "running" || st.status === "queued") {
+          this.transition(jobId, row.status, "running", "\u6062\u590D: \u8FDC\u7AEF\u4ECD\u5728\u6267\u884C (\u4E0D\u91CD\u65B0\u63D0\u4EA4)");
+          this.concurrency++;
+          this.run(jobId, "running").finally(() => {
+            this.concurrency = Math.max(0, this.concurrency - 1);
+          });
+        } else if (st.status === "failed") {
+          this.fail(jobId, row.status, st.error?.code || "PROVIDER_FAILED", st.error?.message || "\u8FDC\u7AEF\u6267\u884C\u5931\u8D25", false);
+        } else {
+          this.fail(jobId, row.status, "JOB_LOST", "\u8FDC\u7AEF\u4EFB\u52A1\u4E0D\u5B58\u5728 (provider_lost)", true);
+        }
+      } catch (e) {
+        this.fail(jobId, row.status, e.code || "RECOVER_FAILED", e.message, true);
+      }
+    }
+    return recovered;
+  }
+  activeCount() {
+    const row = this.store.raw.prepare("SELECT COUNT(*) AS n FROM jobs WHERE status NOT IN ('completed','cancelled','failed','provider_failure','download_failure','retryable_writeback_failure','rollback_uncertain')").get();
+    return Number(row.n);
+  }
+};
 
 // dist/agent/agent.js
 var import_node_crypto7 = __toESM(require("node:crypto"), 1);
@@ -45189,13 +45315,15 @@ async function executeTool(tool, args, ctx) {
 }
 
 // dist/server.js
-var PUBLIC_PATHS = /* @__PURE__ */ new Set(["/v1/health", "/v1/pair", "/v1/system"]);
+var PUBLIC_PATHS = /* @__PURE__ */ new Set(["/v1/health", "/v1/pair/request", "/v1/pair/confirm", "/v1/system"]);
 function buildServer() {
   const cfg2 = loadConfig();
   const store = new Store(cfg2);
   seedProviders(store);
-  if (!getToken(store))
-    generateToken(store);
+  if (!getToken(store)) {
+  }
+  ensureNonce(store);
+  const startedAt = Date.now();
   const app2 = (0, import_fastify.default)({ logger: { level: process.env.A4P_LOG_LEVEL || "info" } });
   app2.register(import_multipart.default, { limits: { fileSize: 200 * 1024 * 1024, files: 12 } });
   const wss = new import_websocket_server.default({ noServer: true });
@@ -45260,14 +45388,18 @@ function buildServer() {
     host: cfg2.host,
     lanMode: cfg2.host !== "127.0.0.1"
   }));
-  app2.post("/v1/pair", async (req) => {
+  app2.post("/v1/pair/request", async () => {
+    return pairRequest(store, startedAt);
+  });
+  app2.post("/v1/pair/confirm", async (req, reply) => {
     const body = req.body || {};
-    if (body.rotate === true) {
-      const t2 = rotateToken(store);
-      return { paired: true, token: t2, rotated: true };
-    }
-    const t = getToken(store) || generateToken(store);
-    return { paired: true, token: t, version: VERSION };
+    const r = pairConfirm(store, body.challenge);
+    if (!r.ok)
+      return reply.code(409).send({ error: { code: r.code, message: r.message } });
+    return { paired: true, token: r.token };
+  });
+  app2.post("/v1/pair", async (_req, reply) => {
+    return reply.code(409).send({ error: { code: "PAIRING_CHALLENGE_REQUIRED", message: "\u8BF7\u4F7F\u7528 /v1/pair/request + /v1/pair/confirm \u4E24\u6BB5\u5F0F\u914D\u5BF9" } });
   });
   app2.get("/v1/system", async () => {
     const gpu = await readGpuInfo();
@@ -45285,6 +45417,13 @@ function buildServer() {
   });
   app2.get("/v1/gpu", async () => readGpuInfo());
   app2.get("/v1/providers", async () => ({ providers: listProviders(store) }));
+  app2.get("/v1/providers/:id", async (req, reply) => {
+    const { id } = req.params;
+    const p = listProviders(store).find((x) => x.id === id);
+    if (!p)
+      return reply.code(404).send({ error: { code: "PROVIDER_NOT_FOUND", message: "Provider \u4E0D\u5B58\u5728: " + id } });
+    return { provider: p };
+  });
   app2.get("/v1/providers/:id/models", async (req, reply) => {
     const { id } = req.params;
     const p = listProviders(store).find((x) => x.id === id);
@@ -45293,24 +45432,98 @@ function buildServer() {
     if (!p.enabled && !p.configured) {
       return reply.code(409).send({ error: { code: "PROVIDER_NOT_CONFIGURED", message: "Provider \u5C1A\u672A\u914D\u7F6E", providerId: id } });
     }
-    return { providerId: id, models: [], configured: p.configured };
+    try {
+      const adapter = await manager.adapter(id);
+      const models = await adapter.listModels();
+      return { providerId: id, models, supported: true, configured: p.configured };
+    } catch (e) {
+      const code = e.code || "PROVIDER_ERROR";
+      if (code === "PROVIDER_NOT_CONFIGURED") {
+        return reply.code(409).send({ error: { code, message: "Provider \u5C1A\u672A\u914D\u7F6E\uFF08\u9700\u8981 API Key / \u7AEF\u70B9\uFF09", providerId: id } });
+      }
+      return { providerId: id, models: [], supported: false, manualModelAllowed: true, configured: p.configured, error: { code, message: String(e.message) } };
+    }
   });
   app2.get("/v1/providers/:id/capabilities", async (req, reply) => {
     const { id } = req.params;
     const p = listProviders(store).find((x) => x.id === id);
     if (!p)
       return reply.code(404).send({ error: { code: "PROVIDER_NOT_FOUND", message: "Provider \u4E0D\u5B58\u5728: " + id } });
-    return { providerId: id, capabilities: p.capabilities };
+    try {
+      const adapter = await manager.adapter(id);
+      const caps = await adapter.getCapabilities();
+      return { providerId: id, capabilities: caps, configured: p.configured, enabled: p.enabled };
+    } catch (e) {
+      const code = e.code || "PROVIDER_ERROR";
+      if (code === "PROVIDER_NOT_CONFIGURED") {
+        return reply.code(409).send({ error: { code, message: "Provider \u5C1A\u672A\u914D\u7F6E", providerId: id } });
+      }
+      return reply.code(500).send({ error: { code, message: String(e.message) } });
+    }
   });
   app2.post("/v1/providers/:id/test", async (req, reply) => {
     const { id } = req.params;
     const p = listProviders(store).find((x) => x.id === id);
     if (!p)
       return reply.code(404).send({ error: { code: "PROVIDER_NOT_FOUND", message: "Provider \u4E0D\u5B58\u5728: " + id } });
-    if (!p.configured) {
-      return { ok: false, providerId: id, error: { code: "PROVIDER_NOT_CONFIGURED", message: "Provider \u5C1A\u672A\u914D\u7F6E" } };
+    try {
+      const adapter = await manager.adapter(id);
+      if (!adapter.testConnection) {
+        return { ok: false, providerId: id, latencyMs: null, error: { code: "PROVIDER_TEST_UNSUPPORTED", message: "\u8BE5 Provider \u672A\u5B9E\u73B0\u8FDE\u901A\u6027\u6D4B\u8BD5" } };
+      }
+      const r = await adapter.testConnection();
+      return { ok: r.ok, providerId: id, latencyMs: r.latencyMs ?? null, code: r.code || null, message: r.message || null };
+    } catch (e) {
+      const code = e.code || "PROVIDER_ERROR";
+      if (code === "PROVIDER_NOT_CONFIGURED") {
+        return { ok: false, providerId: id, latencyMs: null, error: { code, message: "Provider \u5C1A\u672A\u914D\u7F6E\uFF08\u9700\u8981 API Key / \u7AEF\u70B9\uFF09" } };
+      }
+      return { ok: false, providerId: id, latencyMs: null, error: { code, message: String(e.message) } };
     }
-    return { ok: true, providerId: id, message: "\u914D\u7F6E\u5B58\u5728" };
+  });
+  app2.patch("/v1/providers/:id", async (req, reply) => {
+    const { id } = req.params;
+    const p = listProviders(store).find((x) => x.id === id);
+    if (!p)
+      return reply.code(404).send({ error: { code: "PROVIDER_NOT_FOUND", message: "Provider \u4E0D\u5B58\u5728: " + id } });
+    const body = req.body || {};
+    const fields = [];
+    const params = [];
+    if (body.enabled !== void 0) {
+      fields.push("enabled=?");
+      params.push(body.enabled ? 1 : 0);
+    }
+    if (body.baseUrl !== void 0) {
+      fields.push("base_url=?");
+      params.push(body.baseUrl ? String(body.baseUrl) : "");
+    }
+    if (body.name !== void 0) {
+      fields.push("name=?");
+      params.push(String(body.name));
+    }
+    if (body.config !== void 0) {
+      const row = store.raw.prepare("SELECT config_json FROM providers WHERE id=?").get(id);
+      let cfg3 = {};
+      try {
+        cfg3 = JSON.parse(String(row?.config_json || "{}"));
+      } catch (e) {
+      }
+      const patch = body.config;
+      if (patch.defaultModel !== void 0)
+        cfg3.defaultModel = String(patch.defaultModel);
+      Object.keys(patch).forEach((k) => {
+        if (k !== "defaultModel")
+          cfg3[k] = patch[k];
+      });
+      fields.push("config_json=?");
+      params.push(JSON.stringify(cfg3));
+    }
+    if (!fields.length)
+      return reply.code(400).send({ error: { code: "PROVIDER_PATCH_EMPTY", message: "\u6CA1\u6709\u53EF\u66F4\u65B0\u7684\u5B57\u6BB5" } });
+    fields.push("updated_at=?");
+    params.push(Date.now(), id);
+    store.raw.prepare(`UPDATE providers SET ${fields.join(", ")} WHERE id=?`).run(...params);
+    return { provider: listProviders(store).find((x) => x.id === id) };
   });
   app2.get("/v1/workflows", async () => {
     const rows = store.raw.prepare("SELECT id, name, version, category, provider, created_at, updated_at FROM workflows ORDER BY updated_at DESC").all();
