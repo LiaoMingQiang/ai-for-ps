@@ -11,6 +11,7 @@
 import hashlib
 import os
 import shutil
+import subprocess
 import zipfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -90,12 +91,15 @@ Section "卸载信息" SEC_UNINST
 SectionEnd
 
 Section "uninstall"
+  ; 先停止运行中的 Helper (否则 exe 文件被锁, 目录删不掉)
+  nsExec::ExecToLog 'taskkill /F /IM "AI-for-PS-Helper.exe"'
+  Sleep 1500
   DeleteRegValue HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Run" "AI-for-PS-Helper"
   DeleteRegKey HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\AI-for-PS"
   RMDir /r "$INSTDIR"
 SectionEnd
 """
-    with open(os.path.join(RELEASE, "AI-for-PS-Setup.nsi"), "w", encoding="utf-8") as f:
+    with open(os.path.join(RELEASE, "AI-for-PS-Setup.nsi"), "w", encoding="utf-8-sig") as f:  # NSIS 需要 UTF-8 BOM
         f.write(nsi)
     print("[release] AI-for-PS-Setup.nsi written")
 
@@ -115,7 +119,19 @@ echo Helper 已安装并启动: http://127.0.0.1:33057/v1/health
         f.write(bat)
     print("[release] install-helper.bat written")
 
-    # 5. checksums
+    # 5. NSIS 编译 Setup.exe (若 makensis 可用), 再写 checksums (含 Setup.exe)
+    makensis = shutil.which("makensis") or r"C:\Program Files (x86)\NSIS\makensis.exe"
+    if os.path.isfile(makensis):
+        r = subprocess.run([makensis, os.path.join(RELEASE, "AI-for-PS-Setup.nsi")],
+                           capture_output=True, text=True, timeout=300, cwd=RELEASE)
+        if os.path.isfile(os.path.join(RELEASE, "AI-for-PS-Setup.exe")):
+            print("[release] AI-for-PS-Setup.exe compiled by NSIS")
+        else:
+            print("[release] NSIS 编译失败: " + (r.stdout or r.stderr or "")[-200:])
+    else:
+        print("[release] makensis 不存在, 跳过 Setup.exe 编译 (BLOCKED_BY_EXTERNAL_TOOL)")
+
+    # 6. checksums
     lines = []
     for base, _dirs, files in os.walk(RELEASE):
         for fn in sorted(files):
@@ -126,7 +142,7 @@ echo Helper 已安装并启动: http://127.0.0.1:33057/v1/health
         f.write("\n".join(lines) + "\n")
     print("[release] checksums.txt written")
 
-    # 6. CHANGELOG
+    # 7. CHANGELOG
     changelog = f"""# CHANGELOG
 
 ## {VERSION} (开发里程碑)
