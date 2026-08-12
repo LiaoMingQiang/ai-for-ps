@@ -25,7 +25,28 @@
       }).join("");
     }
 
-    body.querySelector("#assetUploadBtn").addEventListener("click", function () { body.querySelector("#assetFile").click(); });
+    body.querySelector("#assetUploadBtn").addEventListener("click", function () {
+      /* PHASE 3: UXP 正式路径 = localFileSystem.getFileForOpening; 浏览器预览 fallback file input */
+      if (A4P.utils.isUxpRuntime && A4P.utils.isUxpRuntime()) {
+        A4P.utils.pickImageFiles(true).then(function (files) {
+          if (!files || !files.length) return;
+          let done = 0, failed = 0;
+          files.forEach(function (f) {
+            A4P.helper.assets.upload(f.blob, { kind: "reference" }).then(function (r) {
+              done++;
+              if (r && r.asset && r.asset.id) {
+                list.push({ id: r.asset.id, name: f.name, size: f.size, type: "参考图", preview: URL.createObjectURL(f.blob), source: "helper" });
+                A4P.settings.set("project", "assetStore", list);
+                render();
+              } else { failed++; }
+              if (done + failed === files.length) A4P.app.toast("已上传 " + done + " 个素材到 Helper" + (failed ? "，" + failed + " 失败" : ""), done ? "ok" : "warn");
+            });
+          });
+        });
+        return;
+      }
+      body.querySelector("#assetFile").click();
+    });
     body.querySelector("#assetExportBtn").addEventListener("click", function () { A4P.app.toast("导出素材包需 UXP 端支持，浏览器版暂不可用", "warn"); });
     body.querySelector("#assetFile").addEventListener("change", function () {
       Array.prototype.forEach.call(body.querySelector("#assetFile").files || [], function (f) {

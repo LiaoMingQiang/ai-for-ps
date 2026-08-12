@@ -154,10 +154,32 @@
     const seedIn = $('input[data-param="seed"]', body);
     if (seedIn) seedIn.addEventListener("change", function () { G.ui.params.seed = this.value; });
 
-    /* 图像输入：真实文件上传 */
-    const fileEl = $("#inputFile", body);
-    $("#pickInputBtn", body).addEventListener("click", function () { fileEl.click(); });
-    fileEl.addEventListener("change", function () {
+    /* 图像输入：UXP 正式路径 = localFileSystem.getFileForOpening; 浏览器预览 fallback file input */
+    const fileEl = $("input[type=file]", body);
+    $("input[type=file]", body) && body.querySelector("input[type=file]").setAttribute("hidden", "");
+    $("input[type=file]", body) && (body.querySelector("input[type=file]").style.display = "none");
+    $("input[type=file]", body) && body.querySelector("input[type=file]").removeAttribute("id");
+    $("#pickInputBtn", body).addEventListener("click", function () {
+      if (A4P.utils.isUxpRuntime && A4P.utils.isUxpRuntime()) {
+        A4P.utils.pickImageFiles(false).then(function (files) {
+          if (!files || !files.length) return;
+          const f = files[0];
+          const url = URL.createObjectURL(f.blob);
+          G.ui.inputImage = { blob: f.blob, name: f.name, preview: url };
+          $("#inputTitle", body).textContent = f.name;
+          $("#inputMeta", body).textContent = (f.size / 1048576).toFixed(2) + " MB · 将上传 Helper Asset Store";
+          $("#inputStateChip", body).textContent = "图生图";
+          $("#inputStateChip", body).className = "state-chip good";
+          $("#inputThumb", body).style.backgroundImage = "url(" + url + ")";
+          $("#inputThumb", body).style.backgroundSize = "cover";
+          $("#inputThumb", body).style.backgroundPosition = "center";
+          $("#inputThumb", body).textContent = "";
+        });
+        return;
+      }
+      if (fileEl) fileEl.click();
+    });
+    if (fileEl) fileEl.addEventListener("change", function () {
       const f = fileEl.files && fileEl.files[0];
       if (!f) return;
       const url = URL.createObjectURL(f);
@@ -272,6 +294,25 @@
     $$("[data-goto-task]", body).forEach(function (b) { b.addEventListener("click", function () { A4P.uiRouter.switchPage("tasks"); }); });
   }
 
+  /* PHASE 2: UXP 模式 — Photoshop Snapshot (plugin-data PNG) -> Helper Asset Store
+   * 经 localFileSystem.getEntryForNativePath + read(binary), 不落 localStorage */
+  function uploadSnapshotToHelper(snap) {
+    const req = (typeof window !== "undefined" && window.require) ? window.require : null;
+    if (!req || !snap || !snap.tempFile) return Promise.resolve(null);
+    let lfs = null, formats = null;
+    try {
+      lfs = req("uxp").storage.localFileSystem;
+      formats = req("uxp").storage.formats;
+    } catch (e) { return Promise.resolve(null); }
+    if (!lfs || !formats) return Promise.resolve(null);
+    return lfs.getEntryForNativePath(snap.tempFile).then(function (entry) {
+      return entry.read({ format: formats.binary }).then(function (buf) {
+        return A4P.helper.assets.upload(new Blob([buf], { type: "image/png" }), { kind: "snapshot", snapshotId: snap.snapshotId, documentId: snap.documentId });
+      });
+    }).then(function (r) { return r && r.asset && r.asset.id ? r.asset.id : null; })
+      .catch(function () { return null; });
+  }
+
   function runGenerate(body) {
     if (!A4P.settings.get("connection", "helperUrl")) { A4P.app.toast("请先在设置中配置 Helper 地址", "warn"); return; }
     if (!A4P.helper || !A4P.helper.health) { A4P.app.toast("Helper 客户端不可用", "warn"); return; }
@@ -287,9 +328,10 @@
       : Promise.resolve(null);
 
     snapshotP.then(function (snap) {
-      /* 输入图: 浏览器预览的本地文件 或 Snapshot 导出文件 -> Helper Asset Store */
+      /* 输入图: ① UXP 模式 — Photoshop Snapshot -> Helper Asset; ② 浏览器预览 — 本地文件 -> Helper Asset */
       const uploadP = function () {
         if (snap && snap.assetId) return Promise.resolve(snap.assetId);
+        if (snap && snap.tempFile) return uploadSnapshotToHelper(snap);
         if (G.ui.inputImage && G.ui.inputImage.blob) {
           return A4P.helper.assets.upload(G.ui.inputImage.blob, { kind: "input", role: "subject" })
             .then(function (r) { return r && r.asset && r.asset.id ? r.asset.id : null; })
