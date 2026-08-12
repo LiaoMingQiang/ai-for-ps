@@ -20,35 +20,48 @@
     body.querySelectorAll("[data-mode]").forEach(function (b) { b.classList.toggle("active", b.dataset.mode === mode); });
   }
 
-  /* 实时服务状态：检查 ComfyUI 并刷新模型/checkpoint/状态 */
+  /* 实时服务状态：Helper -> Provider 真实状态与模型 (正式链路不再直连 ComfyUI) */
   function refreshProvider(body) {
     const p = A4P.providers.find(G.ui.providerId);
     const chip = body.querySelector("#inputStateChip");
     const execEl = body.querySelector("#execLocation");
-    A4P.comfyui.ping().then(function (st) {
+    const helperId = mapProviderId(G.ui.providerId);
+    const fallback = function () {
+      if (chip) { chip.textContent = "未连接 · 去设置配置 Helper"; chip.className = "state-chip bad"; }
+      const pre = body.querySelector("#preflightChip");
+      if (pre) { pre.textContent = "执行端离线（生成会真实失败并提示原因）"; pre.className = "state-chip bad"; }
+      if (execEl) execEl.textContent = (p ? p.name : G.ui.providerId) + " · 未连接";
+    };
+    if (!A4P.helper || !A4P.helper.health) { fallback(); return; }
+    A4P.helper.health().then(function (h) {
       const pre = body.querySelector("#preflightChip");
       const est = body.querySelector("#execEstimate");
-      if (execEl) execEl.textContent = st.ok ? (p.name + " · " + (st.version || "在线")) : p.name + " · 未连接";
-      if (est) est.textContent = st.ok ? ((st.vram ? "VRAM " + (st.vram / 1073741824).toFixed(0) + " GB · " : "") + (st.deviceName || "Local GPU")) : "离线";
-      if (pre) { pre.textContent = st.ok ? "执行端在线" : "执行端离线（生成会真实失败并提示原因）"; pre.className = "state-chip " + (st.ok ? "good" : "bad"); }
-      if (st.ok) {
-        if (chip) { chip.textContent = "已连接 " + (st.vram ? (st.vram / 1073741824).toFixed(0) + "GB" : ""); chip.className = "state-chip good"; }
-        return A4P.comfyui.listCheckpoints();
-      }
-      if (chip) { chip.textContent = "未连接 · 去设置配置"; chip.className = "state-chip bad"; }
-      return [];
-    }).then(function (ckpts) {
-      const sel = body.querySelector("#checkpointSelect");
-      if (sel) {
-        sel.innerHTML = ckpts.length
-          ? ckpts.map(function (c) { return '<option>' + A4P.utils.escapeHtml(c) + "</option>"; }).join("")
-          : '<option>未检测到 Checkpoint（请安装模型）</option>';
-      }
-      const modelSel = body.querySelector("#modelSelect");
-      if (modelSel && G.ui.providerId === "comfyui") {
-        modelSel.innerHTML = ckpts.length ? ckpts.map(function (c) { return '<option>' + A4P.utils.escapeHtml(c) + "</option>"; }).join("") : "<option>无模型</option>";
-      }
-    });
+      if (!h || !h.online) { fallback(); return; }
+      /* Provider 能力与模型列表 (PHASE 12: adapter.listModels 真实返回) */
+      return A4P.helper.providers.models(helperId).then(function (mr) {
+        const models = (mr && Array.isArray(mr.models) ? mr.models : []).map(function (m) { return m.name || m.id || m; });
+        if (execEl) execEl.textContent = (p ? p.name : G.ui.providerId) + " · Helper 在线 (" + (h.version || "0.9.0") + ")";
+        if (est) est.textContent = models.length ? models[0] : "在线";
+        if (pre) { pre.textContent = "执行端在线 (Helper)"; pre.className = "state-chip good"; }
+        if (chip) { chip.textContent = "Helper 已连接"; chip.className = "state-chip good"; }
+        const sel = body.querySelector("#checkpointSelect");
+        if (sel) {
+          sel.innerHTML = models.length
+            ? models.map(function (c) { return '<option>' + A4P.utils.escapeHtml(c) + "</option>"; }).join("")
+            : '<option>未检测到模型（请安装模型或配置 Provider）</option>';
+        }
+        const modelSel = body.querySelector("#modelSelect");
+        if (modelSel && G.ui.providerId === "comfyui") {
+          modelSel.innerHTML = models.length ? models.map(function (c) { return '<option>' + A4P.utils.escapeHtml(c) + "</option>"; }).join("") : "<option>无模型</option>";
+        }
+      });
+    }).catch(fallback);
+  }
+
+  /* UI provider id -> Helper provider id (规则十: UXP 只发 providerId) */
+  function mapProviderId(uiId) {
+    const MAP = { comfyui: "local-comfy", openai: "openai-compatible", gemini: "gemini", volcengine: "volcengine", bailian: "bailian", runninghub: "runninghub", modelscope: "modelscope" };
+    return MAP[uiId] || uiId;
   }
 
   function renderCompare(stage) {
@@ -260,16 +273,54 @@
   }
 
   function runGenerate(body) {
-    if (!A4P.settings.get("connection", "comfyuiUrl")) { A4P.app.toast("请先在设置中配置 ComfyUI 地址", "warn"); return; }
+    if (!A4P.settings.get("connection", "helperUrl")) { A4P.app.toast("请先在设置中配置 Helper 地址", "warn"); return; }
+    if (!A4P.helper || !A4P.helper.health) { A4P.app.toast("Helper 客户端不可用", "warn"); return; }
     const payload = collectInputs(body);
     const label = (A4P.settings.get("project", "projectName") || "未命名项目") + " · " + (G.ui.mode === "text" ? "文生图" : "图生图");
-    const job = A4P.jobs.create({
-      label: label, title: label, kind: "image", tool: "生成",
-      payload: payload, provider: "comfyui", resultCount: 1
+    const checkpointSel = body.querySelector("#checkpointSelect");
+    const modelId = checkpointSel && checkpointSel.value && checkpointSel.value.indexOf("未检测") < 0 ? checkpointSel.value : undefined;
+
+    /* Photoshop Snapshot (PHASE 2: UXP 模式从 bridge 抓取; 浏览器预览用 inputImage) */
+    const doc = A4P.state.doc || null;
+    const snapshotP = (A4P.ps && A4P.ps.captureSnapshot && window.require && A4P.ps.isUxp && A4P.ps.isUxp())
+      ? A4P.ps.captureSnapshot().catch(function () { return null; })
+      : Promise.resolve(null);
+
+    snapshotP.then(function (snap) {
+      /* 输入图: 浏览器预览的本地文件 或 Snapshot 导出文件 -> Helper Asset Store */
+      const uploadP = function () {
+        if (snap && snap.assetId) return Promise.resolve(snap.assetId);
+        if (G.ui.inputImage && G.ui.inputImage.blob) {
+          return A4P.helper.assets.upload(G.ui.inputImage.blob, { kind: "input", role: "subject" })
+            .then(function (r) { return r && r.asset && r.asset.id ? r.asset.id : null; })
+            .catch(function () { return null; });
+        }
+        return Promise.resolve(null);
+      };
+      return uploadP().then(function (inputAssetId) {
+        const job = A4P.jobs.create({
+          label: label, title: label, kind: "image", tool: "生成",
+          providerId: mapProviderId(payload.provider),
+          modelId: modelId,
+          inputs: { prompt: payload.prompt, negativePrompt: payload.negative, imageAssetIds: inputAssetId ? [inputAssetId] : [] },
+          parameters: payload.params,
+          sourceDocumentId: (snap && snap.documentId) || (doc && doc.documentId) || null,
+          sourceDocumentName: (snap && snap.documentName) || (doc && doc.documentName) || null,
+          sourceDocumentPath: (snap && snap.documentPath) || null,
+          sourceLayerIds: (snap && snap.layerIds) || null,
+          selectionBounds: (snap && snap.selectionBounds) || null,
+          canvasWidth: (snap && snap.width) || (doc && doc.width) || null,
+          canvasHeight: (snap && snap.height) || (doc && doc.height) || null,
+          snapshot: snap || null
+        });
+        A4P.app.state.runId = job.id;
+        const card = document.querySelector("#currentTaskCard");
+        if (card) card.classList.remove("hidden");
+        A4P.app.toast("任务已提交到 Helper", "info");
+      });
+    }).catch(function (err) {
+      A4P.app.toast("提交失败：" + (err && err.message || String(err)), "warn");
     });
-    A4P.app.state.runId = job.id;
-    $("#currentTaskCard", body).classList.remove("hidden");
-    A4P.jobs.start(job);
   }
 
   /* 任务进度联动（jobs:update 载荷为 job 对象，全部真实状态） */

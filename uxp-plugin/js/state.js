@@ -18,8 +18,16 @@
 
   /* ---- persistence: only UI prefs / settings (never credentials) ---- */
   function persist() {
+    const raw = A4P.settings.all ? A4P.settings.all() : {};
+    /* 敏感字段一律不进 localStorage (规则六/十五: helperToken/API Key 不落明文) */
+    const clean = JSON.parse(JSON.stringify(raw));
+    if (clean.connection) {
+      delete clean.connection.helperToken;
+      delete clean.connection.apiKey;
+      delete clean.connection.authorization;
+    }
     const p = {
-      settings: A4P.settings.all ? A4P.settings.all() : {},
+      settings: clean,
       lastPage: state.page,
       lastMode: state.mode
     };
