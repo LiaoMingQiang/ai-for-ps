@@ -276,8 +276,19 @@
       return Promise.reject({ code: "NOT_READY", message: "任务尚未就绪" });
     }
     job.status = "WRITING_BACK"; job.stageText = "正在写入 Photoshop…"; emit(job);
-    return (A4P.ps.writeResult ? A4P.ps.writeResult(plan) : Promise.reject({ code: "NO_BRIDGE", message: "当前环境无 Photoshop Bridge" }))
-      .then(function (info) {
+    /* PHASE 4: 结果资产 -> UXP 临时文件 + sessionToken (正式写回不传未经授权的 raw path) */
+    var prep = (plan.resultPath || plan.resultToken)
+      ? Promise.resolve(plan)
+      : ((A4P.ps && A4P.ps.materializeResult && plan.resultAssetId)
+        ? A4P.ps.materializeResult(plan.resultAssetId).then(function (m) {
+            return Object.assign({}, plan, { resultToken: m.resultToken, resultPath: m.resultPath });
+          }).catch(function (e) {
+            throw { code: e.code || "WRITEBACK_FAILED", message: "结果文件物化失败：" + (e.message || "") };
+          })
+        : Promise.reject({ code: "WRITEBACK_FAILED", message: "缺少结果文件 (resultAssetId 不可用)" }));
+    return prep.then(function (p2) {
+      return (A4P.ps.writeResult ? A4P.ps.writeResult(p2) : Promise.reject({ code: "NO_BRIDGE", message: "当前环境无 Photoshop Bridge" }));
+    }).then(function (info) {
         const notify = A4P.helper && A4P.helper.jobs && A4P.helper.jobs.writeback
           ? A4P.helper.jobs.writeback(job.helperId || job.id, { writeback: { strategy: plan.strategy || "smartObject", layerId: info.layerId || null, layerName: info.layerName || null, summary: info.summary || null } })
           : Promise.resolve({ ok: true });

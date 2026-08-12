@@ -174,12 +174,7 @@
     var ctx = readDocContext(app.activeDocument);
     var l = ctx.activeLayer;
     if (!l) return Promise.reject({ code: "PHOTOSHOP_LAYER_NOT_FOUND", message: "当前文档没有活动图层" });
-    var idx = -1;
-    try {
-      var layers = app.activeDocument.layers;
-      for (var i = 0; i < layers.length; i++) { if (layers[i].id === l.id) { idx = i; break; } }
-    } catch (e) { /* noop */ }
-    return exportLayersToPng([{ id: l.id, name: l.name, index: idx }], opts || {});
+    return exportLayersToPng([{ id: l.id, name: l.name, index: findLayerIndexIn(app.activeDocument, l) }], opts || {});
   }
 
   function captureSelectedLayers(opts) {
@@ -187,14 +182,9 @@
     var ctx = readDocContext(app.activeDocument);
     if (!ctx.activeLayers.length) return Promise.reject({ code: "PHOTOSHOP_LAYER_NOT_FOUND", message: "当前没有选中图层" });
     var targets = [];
-    try {
-      var layers = app.activeDocument.layers;
-      ctx.activeLayers.forEach(function (l) {
-        var idx = -1;
-        for (var i = 0; i < layers.length; i++) { if (layers[i].id === l.id) { idx = i; break; } }
-        targets.push({ id: l.id, name: l.name, index: idx });
-      });
-    } catch (e) { /* noop */ }
+    ctx.activeLayers.forEach(function (l) {
+      targets.push({ id: l.id, name: l.name, index: findLayerIndexIn(app.activeDocument, l) });
+    });
     return exportLayersToPng(targets, opts || {});
   }
 
@@ -292,14 +282,48 @@
     /* 图层蒙版效果在图层渲染时已生效: 导出该图层 = 蒙版后的像素 */
     var ctx = readDocContext(app.activeDocument);
     var target = null, idx = -1;
-    try {
-      var layers = app.activeDocument.layers;
-      for (var i = 0; i < layers.length; i++) {
-        if (layerId !== undefined && layers[i].id === layerId) { target = layers[i]; idx = i; break; }
-      }
-    } catch (e) { /* noop */ }
+    if (layerId !== undefined && layerId !== null) {
+      target = findLayerByIdRecursive(app.activeDocument, layerId);
+      idx = target ? findLayerIndexIn(app.activeDocument, target) : -1;
+    } else if (ctx.activeLayer) {
+      target = ctx.activeLayer;
+      idx = findLayerIndexIn(app.activeDocument, target);
+    }
     if (!target) return Promise.reject({ code: "PHOTOSHOP_LAYER_NOT_FOUND", message: "蒙版图层不存在: " + layerId });
     return exportLayersToPng([{ id: target.id, name: target.name, index: idx }], {});
+  }
+
+  /* PHASE 7: Layer Mask 输入 — MaskSnapshot
+   * 官方 UXP DOM 无独立蒙版通道灰度读取 API (Channel 类仅 alpha/spot 通道, 已查官方文档);
+   * 因此输出「蒙版应用后的图层像素」+ polarity 元数据 (White=可编辑/Black=保护),
+   * 供 Workflow Binding 按极性使用。独立灰度通道导出需 batchPlay descriptor, 如实标注为增强项。 */
+  function captureLayerMaskPixels(layerId) {
+    if (!psOk) return Promise.reject({ code: "PHOTOSHOT_NOT_AVAILABLE", message: "捕获蒙版像素需要 Photoshop 环境" });
+    var ctx = readDocContext(app.activeDocument);
+    var target = null;
+    if (layerId !== undefined && layerId !== null) {
+      target = findLayerByIdRecursive(app.activeDocument, layerId);
+    } else if (ctx.activeLayer) {
+      target = ctx.activeLayer;
+    }
+    if (!target) return Promise.reject({ code: "PHOTOSHOT_LAYER_NOT_FOUND", message: "蒙版图层不存在: " + layerId });
+    return exportLayersToPng([{ id: target.id, name: target.name, index: findLayerIndexIn(app.activeDocument, target) }], {})
+      .then(function (snap) {
+        return {
+          snapshotId: snap.snapshotId,
+          sourceLayerId: layerId !== undefined && layerId !== null ? layerId : target.id,
+          width: snap.width,
+          height: snap.height,
+          tempFile: snap.tempFile,
+          tempFileSize: snap.tempFileSize,
+          polarity: "whiteEditable",   /* White=editable, Black=protected (蒙版应用后像素) */
+          maskMode: "appliedPixels",   /* 官方 DOM 能力边界: 非独立灰度通道 */
+          documentId: snap.documentId,
+          documentName: snap.documentName,
+          documentPath: snap.documentPath,
+          createdAt: Date.now()
+        };
+      });
   }
 
   /* ---------- 写回目标验证 ---------- */
@@ -309,6 +333,33 @@
       for (var i = 0; i < docs.length; i++) { if (docs[i].id === docId) return docs[i]; }
     } catch (e) { /* noop */ }
     return null;
+  }
+
+  /* PHASE 8: 递归图层查找 (Group / Nested Group / Smart Object / Pixel Layer)
+   * sourceLayerId 必须在复杂 PSD 中可靠定位 */
+  function findLayerByIdRecursive(container, layerId) {
+    if (!container || layerId === undefined || layerId === null) return null;
+    try {
+      var layers = container.layers;
+      for (var i = 0; i < layers.length; i++) {
+        var l = layers[i];
+        if (l.id === layerId) return l;
+        /* 组图层递归深入 */
+        if (l.layers || l.kind === "group") {
+          var r = findLayerByIdRecursive(l, layerId);
+          if (r) return r;
+        }
+      }
+    } catch (e) { /* 不可遍历的容器 */ }
+    return null;
+  }
+
+  function findLayerIndexIn(container, layer) {
+    try {
+      var layers = container.layers;
+      for (var i = 0; i < layers.length; i++) { if (layers[i].id === layer.id) return i; }
+    } catch (e) { /* noop */ }
+    return -1;
   }
 
   function validateWritebackTarget(target) {
@@ -327,13 +378,13 @@
     if (t.sourceLayerIds && t.sourceLayerIds.length) {
       var names = [];
       try {
-        var layers = doc.layers;
         t.sourceLayerIds.forEach(function (id) {
-          for (var i = 0; i < layers.length; i++) { if (layers[i].id === id) { names.push(layers[i].name); return; } }
+          var l = findLayerByIdRecursive(doc, id);
+          if (l) names.push(l.name);
         });
       } catch (e) { /* noop */ }
       if (names.length !== t.sourceLayerIds.length) {
-        return Promise.resolve({ ok: false, code: "PHOTOSHOP_LAYER_NOT_FOUND", message: "源图层已不存在，禁止自动写回" });
+        return Promise.resolve({ ok: false, code: "PHOTOSHOP_LAYER_NOT_FOUND", message: "源图层已不存在（含嵌套图层查找），禁止自动写回" });
       }
     }
     return Promise.resolve({ ok: true, documentId: doc.id, documentName: doc.name });
@@ -345,11 +396,12 @@
     return action.batchPlay([{ _obj: "select", _target: [{ _ref: "document", _id: doc.id }] }], {});
   }
 
-  /* 放置智能对象: ScriptListener 动作格式 (placeEvent, PS 全版本稳定) */
-  function placeAsSmartObject(pngPath, layerName) {
+  /* 放置智能对象: ScriptListener 动作格式 (placeEvent, PS 全版本稳定)
+   * UXP 正式路径使用 sessionToken (createSessionToken), 不传未经授权的 raw path */
+  function placeAsSmartObject(pngPathOrToken, layerName) {
     return action.batchPlay([{
       _obj: "placeEvent",
-      "null": { _path: pngPath, _kind: "local" },
+      "null": { _path: pngPathOrToken, _kind: "local" },
       freeTransformCenterState: { _enum: "quadCenterState", _value: "QCSAverage" },
       offset: { _obj: "offset", horizontal: 0, vertical: 0 }
     }], {}).then(function () {
@@ -360,48 +412,77 @@
     });
   }
 
-  /* 像素图层: 打开 → 全选复制 → 切回源文档 → 粘贴 */
-  function placeAsPixelLayer(pngPath, layerName) {
-    return action.batchPlay([{ _obj: "open", "null": { _path: pngPath, _kind: "local" } }], {}).then(async function () {
-      var src = app.activeDocument;
+  /* 像素图层 (PHASE 5 修复): 进入前确定目标文档 id = 任务创建时绑定的源文档
+   * open(result) 之后 activeDocument 是结果文档, 绝不能把它当目标 PSD。
+   * 正确顺序: open -> 全选复制 -> findDocumentById(targetDocumentId) -> 显式激活 -> paste -> 关闭临时文档 */
+  function placeAsPixelLayer(pngPathOrToken, layerName, targetDocumentId) {
+    var targetId = targetDocumentId || null;
+    return action.batchPlay([{ _obj: "open", "null": { _path: pngPathOrToken, _kind: "local" } }], {}).then(async function () {
       await action.batchPlay([{ _obj: "selectAll" }, { _obj: "copy" }], {});
-      var docId = app.activeDocument.id;
-      var target = findDocumentById(docId);
-      if (!target) throw { code: "WRITEBACK_FAILED", message: "像素层放置失败: 目标文档不可用" };
-      return target;
-    }).then(async function (target) {
+      var openedId = app.activeDocument.id;
+      var target = targetId ? findDocumentById(targetId) : null;
+      if (!target) {
+        /* 目标源文档不在: 关闭临时文档, 结果保留可重试 */
+        try {
+          var tmp = findDocumentById(openedId);
+          if (tmp) await tmp.close(constants.SaveOptions.DONOTSAVECHANGES);
+        } catch (e) { /* noop */ }
+        throw { code: "PHOTOSHOP_DOCUMENT_NOT_FOUND", message: "源文档已关闭，结果保留在 Helper，可稍后重新写回" };
+      }
       await switchToDocument(target);
       await action.batchPlay([{ _obj: "paste" }], {});
       var placed = app.activeDocument.activeLayers[0];
       if (!placed) throw { code: "WRITEBACK_FAILED", message: "粘贴未产生图层" };
       if (layerName) { try { placed.name = layerName; } catch (e) { /* noop */ } }
-      /* 关闭打开的临时文档 */
+      /* 关闭打开的临时结果文档 */
       try {
-        var tmp = app.documents.find(function (d) { return d !== target; });
-        if (tmp) await tmp.close(constants.SaveOptions.DONOTSAVECHANGES);
+        var tmp2 = findDocumentById(openedId);
+        if (tmp2) await tmp2.close(constants.SaveOptions.DONOTSAVECHANGES);
       } catch (e) { /* noop */ }
       return placed;
     });
   }
 
-  /* 定位: 按任务创建时的 selectionBounds 缩放+平移 (规则六: 不依赖当前选区) */
-  async function positionPlacedLayer(placed, pngW, pngH, selectionBounds) {
-    if (!selectionBounds) return; /* 无选区任务: 保持居中放置 */
+  /* PHASE 6: 选区原位定位 — Place 后读取 placedLayer 真实 bounds, 再计算 scale/translate。
+   * 不假设放置位置在画布中心; 不使用当前选区 (用任务创建时记录的 selectionBounds)。 */
+  function readLayerBounds(placed) {
+    try {
+      var b = placed.bounds;
+      if (!b) return null;
+      return { left: Math.round(b.left), top: Math.round(b.top), right: Math.round(b.right), bottom: Math.round(b.bottom) };
+    } catch (e) { return null; }
+  }
+
+  async function positionPlacedLayer(placed, selectionBounds) {
+    if (!selectionBounds) return; /* 无选区任务: 保持放置 */
     var b = selectionBounds;
     var targetW = Math.max(1, Math.round(b.right - b.left));
     var targetH = Math.max(1, Math.round(b.bottom - b.top));
-    if (pngW <= 0 || pngH <= 0) return;
-    var scaleX = (targetW / pngW) * 100;
-    var scaleY = (targetH / pngH) * 100;
+
+    /* 1. 读真实放置 bounds */
+    var actual = readLayerBounds(placed);
+    if (!actual) return; /* bounds 不可读: 保持放置 */
+    var actualW = Math.max(1, actual.right - actual.left);
+    var actualH = Math.max(1, actual.bottom - actual.top);
+
+    /* 2. 按真实尺寸缩放到原选区尺寸 (比例钳制, 防止极端值) */
+    var scaleX = (targetW / actualW) * 100;
+    var scaleY = (targetH / actualH) * 100;
     if (Math.abs(scaleX - 100) > 0.01 || Math.abs(scaleY - 100) > 0.01) {
-      await placed.scale(scaleX, scaleY, constants.AnchorPosition.TOPLEFT);
+      var sx = Math.min(4000, Math.max(0.1, scaleX));
+      var sy = Math.min(4000, Math.max(0.1, scaleY));
+      try { await placed.scale(sx, sy, constants.AnchorPosition.TOPLEFT); } catch (e) { /* scale 失败不阻塞 */ }
     }
-    /* 放置后图层中心在文档中心; 左上角 ≈ ((docW-pngW)/2, (docH-pngH)/2) */
-    var doc = app.activeDocument;
-    var docW = Math.round(doc.width), docH = Math.round(doc.height);
-    var curLeft = (docW - pngW) / 2, curTop = (docH - pngH) / 2;
-    var dx = Math.round(b.left - curLeft), dy = Math.round(b.top - curTop);
-    if (dx !== 0 || dy !== 0) await placed.translate(dx, dy);
+
+    /* 3. 缩放后再读 bounds, 平移到原选区 left/top */
+    var after = readLayerBounds(placed);
+    if (after) {
+      var dx = Math.round(b.left - after.left);
+      var dy = Math.round(b.top - after.top);
+      if (dx !== 0 || dy !== 0) {
+        try { await placed.translate(dx, dy); } catch (e) { /* translate 失败不阻塞 */ }
+      }
+    }
   }
 
   function createResultGroup(groupName) {
@@ -422,6 +503,27 @@
     } catch (e) { /* 组创建失败不阻塞写回 */ }
   }
 
+  /* PHASE 4: Helper Result Asset -> UXP 临时文件 -> sessionToken
+   * 正式 UXP 写回使用 createSessionToken, 不把未经授权的 raw path 塞进 batchPlay */
+  function materializeResult(assetId) {
+    const req = (typeof window !== "undefined" && window.require) ? window.require : null;
+    if (!req || !assetId) return Promise.reject({ code: "NO_UXP", message: "当前环境无法物化结果文件" });
+    let lfs = null;
+    try { lfs = req("uxp").storage.localFileSystem; } catch (e) { return Promise.reject({ code: "NO_UXP", message: "UXP localFileSystem 不可用" }); }
+    return A4P.helper.assets.get(assetId).then(function (buf) {
+      return lfs.getTemporaryFolder().then(function (folder) {
+        const name = "a4p_result_" + String(assetId).slice(0, 8) + ".png";
+        return folder.createFile(name, { overwrite: true }).then(function (file) {
+          return file.write(buf).then(function () {
+            return lfs.createSessionToken(file).then(function (token) {
+              return { resultToken: token, resultPath: file.nativePath, resultFile: file };
+            });
+          });
+        });
+      });
+    });
+  }
+
   /* ---------- 写回入口 (plan 来自任务创建时的 snapshot) ---------- */
   function writeResult(plan) {
     if (!psOk) return Promise.reject({ code: "PHOTOSHOP_NOT_AVAILABLE", message: "写回需要 Photoshop 环境（当前为浏览器预览）" });
@@ -429,6 +531,9 @@
     if (!p.sourceDocumentId) return Promise.reject({ code: "WRITEBACK_TARGET_INVALID", message: "任务缺少 sourceDocumentId" });
     if (!p.resultPath) return Promise.reject({ code: "WRITEBACK_FAILED", message: "任务缺少结果文件 resultPath" });
     var strategy = p.strategy || "smartObject";
+    /* UXP 正式路径: sessionToken 优先; 浏览器/dev 兼容 raw path */
+    var resultRef = p.resultToken || p.resultPath;
+    if (!resultRef) return Promise.reject({ code: "WRITEBACK_FAILED", message: "任务缺少结果文件 (resultToken/resultPath)" });
 
     /* 写回前验证 (不依赖 UI 状态, 直接查 Photoshop) */
     return validateWritebackTarget(p).then(function (v) {
@@ -441,21 +546,21 @@
 
         var placed;
         if (strategy === "pixelLayer") {
-          placed = await placeAsPixelLayer(p.resultPath, p.layerName || "AI Result");
+          placed = await placeAsPixelLayer(resultRef, p.layerName || "AI Result", p.sourceDocumentId);
         } else if (strategy === "newDocument") {
           /* 新文档: 直接打开结果图作为新文档 */
-          await action.batchPlay([{ _obj: "open", "null": { _path: p.resultPath, _kind: "local" } }], {});
+          await action.batchPlay([{ _obj: "open", "null": { _path: resultRef, _kind: "local" } }], {});
           var nd = app.activeDocument;
           if (p.layerName) nd.name = p.layerName;
           return { strategy: "newDocument", targetDocumentId: nd.id, layerId: null, layerName: nd.name, summary: "已创建新文档 " + nd.name };
         } else {
           /* 默认 NEW_SMART_OBJECT */
-          placed = await placeAsSmartObject(p.resultPath, p.layerName || "AI Result");
+          placed = await placeAsSmartObject(resultRef, p.layerName || "AI Result");
         }
 
-        /* 选区原位写回 (记录于任务创建时, 非当前选区) */
+        /* 选区原位写回 (记录于任务创建时, 非当前选区; PHASE 6: 按真实 bounds 缩放平移) */
         if (p.selectionBounds && strategy !== "newDocument") {
-          await positionPlacedLayer(placed, p.resultWidth || 0, p.resultHeight || 0, p.selectionBounds);
+          await positionPlacedLayer(placed, p.selectionBounds);
         }
         if (strategy !== "newDocument" && p.targetGroupName) {
           await moveIntoGroup(placed, p.targetGroupName);
@@ -483,7 +588,9 @@
     captureMergedVisible: captureMergedVisible,
     captureSelection: captureSelection,
     captureLayerMask: captureLayerMask,
+    captureLayerMaskPixels: captureLayerMaskPixels,
     validateWritebackTarget: validateWritebackTarget,
+    materializeResult: materializeResult,
     writeResult: writeResult
   };
 })();
