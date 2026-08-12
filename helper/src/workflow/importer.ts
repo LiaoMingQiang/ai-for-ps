@@ -45,9 +45,9 @@ export function importWorkflow(store: Store, body: {
   store.raw.exec("BEGIN;");
   try {
     store.raw.prepare(
-      "INSERT INTO workflows (id, name, version, category, description, provider, source_json_hash, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)"
+      "INSERT INTO workflows (id, name, version, category, description, provider, source_json_hash, workflow_json, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)"
     ).run(workflowId, name, "1.0.0", body.category || "未分类", body.description || null,
-      body.provider || "comfyui", jsonHash, now, now);
+      body.provider || "comfyui", jsonHash, JSON.stringify(body.json), now, now);
 
     store.raw.prepare(
       "INSERT INTO workflow_versions (id, workflow_id, version, workflow_json_hash, bindings_hash, lockfile_hash, changelog, author, created_at) VALUES (?,?,?,?,?,?,?,?,?)"
@@ -87,6 +87,29 @@ export function importWorkflow(store: Store, body: {
   };
 }
 
+/* 应用绑定: bindings (fieldKey -> nodeId.inputKey) + 任务参数 values -> 修改真实 workflow JSON (规则十/PHASE 10)
+ * 例: 绑定 {fieldKey:"denoise", nodeId:"29", inputKey:"denoise"} + values {denoise: 0.42}
+ *     -> workflowJson["29"].inputs.denoise = 0.42 */
+export function applyWorkflowBindings(
+  workflowJson: Record<string, unknown>,
+  bindings: Array<{ field_key: string; node_id: string; input_key: string; field_type: string; default_value: string | null }>,
+  values: Record<string, unknown>
+): Record<string, unknown> {
+  const out: Record<string, unknown> = JSON.parse(JSON.stringify(workflowJson || {}));
+  for (const b of bindings || []) {
+    const node = out[b.node_id] as { inputs?: Record<string, unknown> } | undefined;
+    if (!node || !node.inputs) continue;
+    if (!(b.input_key in node.inputs)) continue;
+    let v: unknown = values[b.field_key];
+    if (v === undefined || v === null) {
+      try { v = b.default_value ? JSON.parse(b.default_value) : null; } catch (e) { v = b.default_value; }
+    }
+    if (v === undefined || v === null) continue;
+    node.inputs[b.input_key] = v;
+  }
+  return out;
+}
+
 /* 保存新版本 (规则二十: 不覆盖旧版本, 创建新版本指针) */
 export function saveWorkflowVersion(store: Store, workflowId: string, body: {
   json?: unknown;
@@ -107,7 +130,7 @@ export function saveWorkflowVersion(store: Store, workflowId: string, body: {
     if (body.json !== undefined) {
       const scan = scanWorkflow(body.json);
       jsonHash = crypto.createHash("sha256").update(JSON.stringify(body.json)).digest("hex");
-      store.raw.prepare("UPDATE workflows SET source_json_hash=?, updated_at=? WHERE id=?").run(jsonHash, now, workflowId);
+      store.raw.prepare("UPDATE workflows SET source_json_hash=?, workflow_json=?, updated_at=? WHERE id=?").run(jsonHash, JSON.stringify(body.json), now, workflowId);
       /* 依赖重建 */
       store.raw.prepare("DELETE FROM workflow_dependencies WHERE workflow_id=?").run(workflowId);
       const insDep = store.raw.prepare(

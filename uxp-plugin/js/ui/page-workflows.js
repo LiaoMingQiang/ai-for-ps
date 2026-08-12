@@ -28,11 +28,23 @@
       wf: (A4P.settings.get("project", "workflows") || []).length,
       prompt: (A4P.settings.get("prompts", "templates") || []).length
     };
-    $("#flowList", body).innerHTML = counts.wf
-      ? A4P.settings.get("project", "workflows").map(function (w, i) {
-        return '<div class="flow-node"><div class="flow-index">' + (i + 1) + '</div><div class="flow-body"><strong>' + A4P.utils.escapeHtml(w.label || ("工作流 " + (i + 1))) + "</strong><span>" + A4P.utils.escapeHtml(w.summary || "—") + "</span></div></div>";
-      }).join("")
-      : '<div class="empty" style="padding:24px 0"><strong>还没有项目工作流</strong><span>UXP 真实环境批准节点后生成任务；浏览器版工作流数据来自项目存档</span></div>';
+    /* PHASE 9: 工作流列表来自 Helper (SQLite), 不再是本地静态数据 */
+    const flowList = $("#flowList", body);
+    flowList.innerHTML = '<div class="empty" style="padding:24px 0"><strong>正在从 Helper 加载工作流…</strong></div>';
+    if (A4P.helper && A4P.helper.workflows && A4P.helper.workflows.list) {
+      A4P.helper.workflows.list().then(function (r) {
+        const wfs = (r && Array.isArray(r.workflows) ? r.workflows : []);
+        flowList.innerHTML = wfs.length
+          ? wfs.map(function (w, i) {
+            return '<div class="flow-node"><div class="flow-index">' + (i + 1) + '</div><div class="flow-body"><strong>' + A4P.utils.escapeHtml(w.name || ("工作流 " + (i + 1))) + "</strong><span>v" + A4P.utils.escapeHtml(w.version || "1.0.0") + " · " + A4P.utils.escapeHtml(w.provider || "") + " · " + A4P.utils.escapeHtml((w.detected_fields ? Object.keys(JSON.parse(w.detected_fields || "{}")).length : 0) + " 字段") + "</span></div></div>";
+          }).join("")
+          : '<div class="empty" style="padding:24px 0"><strong>还没有项目工作流</strong><span>在「生成」页或导入对话框粘贴 ComfyUI API JSON 导入</span></div>';
+      }).catch(function () {
+        flowList.innerHTML = '<div class="empty" style="padding:24px 0"><strong>Helper 不可用</strong><span>无法加载工作流列表（Helper 离线）</span></div>';
+      });
+    } else {
+      flowList.innerHTML = '<div class="empty" style="padding:24px 0"><strong>还没有项目工作流</strong><span>Helper 客户端不可用</span></div>';
+    }
 
     const runner = A4P.jobs._raw ? A4P.jobs.list() : [];
     const live = runner.filter(function (j) { return j.results && j.results.length; }).length;

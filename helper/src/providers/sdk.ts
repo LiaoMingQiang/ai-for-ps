@@ -15,6 +15,7 @@ export interface ReferenceImageInput {
 export interface GenerationRequest {
   providerId: string;
   workflowId?: string;
+  workflowJson?: Record<string, unknown>;  /* PHASE 10: 已应用 bindings 的真实 workflow JSON (Helper 内部填充) */
   modelId?: string;
   inputs: {
     prompt?: string;

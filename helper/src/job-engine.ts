@@ -15,6 +15,7 @@ import type { GenerationRequest } from "./providers/sdk.js";
 import { PROVIDER_ERROR_CODES as EC } from "./providers/sdk.js";
 import type { HelperContext } from "./server.js";
 import { imageMeta, mimeFromFormat } from "./image-meta.js";
+import { applyWorkflowBindings } from "./workflow/importer.js";
 
 export const JOB_STATUSES = [
   "created", "validating", "snapshotting", "uploading", "queued", "running",
@@ -322,9 +323,26 @@ export class JobEngine {
     let params: Record<string, unknown> = {};
     try { inputs = JSON.parse(String(job.inputs_json || "{}")); } catch (e) { /* noop */ }
     try { params = JSON.parse(String(job.parameters_json || "{}")); } catch (e) { /* noop */ }
+
+    /* PHASE 10: 已导入 Workflow -> 加载最新 workflow_json + bindings, 应用任务参数到真实 JSON */
+    let workflowJson: Record<string, unknown> | undefined;
+    if (job.workflow_id) {
+      try {
+        const wf = this.store.raw.prepare("SELECT workflow_json FROM workflows WHERE id=?").get(String(job.workflow_id)) as { workflow_json: string | null } | undefined;
+        if (wf?.workflow_json) {
+          const parsed = JSON.parse(String(wf.workflow_json)) as Record<string, unknown>;
+          const bindings = this.store.raw.prepare(
+            "SELECT field_key, node_id, input_key, field_type, default_value FROM workflow_bindings WHERE workflow_id=?"
+          ).all(String(job.workflow_id)) as Array<{ field_key: string; node_id: string; input_key: string; field_type: string; default_value: string | null }>;
+          workflowJson = applyWorkflowBindings(parsed, bindings, params);
+        }
+      } catch (e) { /* workflow 应用失败: 回退到模板构建 (不阻断任务) */ }
+    }
+
     return {
       providerId: String(job.provider_id),
       workflowId: job.workflow_id ? String(job.workflow_id) : undefined,
+      workflowJson,
       modelId: job.model_id ? String(job.model_id) : undefined,
       inputs: {
         prompt: inputs.prompt ? String(inputs.prompt) : undefined,

@@ -183,7 +183,8 @@ export class ComfyUIAdapter implements ProviderAdapter {
   }
 
   async submit(request: GenerationRequest): Promise<RemoteJob> {
-    const wf = this.buildWorkflow(request);
+    /* PHASE 10: 已导入 workflow (含 bindings 应用) 优先; 否则模板构建 */
+    const wf = request.workflowJson ? (request.workflowJson as Record<string, ComfyNodeSpec>) : this.buildWorkflow(request);
     return this.submitRaw(wf);
   }
 

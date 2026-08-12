@@ -5,7 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { HelperConfig } from "./config.js";
 
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 const MIGRATIONS: Array<{ version: number; sql: string }> = [
   {
@@ -260,6 +260,13 @@ const MIGRATIONS: Array<{ version: number; sql: string }> = [
       updated_at INTEGER NOT NULL
     );
     UPDATE settings SET value='2' WHERE key='schema_version';
+    `
+  },
+  {
+    version: 3,
+    sql: `
+    ALTER TABLE workflows ADD COLUMN workflow_json TEXT;
+    UPDATE settings SET value='3' WHERE key='schema_version';
     `
   }
 ];

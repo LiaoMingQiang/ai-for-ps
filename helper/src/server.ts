@@ -16,7 +16,7 @@ import { CredentialService } from "./credentials.js";
 import { ProviderManager } from "./providers/manager.js";
 import { JobEngine } from "./job-engine.js";
 import { scanWorkflow } from "./workflow/scanner.js";
-import { importWorkflow, saveWorkflowVersion, checkDependencies } from "./workflow/importer.js";
+import { importWorkflow, saveWorkflowVersion, checkDependencies, applyWorkflowBindings } from "./workflow/importer.js";
 import { planRequest, executeTool, AgentAuditor, TOOL_REGISTRY, type AgentPlan } from "./agent/agent.js";
 import { imageMeta, mimeFromFormat } from "./image-meta.js";
 
