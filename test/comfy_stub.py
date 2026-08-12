@@ -107,14 +107,14 @@ async def finish_prompt(prompt_id, wf, sleep_s=None):
         if prompt_id in interrupted:
             history[prompt_id] = {"prompt": wf, "status": {"status_str": "error", "completed": False,
                                                            "messages": [["execution_interrupted", {}]]}, "outputs": {}}
-            queue_running.clear()
+            _finish_queue_slot(prompt_id)
             pending.pop(prompt_id, None)
             return
     seq += 1
     fn = "aiforps_%s_%04d_.png" % (prompt_id, seq)
     generated[fn] = make_png()
     pending.pop(prompt_id, None)
-    queue_running.clear()
+    _finish_queue_slot(prompt_id)
     images = [{"filename": fn, "subfolder": "", "type": "output"}]
     last_node = [nid for nid, n in wf.items() if n.get("class_type") == "SaveImage"]
     outputs = {last_node[0]: {"images": images}} if last_node else {}
@@ -126,6 +126,16 @@ async def finish_prompt(prompt_id, wf, sleep_s=None):
                                                             "output": {"images": images}}})
         except Exception:
             pass
+
+
+def _finish_queue_slot(prompt_id):
+    """任务完成/中断: 只移除自己的条目 (官方行为), 并把 pending 第一个提升到 running"""
+    global queue_running, queue_pending, pending
+    queue_running[:] = [q for q in queue_running if q[1] != prompt_id]
+    if queue_pending and not queue_running:
+        item = queue_pending.pop(0)
+        queue_running.append(item)
+        pending[item[1]] = asyncio.ensure_future(finish_prompt(item[1], item[2]))
 
 
 async def handle_prompt(req):

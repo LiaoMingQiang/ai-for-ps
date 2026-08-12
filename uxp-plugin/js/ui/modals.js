@@ -119,7 +119,7 @@
       rd.onload = function () { $("input[type=file]", dlg).dataset.picked = rd.result; $("input[type=file]", dlg).dataset.pickedName = f.name; };
       rd.readAsText(f);
     });
-    $("input[type=file]", dlg) && $("input[type=file]", dlg).dataset.picked = "";
+    if ($("input[type=file]", dlg)) { $("input[type=file]", dlg).dataset.picked = ""; }
     $("#importJsonBtn", dlg).onclick = function () {
       const picked = $("input[type=file]", dlg) ? ($("input[type=file]", dlg).dataset.picked || "") : "";
       const body = $("#importJsonText", dlg).value || picked || "";

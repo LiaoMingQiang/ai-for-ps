@@ -38,5 +38,64 @@
     }
     return "a4p" + h1.toString(16).padStart(8, "0") + str.length.toString(16).padStart(4, "0");
   }
-  A4P.utils = { $: $, $$: $$, val: val, uid: uid, fmtTime: fmtTime, debounce: debounce, clamp: clamp, escapeHtml: escapeHtml, sha256Str: sha256Str };
+  /* PHASE 3: 正式 UXP 文件选择 (localFileSystem.getFileForOpening, 禁止浏览器 file input 作为正式输入)
+   * UXP 模式: Promise<[{name, size, blob}]>; 浏览器模式: resolve null (调用方 fallback 到 file input) */
+  function isUxpRuntime() {
+    return typeof window !== "undefined" && !!window.require && typeof (window.require("uxp") || {}).storage !== "undefined";
+  }
+  function pickImageFiles(multiple) {
+    const req = (typeof window !== "undefined" && window.require) ? window.require : null;
+    if (!req) return Promise.resolve(null);
+    let lfs = null, formats = null;
+    try { lfs = req("uxp").storage.localFileSystem; formats = req("uxp").storage.formats; } catch (e) { return Promise.resolve(null); }
+    if (!lfs || !formats) return Promise.resolve(null);
+    const pick = multiple && lfs.getFileForOpening ? lfs.getFileForOpening({ allowMultiple: true }) : lfs.getFileForOpening();
+    return Promise.resolve(pick).then(function (entries) {
+      const list = Array.isArray(entries) ? entries : (entries ? [entries] : []);
+      return Promise.all(list.map(function (entry) {
+        return entry.read({ format: formats.binary }).then(function (buf) {
+          return { name: entry.name, size: buf.byteLength || 0, blob: new Blob([buf], { type: "image/png" }) };
+        });
+      })).then(function (files) { return files; });
+    }).catch(function () { return null; });
+  }
+  /* PHASE 15: 敏感凭据存储 — UXP SecureStorage (session-scoped encrypted); 浏览器 dev-preview fallback localStorage
+   * helperToken 绝不进入 settings/localStorage 的 settings 持久化 (state.js 已过滤) */
+  function secureGet(key) {
+    const req = (typeof window !== "undefined" && window.require) ? window.require : null;
+    if (!req) return Promise.resolve(null);
+    try {
+      const SS = req("uxp").storage && req("uxp").storage.SecureStorage;
+      if (SS) return Promise.resolve(new SS().getItem(key));
+    } catch (e) { /* fallback */ }
+    try {
+      const v = window.localStorage ? window.localStorage.getItem("a4p.secure." + key) : null;
+      return Promise.resolve(v);
+    } catch (e) { return Promise.resolve(null); }
+  }
+  function secureSet(key, value) {
+    const req = (typeof window !== "undefined" && window.require) ? window.require : null;
+    if (!req) return Promise.resolve(false);
+    try {
+      const SS = req("uxp").storage && req("uxp").storage.SecureStorage;
+      if (SS) return Promise.resolve(new SS().setItem(key, value));
+    } catch (e) { /* fallback */ }
+    try {
+      if (window.localStorage) window.localStorage.setItem("a4p.secure." + key, value);
+      return Promise.resolve(true);
+    } catch (e) { return Promise.resolve(false); }
+  }
+  function secureRemove(key) {
+    const req = (typeof window !== "undefined" && window.require) ? window.require : null;
+    if (!req) return Promise.resolve(false);
+    try {
+      const SS = req("uxp").storage && req("uxp").storage.SecureStorage;
+      if (SS) return Promise.resolve(new SS().removeItem(key));
+    } catch (e) { /* fallback */ }
+    try {
+      if (window.localStorage) window.localStorage.removeItem("a4p.secure." + key);
+      return Promise.resolve(true);
+    } catch (e) { return Promise.resolve(false); }
+  }
+  A4P.utils = { $: $, $$: $$, val: val, uid: uid, fmtTime: fmtTime, debounce: debounce, clamp: clamp, escapeHtml: escapeHtml, sha256Str: sha256Str, isUxpRuntime: isUxpRuntime, pickImageFiles: pickImageFiles, secureGet: secureGet, secureSet: secureSet, secureRemove: secureRemove };
 })();

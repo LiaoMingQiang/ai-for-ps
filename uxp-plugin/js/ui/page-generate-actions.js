@@ -117,12 +117,22 @@
 
     refreshProvider(body);
 
+    /* PHASE 14: capability 唯一来源 = Helper; 同步后重渲染能力条 */
+    const renderCaps = function () {
+      const strip = body.querySelector("#capabilityStrip");
+      if (strip) strip.innerHTML = A4P.providers.renderCapabilityStrip(A4P.providers.find(G.ui.providerId));
+    };
+    if (A4P.providers.syncFromHelper) {
+      A4P.providers.syncFromHelper().then(renderCaps).catch(function () { /* helper 离线: 显示未获取 */ });
+    }
+
     $("#providerSelect", body).addEventListener("change", function () {
       G.ui.providerId = this.value;
       const p = A4P.providers.find(this.value);
       $("#locationSelect", body).innerHTML = "<option>" + p.locationLabel + "</option>";
       $$("[data-mode]", body).forEach(function (b) { b.classList.toggle("active", b.dataset.mode === G.ui.mode); });
       refreshProvider(body);
+      renderCaps();
     });
 
     $$("[data-mode]", body).forEach(function (b) {

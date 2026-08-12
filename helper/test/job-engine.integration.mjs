@@ -201,7 +201,10 @@ async function main() {
     await sleep(2500);
     const j6AfterStart = await (await fetch(`${BASE}/v1/jobs/${j6.body.job.id}`, { headers: auth })).json();
     const rec = await waitJob(j6.body.job.id, "result_ready", 40000);
-    check("recovered to result_ready", rec.status === "result_ready", rec.status + " | afterStart=" + (j6AfterStart.job ? j6AfterStart.job.status : "no-job") + " | events=" + (j6AfterStart.events || []).map((e) => e.to_status).join(",") + " | helperLog=" + helperLog.slice(-400));
+    const h6 = await (await fetch(`${STUB}/history`)).json();
+    const hist6 = h6[remoteId6] || null;
+    const recLog = helperLog.split("\n").filter((l) => /recover|error|ERR|failed/i.test(l)).slice(-6).join(" | ");
+    check("recovered to result_ready", rec.status === "result_ready", rec.status + " | afterStart=" + (j6AfterStart.job ? j6AfterStart.job.status : "no-job") + " | events=" + (j6AfterStart.events || []).map((e) => e.to_status).join(",") + " | stub6=" + JSON.stringify(hist6 ? hist6.status : null).slice(0, 120) + " | recLog=" + recLog.slice(-500));
     check("remoteId preserved (same)", rec.remote_job_id === remoteId6, rec.remote_job_id + " vs " + remoteId6);
     /* stub history 里该 prompt 只有一个执行 (无重复提交) */
     const hist = await fetch(`${STUB}/history`).then((r) => r.json());

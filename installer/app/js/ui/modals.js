@@ -109,11 +109,36 @@
       '<div class="dlg-foot"><button class="secondary" data-close-dlg="#dlg-import-workflow">取消</button>' +
       '<button class="primary" id="importJsonBtn">扫描并导入</button></div>';
     bindClose(dlg);
+    $("input[type=file]", dlg) && ($("input[type=file]", dlg).style.display = "none");
+    $("input[type=file]", dlg) && $("input[type=file]", dlg).setAttribute("hidden", "");
+    /* 选择 JSON 文件: UXP 正式路径 = localFileSystem.getFileForOpening; 浏览器预览 fallback 文件框 */
+    $("input[type=file]", dlg) && $("input[type=file]", dlg).addEventListener("change", function () {
+      const f = $("input[type=file]", dlg).files && $("input[type=file]", dlg).files[0];
+      if (!f) return;
+      const rd = new FileReader();
+      rd.onload = function () { $("input[type=file]", dlg).dataset.picked = rd.result; $("input[type=file]", dlg).dataset.pickedName = f.name; };
+      rd.readAsText(f);
+    });
+    $("input[type=file]", dlg) && $("input[type=file]", dlg).dataset.picked = "";
     $("#importJsonBtn", dlg).onclick = function () {
-      const text = $("#importJsonText", dlg).value;
-      A4P.store.emit("workflow:import-json", text);
-      A4P.uiRouter.toast("工作流已导入", "字段扫描完成，未知字段进入高级模式");
-      dlg.close();
+      const picked = $("input[type=file]", dlg) ? ($("input[type=file]", dlg).dataset.picked || "") : "";
+      const body = $("#importJsonText", dlg).value || picked || "";
+      if (!body || !body.trim()) { A4P.uiRouter.toast("请先粘贴 JSON 或选择文件", "warn"); return; }
+      /* PHASE 9: 真实导入 — Helper parse/scan/依赖检查/SQLite, 只有真正成功才提示 */
+      const btn = $("#importJsonBtn", dlg);
+      btn.disabled = true; btn.textContent = "导入中…";
+      A4P.helper.workflows.importJson(body).then(function (r) {
+        btn.disabled = false; btn.textContent = "扫描并导入";
+        if (r && r.error) throw { code: r.error.code || "WORKFLOW_INVALID", message: r.error.message || "导入失败" };
+        if (!r || !r.workflow || !r.workflow.id) throw { code: "WORKFLOW_INVALID", message: "Helper 未返回 workflow" };
+        A4P.uiRouter.toast("工作流导入完成：" + (r.workflow.name || r.workflow.id), "ok");
+        A4P.store.emit("workflow:imported", r.workflow);
+        dlg.close();
+        try { A4P.uiRouter.switchPage("workflows"); } catch (e) { /* noop */ }
+      }).catch(function (err) {
+        btn.disabled = false; btn.textContent = "扫描并导入";
+        A4P.uiRouter.toast("导入失败：" + (err.message || String(err)), "warn");
+      });
     };
     A4P.uiRouter.openDialog("#dlg-import-workflow");
   }

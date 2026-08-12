@@ -1,50 +1,61 @@
-/* core/agent: 任务抽象层——队列 → 调度 → jobs 引擎（demo: 直接驱动 A4P.jobs）
- * 真实模式：queue 提交到 Helper (A4P.helper.jobs.create)，由远端 worker 执行。 */
+/* core/agent: 前端 Agent — 真实链路 (PHASE 20)
+ * 用户 Request -> POST /v1/agent/plan (Helper) -> 显示真实 Plan
+ * -> 用户批准 -> POST /v1/agent/execute -> Helper Tool Registry
+ * -> PS 工具委托 UXP bridge; 审计由 Helper 记录。
+ * 不再有 fake queue / setInterval / 示例自动计划。 */
 (function () {
-  const queue = [];
   const listeners = {};
-  let ticker = null;
 
-  function emit() {
-    Object.keys(listeners).forEach(function (k) { try { listeners[k](); } catch (e) { /* noop */ } });
+  function emit(name, payload) {
+    Object.keys(listeners).forEach(function (k) { try { listeners[k](name, payload); } catch (e) { /* noop */ } });
   }
 
   A4P.agent = {
     on: function (fn) { const id = "l" + Math.random().toString(36).slice(2); listeners[id] = fn; return function () { delete listeners[id]; }; },
-    pending: function () { return queue.length; },
-    push: function (payload) {
-      queue.push(payload);
-      emit();
-      return queue.length;
-    },
-    cancel: function (jobId) { A4P.jobs.cancel(A4P.jobs.find(jobId)); emit(); },
-    tick: function () {
-      if (!queue.length) return;
-      const payload = queue.shift();
-      const job = A4P.jobs.create({
-        label: payload.label || "AI 批量任务",
-        title: payload.label || "AI 批量任务",
-        kind: payload.mode || "image",
-        tool: payload.tool || "生成",
-        payload: payload,
-        provider: payload.providerId || "comfyui",
-        seed: payload.params && payload.params.seed,
-        resultCount: payload.resultCount || 1
+    /* 打开 Agent 面板: 请求真实 Plan (不执行) */
+    bootstrap: function (intent) {
+      if (!A4P.helper || !A4P.helper.agent) {
+        emit("agent:error", { code: "HELPER_OFFLINE", message: "Agent 需要 Helper 在线" });
+        return Promise.reject({ code: "HELPER_OFFLINE" });
+      }
+      const req = {
+        intent: intent || "给当前产品图层抠图生成蒙版并写回",
+        providerId: A4P.providers.helperIdOf ? A4P.providers.helperIdOf("comfyui") : "local-comfy"
+      };
+      return A4P.helper.agent.plan(req).then(function (r) {
+        if (r && r.error) throw { code: r.error.code, message: r.error.message };
+        emit("agent:plan", { planId: r.planId, auditId: r.auditId, plan: r.plan });
+        return r;
+      }).catch(function (e) {
+        emit("agent:error", { code: e.code || "AGENT_PLAN_FAILED", message: e.message || String(e) });
+        throw e;
       });
-      A4P.jobs.start(job);
-      emit();
-      return job.id;
     },
-    start: function () { if (!ticker) ticker = setInterval(function () { A4P.agent.tick(); }, 800); return ticker; },
-    stop: function () { if (ticker) { clearInterval(ticker); ticker = null; } },
-    bootstrap: function () {
-      /* 供 #dlg-agent-drawer 使用：注入示例任务 */
-      A4P.store.emit("agent:plan", [
-        { action: "captureSnapshot", args: { label: "产品主体" }, risk: "low" },
-        { action: "queueWorkflow", args: { workflowId: "wf-product-clean" }, risk: "low" },
-        { action: "writeback", args: { strategy: "smartObject" }, risk: "medium" }
-      ]);
-      return true;
-    }
+    /* 用户批准后执行 (Helper 审计完整记录; PS 工具委托 UXP) */
+    approve: function (auditId) {
+      if (!A4P.helper || !A4P.helper.agent) return Promise.reject({ code: "HELPER_OFFLINE" });
+      return A4P.helper.agent.execute({ auditId: auditId, approved: true }).then(function (r) {
+        emit("agent:result", r);
+        return r;
+      });
+    },
+    reject: function (auditId) {
+      if (!A4P.helper || !A4P.helper.agent) return Promise.reject({ code: "HELPER_OFFLINE" });
+      return A4P.helper.agent.execute({ auditId: auditId, approved: false }).then(function (r) {
+        emit("agent:rejected", r);
+        return r;
+      });
+    },
+    audit: function (id) {
+      if (!A4P.helper || !A4P.helper.agent) return Promise.reject({ code: "HELPER_OFFLINE" });
+      return A4P.helper.agent.audit(id);
+    },
+    /* 兼容旧 API 表面 (不再有本地队列/定时器) */
+    pending: function () { return 0; },
+    push: function () { return 0; },
+    cancel: function (jobId) { return A4P.jobs.cancel(A4P.jobs.find(jobId)); },
+    tick: function () { return null; },
+    start: function () { return null; },
+    stop: function () { /* noop */ }
   };
 })();

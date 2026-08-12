@@ -40,28 +40,45 @@
     '<div class="about"><div class="logo-big">AI</div><div><strong>AI-for-PS · 电商 AI 工作台</strong><span>v0.5.0</span><span>核心：ComfyUI + 深度编辑 + 电商保护 + 任务管线（浏览器版为真实链路预览）</span></div></div>' +
     '<pre class="log" id="bootLog">[core] providers: comfyui (真实 HTTP)\n' +
     '[comfy] API 地址: ' + (A4P.settings.get("connection", "comfyuiUrl") || "未设置") + '\n' +
-    '[comfy] 状态: ' + (A4P.comfyui.lastState && A4P.comfyui.lastState.ok ? "在线 " + (A4P.comfyui.lastState.version || "") : "未连接（生成会真实失败并给出原因）") + '\n' +
-    '[core] jobs store: localStorage\n' +
+    '[comfy] 状态: ' + (A4P.comfyui.lastState && A4P.comfyui.lastState.ok ? "在线 " + (A4P.comfyui.lastState.version || "") : "未连接（经 Helper 检测）") + '\n' +
+    '[core] jobs store: Helper (SQLite)\n' +
     '[core] 模式: 真实模式（无演示数据）</pre></div>',
     "</div></div>"
   ].join("");
 
   function updateChips(body) {
-    A4P.comfyui.ping().then(function (st) {
-      const chip = body.querySelector("#comfyChip");
-      const conn = body.querySelector("#connChip");
-      if (chip) {
-        if (st.ok) { chip.textContent = "在线 · " + (st.version || "ComfyUI") + " · " + (st.vram ? (st.vram / 1073741824).toFixed(0) + "GB" : "?"); chip.className = "state-chip good"; }
-        else { chip.textContent = "离线 · " + st.error; chip.className = "state-chip bad"; }
-      }
-      if (conn) { conn.textContent = st.ok ? "真实模式 · 执行端在线" : "真实模式（执行端离线）"; conn.className = st.ok ? "state-chip good" : "state-chip warning"; }
+    /* PHASE 11/13: 状态与测试全部经 Helper (不再直连 ComfyUI) */
+    const chip = body.querySelector("#comfyChip");
+    const conn = body.querySelector("#connChip");
+    if (!A4P.helper || !A4P.helper.health) {
+      if (chip) { chip.textContent = "Helper 客户端不可用"; chip.className = "state-chip bad"; }
+      if (conn) { conn.textContent = "真实模式（Helper 离线）"; conn.className = "state-chip warning"; }
+      return;
+    }
+    A4P.helper.health().then(function (h) {
+      const helperId = A4P.providers.helperIdOf ? A4P.providers.helperIdOf("comfyui") : "local-comfy";
+      return A4P.helper.providers.test(helperId).then(function (t) {
+        const online = !!(h && h.online) && !!(t && t.ok);
+        if (chip) {
+          if (t && t.ok) { chip.textContent = "在线 · " + (t.message || "ComfyUI") + " · " + (t.latencyMs != null ? t.latencyMs + "ms" : ""); chip.className = "state-chip good"; }
+          else if (t && t.error) { chip.textContent = "离线 · " + (t.error.message || t.error.code || ""); chip.className = "state-chip bad"; }
+          else { chip.textContent = "Helper 在线，执行端未配置"; chip.className = "state-chip warning"; }
+        }
+        if (conn) { conn.textContent = online ? "真实模式 · 执行端在线" : "真实模式（执行端离线）"; conn.className = online ? "state-chip good" : "state-chip warning"; }
+      });
+    }).catch(function () {
+      if (chip) { chip.textContent = "Helper 离线"; chip.className = "state-chip bad"; }
+      if (conn) { conn.textContent = "真实模式（Helper 离线）"; conn.className = "state-chip warning"; }
     });
   }
 
   A4P.pages.settings = function (head, body) {
     body.innerHTML = HTML;
     const $ = A4P.utils.$;
-    $("#devReload", body).addEventListener("click", function () { location.reload(); });
+    $("#devReload", body).addEventListener("click", function () {
+      if (A4P.utils.isUxpRuntime && A4P.utils.isUxpRuntime()) { A4P.app.toast("UXP 模式请用 UXP Developer Tool 重新加载插件", "warn"); return; }
+      location.reload();
+    });
     $("#devReset", body).addEventListener("click", function () {
       A4P.jobs.clear();
       try { window.localStorage.removeItem("aiforps.state.v1"); } catch (e) { /* noop */ }
@@ -71,26 +88,53 @@
     $("#comfySaveBtn", body).addEventListener("click", function () {
       const v = $("#comfyUrl", body).value.trim().replace(/\/+$/, "");
       if (!/^https?:\/\//.test(v)) { A4P.app.toast("地址需以 http(s):// 开头", "warn"); return; }
+      /* PHASE 11: 保存执行端地址 -> Helper PATCH provider (唯一配置源) */
       A4P.settings.set("connection", "comfyuiUrl", v);
-      A4P.comfyui.setEndpoint(v);
-      updateChips(body);
-      A4P.app.toast("已保存执行端地址：" + v, "ok");
+      if (A4P.helper && A4P.helper.providers) {
+        A4P.helper.providers.update(A4P.providers.helperIdOf("comfyui"), { baseUrl: v, enabled: true })
+          .then(function () { updateChips(body); A4P.app.toast("已保存执行端地址到 Helper：" + v, "ok"); })
+          .catch(function () { A4P.app.toast("保存失败：Helper 不可用", "warn"); });
+      } else {
+        A4P.app.toast("已保存地址（Helper 客户端不可用）", "warn");
+      }
     });
-    $("#comfyTestBtn", body).addEventListener("click", function () { updateChips(body); A4P.app.toast("正在检测 ComfyUI…"); });
+    $("#comfyTestBtn", body).addEventListener("click", function () { updateChips(body); A4P.app.toast("正在经 Helper 检测执行端…"); });
     body.querySelectorAll("[data-toggle]").forEach(function (c) {
       c.addEventListener("change", function () {
-        A4P.app.toast("Provider " + c.dataset.toggle + " -> " + (c.checked ? "已启用" : "已停用"));
+        /* PHASE 11: 启停 Provider -> Helper PATCH enabled */
+        const helperId = A4P.providers.helperIdOf(c.dataset.toggle);
+        if (A4P.helper && A4P.helper.providers) {
+          A4P.helper.providers.update(helperId, { enabled: c.checked }).then(function () {
+            A4P.app.toast("Provider " + c.dataset.toggle + " -> " + (c.checked ? "已启用" : "已停用"), "ok");
+          }).catch(function () { A4P.app.toast("更新失败：Helper 不可用", "warn"); });
+        } else {
+          A4P.app.toast("Provider " + c.dataset.toggle + " -> " + (c.checked ? "已启用" : "已停用"));
+        }
       });
     });
     body.querySelectorAll("[data-test]").forEach(function (b) {
       b.addEventListener("click", function () {
         const chip = b.parentElement.querySelector(".state-chip");
         chip.textContent = "测试中…";
-        const prom = b.dataset.test === "comfyui" ? A4P.comfyui.ping() : Promise.resolve({ ok: false, error: "未配置密钥" });
-        prom.then(function (st) {
-          chip.textContent = st.ok ? "已连接" : "未连接";
-          chip.className = "state-chip " + (st.ok ? "good" : "bad");
-          A4P.app.toast(b.dataset.test + (st.ok ? "：在线" : "：" + st.error));
+        /* PHASE 13: 真实连通性测试经 Helper (DNS/HTTP/Auth/latency) */
+        const helperId = A4P.providers.helperIdOf(b.dataset.test);
+        if (!A4P.helper || !A4P.helper.providers) {
+          chip.textContent = "Helper 不可用"; chip.className = "state-chip bad";
+          return;
+        }
+        A4P.helper.providers.test(helperId).then(function (t) {
+          if (t && t.ok) {
+            chip.textContent = "已连接" + (t.latencyMs != null ? " · " + t.latencyMs + "ms" : "");
+            chip.className = "state-chip good";
+            A4P.app.toast(b.dataset.test + "：在线", "ok");
+          } else {
+            chip.textContent = "未连接";
+            chip.className = "state-chip bad";
+            A4P.app.toast(b.dataset.test + "：" + ((t && t.error && t.error.message) || (t && t.message) || "连接失败"), "warn");
+          }
+        }).catch(function () {
+          chip.textContent = "未连接"; chip.className = "state-chip bad";
+          A4P.app.toast(b.dataset.test + "：Helper 不可用", "warn");
         });
       });
     });

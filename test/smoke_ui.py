@@ -44,7 +44,12 @@ def main():
             if r.get("id") == msg_id:
                 return r.get("result", {})
             if r.get("method") == "Runtime.exceptionThrown":
-                errors.append(r["params"]["exceptionDetails"].get("text", "?"))
+                d = r["params"]["exceptionDetails"]
+                desc = d.get("exception", {}).get("description", "") if isinstance(d.get("exception"), dict) else ""
+                loc = ""
+                if isinstance(d.get("url"), str) and d.get("lineNumber") is not None:
+                    loc = " @%s:%s" % (d["url"].split("/")[-1], d.get("lineNumber", 0) + 1)
+                errors.append((d.get("text", "?") + " " + desc + loc).strip()[:400])
 
     send("Runtime.enable")
     send("Page.enable")

@@ -47,7 +47,7 @@
     sdk: {
       providerSdk: "1.0", workflowSdk: "1.0", fieldRendererSdk: "0.9 (Beta)", aiToolSdk: "0.8 (Beta)"
     },
-    about: { pluginVersion: "1.0.0", helperVersion: "1.0.0", schemaVersion: 3, manifestVersion: 5 }
+    about: { pluginVersion: "0.9.0", helperVersion: "0.9.0", schemaVersion: 3, manifestVersion: 5 }
   };
 
   let current = null;

@@ -112,7 +112,30 @@ A4P.main = (function () {
     try {
       if (A4P.psContext) { A4P.psContext.start(); A4P.psContext.refresh(); }
     } catch (e) { /* browser */ }
-    try { if (A4P.agent) A4P.agent.start(); } catch (e) { /* noop */ }
+    /* PHASE 19: PSD 打开/切换 -> Helper Project lookup (不同 PSD 不混历史) */
+    try {
+      const syncProject = function (ctx) {
+        if (!ctx || !ctx.documentId) { A4P.state.project = null; return; }
+        if (!A4P.helper || !A4P.helper.projects) return;
+        A4P.helper.projects.upsert({
+          documentPersistentId: String(ctx.documentId),
+          documentName: ctx.name || null,
+          documentPath: ctx.path || null
+        }).then(function (r) {
+          if (r && r.project) {
+            A4P.state.project = r.project;
+            A4P.store.emit("project:context", r.project);
+            try {
+              if (r.project.last_workflow_id) A4P.settings.set("project", "lastWorkflowId", r.project.last_workflow_id);
+              if (r.project.default_writeback) A4P.settings.set("writeback", "defaultStrategy", r.project.default_writeback);
+            } catch (e) { /* noop */ }
+          }
+        }).catch(function () { /* helper offline */ });
+      };
+      A4P.store.on("ps:context", syncProject);
+      const ctx = A4P.psContext ? A4P.psContext.refresh() : null;
+      syncProject(ctx);
+    } catch (e) { /* browser preview */ }
     return Promise.resolve();
   }
 

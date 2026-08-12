@@ -11,19 +11,43 @@
       '<div class="hint" style="margin-top:10px">浏览器版素材保存在当前会话；UXP 版将接入 Photoshop 项目文件夹。</div>';
 
     const grid = body.querySelector("#assetGrid");
-    const list = A4P.settings.get("project", "assetStore") || [];
+    /* PHASE 17: 资产真相源 = Helper Asset Store (SQLite), 不再用 settings 本地列表 */
+    const list = [];
 
     function render() {
       if (!list.length) {
-        grid.innerHTML = '<div class="empty" style="padding:48px 0;grid-column:1/-1"><strong>素材库为空</strong><span>点击「上传」添加真实图片文件（当前会话内使用）</span></div>';
+        grid.innerHTML = '<div class="empty" style="padding:48px 0;grid-column:1/-1"><strong>素材库为空</strong><span>点击「上传」把图片存入 Helper Asset Store（跨会话保留）</span></div>';
         return;
       }
       grid.innerHTML = list.map(function (a, i) {
         return '<div class="asset-card card"><div class="asset-thumb" style="background-image:url(' + a.preview + ')"><span class="fav">★</span></div>' +
-          "<div class=\"asset-meta\"><strong>" + A4P.utils.escapeHtml(a.name) + "</strong><span>" + a.type + " · " + (a.size / 1048576).toFixed(2) + " MB · 会话内</span>" +
+          '<div class="asset-meta"><strong>' + A4P.utils.escapeHtml(a.name) + "</strong><span>" + a.type + " · " + (a.size / 1048576).toFixed(2) + " MB · Helper</span>" +
           '<div class="button-row"><button class="small" data-use="' + i + '">引用</button><button class="small danger" data-del="' + i + '">移除</button></div></div></div>';
       }).join("");
     }
+
+    /* 从 Helper 加载资产 (reference/input 类) */
+    function loadFromHelper() {
+      if (!A4P.helper || !A4P.helper.assets || !A4P.helper.assets.list) {
+        grid.innerHTML = '<div class="empty" style="padding:48px 0;grid-column:1/-1"><strong>Helper 不可用</strong><span>无法加载资产库（Helper 离线）</span></div>';
+        return;
+      }
+      grid.innerHTML = '<div class="empty" style="padding:48px 0;grid-column:1/-1"><strong>正在从 Helper 加载资产…</strong></div>';
+      A4P.helper.assets.list({ limit: 200 }).then(function (r) {
+        const rows = (r && Array.isArray(r.assets) ? r.assets : []).filter(function (a) { return a.kind === "reference" || a.kind === "input"; });
+        rows.forEach(function (a, i) {
+          list.push({ id: a.id, name: a.original_name || (a.id.slice(0, 8) + ".png"), size: a.size || 0, type: "参考图", source: "helper", preview: "" });
+          A4P.helper.assets.get(a.id).then(function (buf) {
+            try { list[i].preview = URL.createObjectURL(new Blob([buf], { type: "image/png" })); } catch (e) { /* noop */ }
+            render();
+          }).catch(function () { /* missing */ });
+        });
+        render();
+      }).catch(function () {
+        grid.innerHTML = '<div class="empty" style="padding:48px 0;grid-column:1/-1"><strong>加载失败</strong><span>Helper 返回错误</span></div>';
+      });
+    }
+    loadFromHelper();
 
     body.querySelector("#assetUploadBtn").addEventListener("click", function () {
       /* PHASE 3: UXP 正式路径 = localFileSystem.getFileForOpening; 浏览器预览 fallback file input */
@@ -36,7 +60,6 @@
               done++;
               if (r && r.asset && r.asset.id) {
                 list.push({ id: r.asset.id, name: f.name, size: f.size, type: "参考图", preview: URL.createObjectURL(f.blob), source: "helper" });
-                A4P.settings.set("project", "assetStore", list);
                 render();
               } else { failed++; }
               if (done + failed === files.length) A4P.app.toast("已上传 " + done + " 个素材到 Helper" + (failed ? "，" + failed + " 失败" : ""), done ? "ok" : "warn");
@@ -49,16 +72,20 @@
     });
     body.querySelector("#assetExportBtn").addEventListener("click", function () { A4P.app.toast("导出素材包需 UXP 端支持，浏览器版暂不可用", "warn"); });
     body.querySelector("#assetFile").addEventListener("change", function () {
+      /* 浏览器预览 fallback: 上传到 Helper (正式 UXP 走 getFileForOpening) */
       Array.prototype.forEach.call(body.querySelector("#assetFile").files || [], function (f) {
-        list.push({ name: f.name, size: f.size, type: (f.type || "image").split("/")[1] || "bin", preview: URL.createObjectURL(f) });
+        A4P.helper.assets.upload(f, { kind: "reference" }).then(function (r) {
+          if (r && r.asset && r.asset.id) {
+            list.push({ id: r.asset.id, name: f.name, size: f.size, type: "参考图", preview: URL.createObjectURL(f), source: "helper" });
+            render();
+          }
+        });
       });
-      A4P.settings.set("project", "assetStore", list);
-      render();
-      A4P.app.toast("已上传 " + body.querySelector("#assetFile").files.length + " 个素材", "ok");
+      A4P.app.toast("已上传 " + body.querySelector("#assetFile").files.length + " 个素材到 Helper", "ok");
     });
     grid.addEventListener("click", function (e) {
       const use = e.target.dataset.use, del = e.target.dataset.del;
-      if (del !== undefined) { list.splice(Number(del), 1); A4P.settings.set("project", "assetStore", list); render(); return; }
+      if (del !== undefined) { list.splice(Number(del), 1); render(); return; }
       if (use !== undefined) {
         const a = list[Number(use)];
         const gen = A4P.pageGen;

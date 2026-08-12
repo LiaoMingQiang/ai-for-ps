@@ -58,26 +58,35 @@ A4P.main = (function () {
     return Promise.resolve();
   }
 
-  /* 4. pairHelper: 有 token 即视为已配对; 无 token 时请求 /v1/pair (helper 离线则保持未配对) */
+  /* 4. pairHelper: 有 token (SecureStorage) 即视为已配对; 无 token 时两段式配对 (PHASE 15/16) */
   function pairHelper() {
     try {
-      var tok = A4P.settings.get("connection", "helperToken");
-      if (tok) return Promise.resolve({ paired: true });
-      if (!A4P.helper || !A4P.helper.pair) return Promise.resolve({ paired: false, reason: "no-helper-client" });
-      return A4P.helper.pair().then(function (r) {
-        if (r && r.token) {
-          A4P.settings.set("connection", "helperToken", r.token);
-          A4P.store.persist();
-          return { paired: true };
-        }
-        A4P.state.helper.paired = false;
-        A4P.store.emit("helper:status", A4P.state.helper);
-        return { paired: false, reason: "pair-rejected" };
-      }).catch(function () {
-        A4P.state.helper.paired = false;
-        A4P.store.emit("helper:status", A4P.state.helper);
-        return { paired: false, reason: "helper-offline" };
-      });
+      if (!A4P.helper) return Promise.resolve({ paired: false, reason: "no-helper-client" });
+      return (A4P.helper.loadToken ? A4P.helper.loadToken() : Promise.resolve(null))
+        .then(function (tok) {
+          if (tok) return { paired: true };
+          if (A4P.helper.migrateLegacyToken) A4P.helper.migrateLegacyToken();
+          if (A4P.helper.loadToken) return A4P.helper.loadToken().then(function (t2) { return t2 ? { paired: true } : null; });
+          return null;
+        })
+        .then(function (r) {
+          if (r) return r;
+          if (!A4P.helper.pair) return { paired: false, reason: "no-pair-fn" };
+          return A4P.helper.pair().then(function (pr) {
+            if (pr && pr.paired) {
+              A4P.state.helper.paired = true;
+              A4P.store.emit("helper:status", A4P.state.helper);
+              return { paired: true };
+            }
+            A4P.state.helper.paired = false;
+            A4P.store.emit("helper:status", A4P.state.helper);
+            return { paired: false, reason: "pair-rejected" };
+          }).catch(function () {
+            A4P.state.helper.paired = false;
+            A4P.store.emit("helper:status", A4P.state.helper);
+            return { paired: false, reason: "helper-offline" };
+          });
+        });
     } catch (e) { return Promise.resolve({ paired: false, reason: "error" }); }
   }
 
@@ -103,7 +112,30 @@ A4P.main = (function () {
     try {
       if (A4P.psContext) { A4P.psContext.start(); A4P.psContext.refresh(); }
     } catch (e) { /* browser */ }
-    try { if (A4P.agent) A4P.agent.start(); } catch (e) { /* noop */ }
+    /* PHASE 19: PSD 打开/切换 -> Helper Project lookup (不同 PSD 不混历史) */
+    try {
+      const syncProject = function (ctx) {
+        if (!ctx || !ctx.documentId) { A4P.state.project = null; return; }
+        if (!A4P.helper || !A4P.helper.projects) return;
+        A4P.helper.projects.upsert({
+          documentPersistentId: String(ctx.documentId),
+          documentName: ctx.name || null,
+          documentPath: ctx.path || null
+        }).then(function (r) {
+          if (r && r.project) {
+            A4P.state.project = r.project;
+            A4P.store.emit("project:context", r.project);
+            try {
+              if (r.project.last_workflow_id) A4P.settings.set("project", "lastWorkflowId", r.project.last_workflow_id);
+              if (r.project.default_writeback) A4P.settings.set("writeback", "defaultStrategy", r.project.default_writeback);
+            } catch (e) { /* noop */ }
+          }
+        }).catch(function () { /* helper offline */ });
+      };
+      A4P.store.on("ps:context", syncProject);
+      const ctx = A4P.psContext ? A4P.psContext.refresh() : null;
+      syncProject(ctx);
+    } catch (e) { /* browser preview */ }
     return Promise.resolve();
   }
 

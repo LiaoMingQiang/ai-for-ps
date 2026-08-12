@@ -99,16 +99,16 @@ SectionEnd
         f.write(nsi)
     print("[release] AI-for-PS-Setup.nsi written")
 
-    # 4. install-helper.bat (自启动注册 + 启动)
+    # 4. install-helper.bat (自启动注册 + 启动) — bat 文件中用单 % (%% 是 NSIS 转义, 仅 .nsi 使用)
     bat = f"""@echo off
-rem AI for PS Helper {VERSION} — 安装到 %%LOCALAPPDATA%%\\AI-for-PS\\helper 并注册自启动
-set "DEST=%%LOCALAPPDATA%%\\AI-for-PS\\helper"
-if not exist "%%DEST%%" mkdir "%%DEST%%"
-copy /Y "%~dp0helper\\AI-for-PS-Helper.exe" "%%DEST%%\\" >nul
-if not exist "%%DEST%%\\scripts" mkdir "%%DEST%%\\scripts"
-copy /Y "%~dp0helper\\scripts\\dpapi.ps1" "%%DEST%%\\scripts\\" >nul
-reg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run" /v "AI-for-PS-Helper" /t REG_SZ /d "\\"%%DEST%%\\AI-for-PS-Helper.exe\\"" /f >nul
-start "" "%%DEST%%\\AI-for-PS-Helper.exe"
+rem AI for PS Helper {VERSION} — 安装到 %LOCALAPPDATA%\\AI-for-PS\\helper 并注册自启动
+set "DEST=%LOCALAPPDATA%\\AI-for-PS\\helper"
+if not exist "%DEST%" mkdir "%DEST%"
+copy /Y "%~dp0helper\\AI-for-PS-Helper.exe" "%DEST%\\" >nul
+if not exist "%DEST%\\scripts" mkdir "%DEST%\\scripts"
+copy /Y "%~dp0helper\\scripts\\dpapi.ps1" "%DEST%\\scripts\\" >nul
+reg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run" /v "AI-for-PS-Helper" /t REG_SZ /d "\\"%DEST%\\AI-for-PS-Helper.exe\\"" /f >nul
+start "" "%DEST%\\AI-for-PS-Helper.exe"
 echo Helper 已安装并启动: http://127.0.0.1:33057/v1/health
 """
     with open(os.path.join(RELEASE, "install-helper.bat"), "w", encoding="utf-8") as f:
