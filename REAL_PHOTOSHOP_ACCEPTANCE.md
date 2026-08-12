@@ -20,6 +20,19 @@
 
 ---
 
+## TEST 00 — Photoshop 重启后插件仍能打开
+
+- [ ] 插件加载并正常工作后，关闭 Photoshop 并重新启动
+- [ ] 重新打开 Photoshop → 插件面板 `aiForPsPanel` 重新出现并可交互（UXPDT 开发模式加载的插件在 PS 重启后需在 UXPDT 重新 Load，此项记录实际行为；正式签名版则验证随 PS 启动自动加载）
+- [ ] PASS / FAIL
+
+## TEST 00b — Helper 自动启动并自动连接
+
+- [ ] 通过安装器安装后，注销并重新登录 Windows（或重启机器）
+- [ ] Helper 由登录自启动（HKCU Run）自动运行，`http://127.0.0.1:33057/v1/health` 返回 online
+- [ ] 插件启动后自动经 SecureStorage token 连接 Helper（无需手动配对），状态条显示已连接
+- [ ] PASS / FAIL
+
 ## TEST 01 — 当前图层 → Helper → ComfyUI → 结果 → 新智能对象
 
 - [ ] 打开测试 PSD，选中一个普通图层（如产品主体）
