@@ -1,0 +1,71 @@
+{
+  "manifestVersion": 5,
+  "id": "com.aiforps.psai",
+  "name": "AI for PS",
+  "version": "1.0.0",
+  "main": "index.html",
+  "host": {
+    "app": "PS",
+    "minVersion": "25.2.0"
+  },
+  "entrypoints": [
+    {
+      "type": "panel",
+      "id": "psaiMain",
+      "label": { "default": "AI 面板", "en": "AI Panel" },
+      "minimumSize": { "width": 360, "height": 480 },
+      "maximumSize": { "width": 2400, "height": 2400 },
+      "preferredDockedSize": { "width": 460, "height": 720 },
+      "preferredFloatingSize": { "width": 1180, "height": 800 },
+      "icons": [
+        { "width": 23, "height": 23, "path": "assets/icon-dark.png", "scale": [1, 2], "theme": ["darkest", "dark", "medium"] },
+        { "width": 23, "height": 23, "path": "assets/icon-light.png", "scale": [1, 2], "theme": ["lightest", "light"] }
+      ]
+    },
+    {
+      "type": "panel",
+      "id": "psaiComfyWeb",
+      "label": { "default": "ComfyUI Web", "en": "ComfyUI Web" },
+      "minimumSize": { "width": 480, "height": 400 },
+      "maximumSize": { "width": 4000, "height": 4000 },
+      "preferredDockedSize": { "width": 900, "height": 700 },
+      "preferredFloatingSize": { "width": 1400, "height": 900 },
+      "icons": [
+        { "width": 23, "height": 23, "path": "assets/icon-dark.png", "scale": [1, 2], "theme": ["darkest", "dark", "medium"] },
+        { "width": 23, "height": 23, "path": "assets/icon-light.png", "scale": [1, 2], "theme": ["lightest", "light"] }
+      ]
+    },
+    {
+      "type": "command",
+      "id": "psaiOpenSettings",
+      "label": { "default": "打开设置", "en": "Open Settings" }
+    }
+  ],
+  "icons": [
+    { "width": 23, "height": 23, "path": "assets/icon-dark.png", "scale": [1, 2], "theme": ["dark", "darkest"] },
+    { "width": 23, "height": 23, "path": "assets/icon-light.png", "scale": [1, 2], "theme": ["lightest", "light"] }
+  ],
+  "requiredPermissions": {
+    "network": {
+      "domains": [
+        "http://127.0.0.1:34117",
+        "ws://127.0.0.1:34117",
+        "http://localhost:34117",
+        "ws://localhost:34117"
+      ]
+    },
+    "webview": {
+      "allow": "yes",
+      "domains": [
+        "http://127.0.0.1:8188",
+        "http://localhost:8188",
+        "http://127.0.0.1:*",
+        "http://localhost:*"
+      ],
+      "enableMessageBridge": "localAndRemote"
+    },
+    "clipboard": "readAndWrite",
+    "localFileSystem": "request",
+    "allowCodeGenerationFromStrings": false
+  }
+}

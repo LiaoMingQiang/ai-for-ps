@@ -1,0 +1,27 @@
+:root {
+  --psai-bg: #14161a;
+  --psai-panel: #1b1e24;
+  --psai-line: #2a2f38;
+  --psai-text: #e8ecf3;
+  --psai-dim: #97a0b0;
+  --psai-accent: #3d7dff;
+}
+
+body {
+  margin: 0;
+  background: var(--psai-bg);
+  color: var(--psai-text);
+  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+  font-size: 13px;
+}
+
+.psai-boot {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 24px;
+}
+
+.psai-boot strong { font-size: 15px; }
+.psai-boot span { color: var(--psai-dim); }
+.psai-boot small { color: var(--psai-dim); opacity: .7; }
