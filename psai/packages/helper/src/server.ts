@@ -93,6 +93,22 @@ export async function buildServer(d: ServerDeps): Promise<FastifyInstance> {
 
   const PUBLIC = new Set(['/v1/health', '/v1/pair/request', '/v1/pair/confirm']);
 
+  // 开发预览：只放行本机来源，且必须显式开启。正式运行不走这条路。
+  if (d.cfg.devCors) {
+    d.log.warn('开发 CORS 已开启：仅放行 127.0.0.1 / localhost 来源，请勿在正式环境使用');
+    app.addHook('onRequest', async (req, reply) => {
+      const origin = req.headers.origin;
+      if (typeof origin === 'string' && /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(origin)) {
+        void reply.header('Access-Control-Allow-Origin', origin);
+        void reply.header('Access-Control-Allow-Headers', 'Authorization, Content-Type');
+        void reply.header('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+      }
+      if (req.method === 'OPTIONS') {
+        void reply.status(204).send();
+      }
+    });
+  }
+
   app.addHook('onRequest', async (req: FastifyRequest, reply: FastifyReply) => {
     const path = (req.raw.url ?? '').split('?')[0] ?? '';
     if (PUBLIC.has(path)) return;

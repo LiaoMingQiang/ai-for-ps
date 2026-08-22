@@ -63,26 +63,35 @@ const FAKE_SUCCESS = [
   { re: /return\s+\{\s*ok:\s*true\s*\}\s*;?\s*\/\/\s*(TODO|占位|stub)/i, why: '禁止用假成功占位' }
 ];
 
+/**
+ * 去掉注释再做内容检查。
+ * 解释"我们为什么不用某个 API"的注释不该被判成违规 ——
+ * 否则唯一的修法是删掉那条解释，正好把最该留下的信息删了。
+ */
+function stripComments(src) {
+  return src.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/[^\n]*/g, '$1 ');
+}
+
 for (const f of [...tsFiles, ...mjsFiles]) {
   const rel = relative(root, f).replaceAll('\\', '/');
   const src = readFileSync(f, 'utf8');
+  const code = stripComments(src);
   const isPluginSrc = rel.startsWith('packages/plugin/src/');
 
   if (isPluginSrc) {
     for (const rule of FORBIDDEN_IN_PLUGIN) {
-      if (rule.re.test(src)) problems.push(`${rel}: ${rule.why}`);
+      if (rule.re.test(code)) problems.push(`${rel}: ${rule.why}`);
     }
     for (const host of THIRD_PARTY_HOSTS) {
-      // 允许出现在注释里的说明；只拦截实际的 URL 字面量
       const re = new RegExp(`["'\`]https?://${host.replace(/\./g, '\\.')}`);
-      if (re.test(src)) problems.push(`${rel}: 插件不得直连 ${host}，所有外呼必须经由 Helper`);
+      if (re.test(code)) problems.push(`${rel}: 插件不得直连 ${host}，所有外呼必须经由 Helper`);
     }
   }
 
   // lint.mjs 自身含有这些正则字面量，跳过
   if (rel !== 'tools/lint.mjs') {
     for (const rule of FAKE_SUCCESS) {
-      if (rule.re.test(src)) problems.push(`${rel}: ${rule.why}`);
+      if (rule.re.test(code)) problems.push(`${rel}: ${rule.why}`);
     }
   }
 }
