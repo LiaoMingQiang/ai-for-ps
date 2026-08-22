@@ -3,7 +3,7 @@
 | 项 | 内容 |
 |---|---|
 | 产品名 | AI for PS |
-| 版本 | 1.0.0 |
+| 版本 | 0.9.0（1.0.0 的门禁是 docs/ACCEPTANCE.md 全过，尚未执行） |
 | 文档状态 | 基线（与 `packages/shared/src/catalog.ts` 保持强一致，由 `catalog.prd.test` 校验） |
 | 形态 | Adobe Photoshop UXP 插件 + 本机 Helper 服务 |
 | 目标宿主 | Photoshop 25.2.0 及以上（开发验证机：Photoshop 2026） |
