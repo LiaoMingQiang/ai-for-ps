@@ -81,13 +81,36 @@ export function getState(): AppState {
   return state;
 }
 
+/**
+ * 有些键每次都会拿到一个新对象，但内容其实没变（典型是每 5 秒轮询一次的 health、gpu）。
+ * 只按引用比较的话，它们每次都算"变了"，订阅方就会整页重绘 ——
+ * 正在输入的提示词、正在拖的立方体、滚动位置全被冲掉，面板看起来就像卡住点不动。
+ * 所以这几个键改成按内容比较。
+ */
+const DEEP_COMPARE_KEYS = new Set(['health', 'gpu', 'doc']);
+
+function sameValue(key: string, a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (!DEEP_COMPARE_KEYS.has(key)) return false;
+  try {
+    return JSON.stringify(a) === JSON.stringify(b);
+  } catch {
+    return false;
+  }
+}
+
 /** 更新状态并通知订阅了这些键的监听器。 */
 export function setState(patch: Partial<AppState>): void {
   const changed: string[] = [];
   for (const [k, v] of Object.entries(patch)) {
-    if ((state as unknown as Record<string, unknown>)[k] !== v) changed.push(k);
+    if (!sameValue(k, (state as unknown as Record<string, unknown>)[k], v)) changed.push(k);
   }
-  state = { ...state, ...patch };
+  if (changed.length === 0) return;
+  // 只把真正变了的键写进去：内容没变的键保持原引用，
+  // 下游用 === 比较时才不会被"新对象"骗到
+  const applied: Record<string, unknown> = {};
+  for (const k of changed) applied[k] = (patch as Record<string, unknown>)[k];
+  state = { ...state, ...(applied as Partial<AppState>) };
   const notified = new Set<Listener>();
   for (const key of changed) {
     for (const fn of listeners.get(key) ?? []) notified.add(fn);

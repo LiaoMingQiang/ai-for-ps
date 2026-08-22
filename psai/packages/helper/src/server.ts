@@ -124,7 +124,10 @@ export async function buildServer(d: ServerDeps): Promise<FastifyInstance> {
         void reply.header('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
         void reply.header('Access-Control-Max-Age', '600');
       } else {
-        d.log.warn('拒绝跨域来源（网页来源不给 CORS，避免被网页私自配对）', { origin, path: req.raw.url });
+        // 用 throttled：被拒的客户端往往卡在重试循环里，每次都写一行会把日志刷爆
+        d.log.throttled('warn', `cors:${origin}`, '拒绝跨域来源（网页来源不给 CORS，避免被网页私自配对）', {
+          origin
+        });
       }
     }
 

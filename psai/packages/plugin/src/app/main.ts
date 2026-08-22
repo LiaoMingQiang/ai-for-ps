@@ -25,8 +25,32 @@ import { renderSettingsPage } from '../ui/page-settings.js';
 import { renderComfyWebPage } from '../ui/page-comfyweb.js';
 
 let booted = false;
-let healthTimer: ReturnType<typeof setInterval> | null = null;
+let healthTimer: ReturnType<typeof setTimeout> | null = null;
 const mounts = new Set<{ root: HTMLElement; kind: 'main' | 'comfyWeb'; dispose: () => void }>();
+
+/* ---------------- 健康轮询节奏 ---------------- */
+
+const HEALTH_OK_MS = 5000;
+const HEALTH_FAIL_MIN_MS = 2000;
+const HEALTH_FAIL_MAX_MS = 30_000;
+let healthBackoff = HEALTH_FAIL_MIN_MS;
+
+/**
+ * 连不上时退避，别死命重试。
+ *
+ * 起因：一个卡在重试循环里的客户端几分钟就把 Helper 的日志刷到 2.9MB，
+ * 还把 Helper 拖慢到面板点不动。连不上时越急越糟 —— 对端要么没起来，
+ * 要么被策略挡着，高频重试改变不了任何一种，只会消耗两边。
+ */
+function scheduleHealth(): void {
+  if (healthTimer) clearTimeout(healthTimer);
+  if (!booted) return;
+  const online = getState().health.online;
+  const delay = online ? HEALTH_OK_MS : healthBackoff;
+  healthTimer = setTimeout(() => {
+    void refreshHealth().finally(scheduleHealth);
+  }, delay);
+}
 
 /* ---------------- 生命周期 ---------------- */
 
@@ -61,7 +85,7 @@ export async function bootPlugin(): Promise<void> {
   }
 
   await refreshHealth();
-  healthTimer = setInterval(() => void refreshHealth(), 5000);
+  scheduleHealth();
 
   onHelperEvent(handleHelperEvent);
   setState({ booted: true });
@@ -69,7 +93,7 @@ export async function bootPlugin(): Promise<void> {
 
 export function teardownPlugin(): void {
   booted = false;
-  if (healthTimer) clearInterval(healthTimer);
+  if (healthTimer) clearTimeout(healthTimer);
   healthTimer = null;
   disconnectEvents();
   for (const m of mounts) m.dispose();
@@ -101,6 +125,7 @@ async function refreshHealth(): Promise<void> {
     if (!getState().health.online) {
       const probe = await resolveBase();
       if (!probe.ok) {
+        healthBackoff = Math.min(healthBackoff * 2, HEALTH_FAIL_MAX_MS);
         setState({
           health: {
             online: false,
@@ -118,6 +143,7 @@ async function refreshHealth(): Promise<void> {
     const hp = await health();
     const wasOffline = !getState().health.online;
 
+    healthBackoff = HEALTH_FAIL_MIN_MS; // 连上了，退避重新计数
     setState({
       health: {
         online: true,
@@ -139,6 +165,7 @@ async function refreshHealth(): Promise<void> {
     // "请先启动 AI for PS Helper"，结果 Helper 明明在跑、真正的原因是
     // 网络白名单或 CORS 时，界面反而在误导人往错的方向查。
     const reason = e instanceof ApiError ? e.display : String(e);
+    healthBackoff = Math.min(healthBackoff * 2, HEALTH_FAIL_MAX_MS);
     setState({
       health: { online: false, version: null, paired: false, activeJobs: 0, comfyui: null, reason }
     });
@@ -322,7 +349,17 @@ export async function mountMainPanel(root: HTMLElement): Promise<void> {
   };
 
   const unsubChrome = subscribe(['health', 'gpu', 'doc', 'page', 'jobs'], paintChrome);
-  const unsubPage = subscribe(['page', 'featureId', 'features', 'health'], () => void paintPage());
+  // 页面只在"上线/离线翻转"时重绘。
+  // 之前把 health 整个订阅进来，心跳里 activeJobs 一变就整页重建，
+  // 正在输入的提示词和正在拖的立方体会被冲掉。
+  let lastOnline: boolean | null = null;
+  const unsubPage = subscribe(['page', 'featureId', 'features'], () => void paintPage());
+  const unsubOnline = subscribe(['health'], () => {
+    const online = getState().health.online;
+    if (online === lastOnline) return;
+    lastOnline = online;
+    void paintPage();
+  });
   const unsubJobs = subscribe(['jobs', 'activeJobId'], () => {
     // 生成页正在跟踪的任务变了才重绘，避免历史页刷新时整页闪
     if (getState().page === 'generate') void paintPage();
@@ -335,6 +372,7 @@ export async function mountMainPanel(root: HTMLElement): Promise<void> {
     dispose: () => {
       unsubChrome();
       unsubPage();
+      unsubOnline();
       unsubJobs();
       unsubToast();
     }
@@ -440,7 +478,19 @@ function offlineNotice(): HTMLElement {
     h(
       'div',
       { class: 'row gap' },
-      h('button', { class: 'btn-primary', type: 'button', onclick: () => void refreshHealth() }, '重新检测'),
+      h(
+        'button',
+        {
+          class: 'btn-primary',
+          type: 'button',
+          onclick: () => {
+            // 用户主动点了就立刻重试一次，不受退避约束
+            healthBackoff = HEALTH_FAIL_MIN_MS;
+            void refreshHealth().finally(scheduleHealth);
+          }
+        },
+        '重新检测'
+      ),
       copyBtn
     ),
     h('div', { class: 'muted small' }, `插件版本 ${PSAI_VERSION} · fetch ${typeof fetch === 'function' ? '可用' : '不可用'}`)
