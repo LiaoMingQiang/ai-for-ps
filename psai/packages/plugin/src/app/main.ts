@@ -5,7 +5,17 @@
 import { PSAI_VERSION } from '@psai/shared';
 import type { HelperEvent } from '@psai/shared';
 import { h, clear } from './dom.js';
-import { api, health, ensurePaired, connectEvents, disconnectEvents, onHelperEvent, ApiError } from './api.js';
+import {
+  api,
+  health,
+  ensurePaired,
+  connectEvents,
+  disconnectEvents,
+  onHelperEvent,
+  ApiError,
+  resolveBase,
+  probeResults
+} from './api.js';
 import { getState, setState, subscribe, upsertJob, toast, dismissToast, resetStore } from './store.js';
 import * as bridge from '../ps/bridge.js';
 import { renderTopNav } from '../ui/nav.js';
@@ -87,6 +97,24 @@ function handleHelperEvent(ev: HelperEvent): void {
 /** 连 Helper、配对、拉基础数据。失败时把原因如实写进状态条。 */
 async function refreshHealth(): Promise<void> {
   try {
+    // 离线时先重新探一遍候选地址；已经连上就不用每次都探
+    if (!getState().health.online) {
+      const probe = await resolveBase();
+      if (!probe.ok) {
+        setState({
+          health: {
+            online: false,
+            version: null,
+            paired: false,
+            activeJobs: 0,
+            comfyui: null,
+            reason: probe.probes.map((p) => `${p.url} → ${p.detail}`).join('；')
+          }
+        });
+        return;
+      }
+    }
+
     const hp = await health();
     const wasOffline = !getState().health.online;
 
@@ -107,12 +135,10 @@ async function refreshHealth(): Promise<void> {
       await loadBaseData();
     }
   } catch (e) {
-    const reason =
-      e instanceof ApiError
-        ? e.shape.code === 'HELPER_OFFLINE'
-          ? '本地 Helper 未运行 —— 请先启动 AI for PS Helper'
-          : e.display
-        : String(e);
+    // 一定要带上原始报错。之前这里把 HELPER_OFFLINE 换成了一句
+    // "请先启动 AI for PS Helper"，结果 Helper 明明在跑、真正的原因是
+    // 网络白名单或 CORS 时，界面反而在误导人往错的方向查。
+    const reason = e instanceof ApiError ? e.display : String(e);
     setState({
       health: { online: false, version: null, paired: false, activeJobs: 0, comfyui: null, reason }
     });
@@ -356,6 +382,50 @@ export async function openSettings(): Promise<void> {
 
 function offlineNotice(): HTMLElement {
   const s = getState();
+
+  // 每个候选地址的原始报错都摆出来。排查这类问题全靠这几行原文：
+  // "Helper 没起" / "UXP 网络白名单没放行" / "CORS 被拦" 在界面上长得一样，
+  // 但只有原始报错能区分它们。
+  const probes = probeResults();
+  const diag = h('div', { class: 'offline-diag' });
+  if (probes.length) {
+    diag.appendChild(h('div', { class: 'offline-diag-title' }, '连接诊断'));
+    for (const p of probes) {
+      diag.appendChild(
+        h(
+          'div',
+          { class: `offline-diag-row ${p.ok ? 'ok' : 'err'}` },
+          h('code', {}, p.url),
+          h('span', {}, p.ok ? '通' : p.detail)
+        )
+      );
+    }
+  }
+
+  const copyBtn = h(
+    'button',
+    {
+      class: 'btn-ghost',
+      type: 'button',
+      onclick: () => {
+        const text = [
+          `插件版本 ${PSAI_VERSION}`,
+          `Photoshop 环境 ${bridge.isAvailable() ? '可用' : bridge.reason()}`,
+          `fetch ${typeof fetch === 'function' ? '可用' : '不可用'}`,
+          ...probes.map((p) => `${p.url} → ${p.ok ? 'OK' : p.detail}`)
+        ].join('\n');
+        try {
+          const clip = (navigator as unknown as { clipboard?: { writeText(t: string): Promise<void> } }).clipboard;
+          void clip?.writeText(text);
+          toast('诊断信息已复制');
+        } catch {
+          toast('复制失败', text, 'warn');
+        }
+      }
+    },
+    '复制诊断信息'
+  );
+
   return h(
     'div',
     { class: 'offline' },
@@ -366,11 +436,13 @@ function offlineNotice(): HTMLElement {
       { class: 'muted' },
       '这个插件不直连任何 AI 服务，所有任务都由本机的 AI for PS Helper 调度。请确认它已经在运行。'
     ),
+    diag,
     h(
-      'button',
-      { class: 'btn-primary', type: 'button', onclick: () => void refreshHealth() },
-      '重新检测'
+      'div',
+      { class: 'row gap' },
+      h('button', { class: 'btn-primary', type: 'button', onclick: () => void refreshHealth() }, '重新检测'),
+      copyBtn
     ),
-    h('div', { class: 'muted small' }, `插件版本 ${PSAI_VERSION}`)
+    h('div', { class: 'muted small' }, `插件版本 ${PSAI_VERSION} · fetch ${typeof fetch === 'function' ? '可用' : '不可用'}`)
   );
 }

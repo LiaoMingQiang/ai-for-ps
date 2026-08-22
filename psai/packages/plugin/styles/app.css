@@ -1702,3 +1702,38 @@ summary:focus-visible {
     transition: none !important;
   }
 }
+
+/* 连接诊断：离线时把每个候选地址的原始报错摆出来 */
+.offline-diag {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-2);
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  text-align: left;
+}
+.offline-diag-title {
+  font-size: 11px;
+  color: var(--text-3);
+}
+.offline-diag-row {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  font-size: 11px;
+  word-break: break-all;
+}
+.offline-diag-row code {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--text-2);
+}
+.offline-diag-row.ok span {
+  color: var(--ok);
+}
+.offline-diag-row.err span {
+  color: var(--err);
+}

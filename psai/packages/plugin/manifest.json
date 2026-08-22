@@ -158,7 +158,11 @@
         "http://127.0.0.1:34117",
         "ws://127.0.0.1:34117",
         "http://localhost:34117",
-        "ws://localhost:34117"
+        "ws://localhost:34117",
+        "http://127.0.0.1:*",
+        "ws://127.0.0.1:*",
+        "http://localhost:*",
+        "ws://localhost:*"
       ]
     },
     "webview": {

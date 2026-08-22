@@ -24,7 +24,62 @@ import type {
   PsaiErrorShape
 } from '@psai/shared';
 
-const BASE = `http://127.0.0.1:${HELPER_DEFAULT_PORT}`;
+/**
+ * Helper 地址候选。
+ *
+ * 不写死一个：UXP 的网络白名单、宿主的 DNS 解析、IPv4/IPv6 偏好在不同机器上都可能不同，
+ * `127.0.0.1` 通不了而 `localhost` 通得了（或反过来）是真实会发生的。
+ * 启动时逐个探，谁通用谁，结果缓存下来。
+ */
+const BASE_CANDIDATES = [
+  `http://127.0.0.1:${HELPER_DEFAULT_PORT}`,
+  `http://localhost:${HELPER_DEFAULT_PORT}`
+];
+
+let BASE = BASE_CANDIDATES[0]!;
+
+/** 每个候选地址最近一次的探测结果，离线页面直接把它显示出来。 */
+export interface ProbeResult {
+  url: string;
+  ok: boolean;
+  detail: string;
+}
+
+let lastProbes: ProbeResult[] = [];
+
+export function probeResults(): ProbeResult[] {
+  return lastProbes;
+}
+
+export function currentBase(): string {
+  return BASE;
+}
+
+/**
+ * 逐个探候选地址，选中第一个能返回 /v1/health 的。
+ * 全部失败时把每个的具体报错留在 lastProbes 里 —— 排查全靠这些原文，不能吞。
+ */
+export async function resolveBase(): Promise<{ ok: boolean; probes: ProbeResult[] }> {
+  const probes: ProbeResult[] = [];
+  for (const url of BASE_CANDIDATES) {
+    try {
+      const res = await fetch(`${url}/v1/health`);
+      const text = await res.text();
+      if (res.ok && text.includes('"online"')) {
+        BASE = url;
+        probes.push({ url, ok: true, detail: `HTTP ${res.status}` });
+        lastProbes = probes;
+        return { ok: true, probes };
+      }
+      probes.push({ url, ok: false, detail: `HTTP ${res.status} ${text.slice(0, 120)}` });
+    } catch (e) {
+      probes.push({ url, ok: false, detail: e instanceof Error ? `${e.name}: ${e.message}` : String(e) });
+    }
+  }
+  lastProbes = probes;
+  return { ok: false, probes };
+}
+
 const TOKEN_KEY = 'psai.helperToken';
 
 /* ---------------- 类型 ---------------- */
@@ -150,11 +205,14 @@ async function request<T>(method: string, path: string, body?: unknown, opts: { 
   try {
     res = await fetch(BASE + path, { method, headers, body: payload });
   } catch (e) {
+    // 把原始报错原样带上。fetch 失败的原因可能是 Helper 没起、UXP 网络白名单没放行、
+    // 也可能是 CORS —— 这三种的处理方式完全不同，吞掉细节等于把排查线索一起吞了。
+    const raw = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
     throw new ApiError(
       {
         code: 'HELPER_OFFLINE',
-        message: '本地 Helper 未运行',
-        details: e instanceof Error ? e.message : String(e),
+        message: `连不上本地 Helper（${BASE}）`,
+        details: raw,
         retryable: true
       },
       0
@@ -417,3 +475,4 @@ export function disconnectEvents(): void {
 
 export const CLIENT_VERSION = PSAI_VERSION;
 export const HELPER_BASE = BASE;
+export { BASE_CANDIDATES };

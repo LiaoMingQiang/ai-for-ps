@@ -93,21 +93,46 @@ export async function buildServer(d: ServerDeps): Promise<FastifyInstance> {
 
   const PUBLIC = new Set(['/v1/health', '/v1/pair/request', '/v1/pair/confirm']);
 
-  // 开发预览：只放行本机来源，且必须显式开启。正式运行不走这条路。
+  /**
+   * CORS。
+   *
+   * UXP 的 fetch 会按 CORS 规则走，而插件的来源不是普通网页来源
+   * （常见是 `null` 或某个非 http 方案）。这类来源必须放行，否则面板连不上 Helper。
+   *
+   * 但**绝不能**顺手放行 http(s) 网页来源：/v1/pair/request 和 /v1/pair/confirm
+   * 是公开端点，任何网页只要能跨域调它们就能给自己配一个 token，
+   * 从而拿到用户的显卡和已保存的 API Key。所以网页来源默认一律不给 CORS 头，
+   * 只有显式开了开发预览（devCors）才放行本机网页来源。
+   */
+  const isWebOrigin = (origin: string): boolean => /^https?:\/\//i.test(origin);
+  const isLocalWebOrigin = (origin: string): boolean =>
+    /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/i.test(origin);
+
   if (d.cfg.devCors) {
-    d.log.warn('开发 CORS 已开启：仅放行 127.0.0.1 / localhost 来源，请勿在正式环境使用');
-    app.addHook('onRequest', async (req, reply) => {
-      const origin = req.headers.origin;
-      if (typeof origin === 'string' && /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(origin)) {
+    d.log.warn('开发 CORS 已开启：额外放行 127.0.0.1 / localhost 网页来源，请勿在正式环境使用');
+  }
+
+  app.addHook('onRequest', async (req, reply) => {
+    const origin = req.headers.origin;
+
+    if (typeof origin === 'string' && origin.length > 0) {
+      const allowed = !isWebOrigin(origin) || (d.cfg.devCors && isLocalWebOrigin(origin));
+      if (allowed) {
         void reply.header('Access-Control-Allow-Origin', origin);
+        void reply.header('Vary', 'Origin');
         void reply.header('Access-Control-Allow-Headers', 'Authorization, Content-Type');
         void reply.header('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+        void reply.header('Access-Control-Max-Age', '600');
+      } else {
+        d.log.warn('拒绝跨域来源（网页来源不给 CORS，避免被网页私自配对）', { origin, path: req.raw.url });
       }
-      if (req.method === 'OPTIONS') {
-        void reply.status(204).send();
-      }
-    });
-  }
+    }
+
+    // 预检直接结束，别往下走鉴权 —— 预检请求不带 Authorization 头
+    if (req.method === 'OPTIONS') {
+      void reply.status(204).send();
+    }
+  });
 
   app.addHook('onRequest', async (req: FastifyRequest, reply: FastifyReply) => {
     const path = (req.raw.url ?? '').split('?')[0] ?? '';
