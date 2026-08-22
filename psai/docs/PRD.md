@@ -104,6 +104,8 @@
 | 「采样器」只给了 `euler` / `res_2m` 两个 | 采样器改为下拉，出厂推荐 9 项，并在连接 ComfyUI 后由 `/object_info` 实时覆盖为真实列表 | `res_2m` 在 ComfyUI 中的对应实现是 `res_multistep`；硬编码两项会让高级用户无法使用其余采样器 |
 | 图谱未给出负向提示词 | 每个 ComfyUI 分支功能补充负向提示词（折叠在高级参数里） | 无负向提示词时 SD/SDXL 类模型质量明显下降 |
 | 图谱未给出写回方式 | 补充写回选择器（智能对象/像素层/选区原位/仅存资产） | 这是插件相对网页版的核心价值，不能缺 |
+| 「真实感 / 光影 / 强度」被画成一排共享参数，看上去每个功能都该有这三个滑杆 | 按功能只保留能真正接到节点输入的那几个；每个滑杆在 §4.2 的表里都标出「落点」 | 摆一个调了不起作用的旋钮比不摆更糟 —— 用户以为自己调了，实际什么也没发生。测试「面板上没有转不动的旋钮」强制这条规则 |
+| 图谱未说明放大用什么模型 | 出厂用 `ImageScaleBy` 重采样；装了 ESRGAN 类模型后可换 `ImageUpscaleWithModel` | 开发机上没有安装任何放大模型，硬写依赖会让功能开箱即坏。无损放大用纯重采样反而真正做到了"同输入必得同输出" |
 
 ---
 
@@ -204,175 +206,313 @@ L1 ── ComfyUI Web            内嵌 ComfyUI 图形编辑器
       → WS 监听进度 → /history 取结果 → 下载入资产库 → 写回 Photoshop
 ```
 
+<!-- BEGIN:GENERATED-FEATURES -->
+
+> 以下 11 节由 `node tools/sync-prd-features.mjs` 从 `packages/shared/src/catalog.ts` 与 `psai/workflows/` 生成，
+> 保证参数表与代码、与实际工作流绑定三者永不漂移。不要手工编辑这一段。
+
+**关于「转不动的旋钮」**：参考图谱把「真实感 / 光影 / 强度」画成一排共享参数，
+但同一个滑杆在不同功能里未必都有对应的节点输入。摆一个调了不起作用的控件比不摆更糟，
+因此每个功能只保留能真正接上的那几个，每张表的「落点」列写明它接到了工作流的哪个节点输入。
+完整映射见 [WORKFLOWS.md](WORKFLOWS.md)。
+
 #### 4.2.1 洗图 / 人像 `comfy.wash.portrait`
 
 - **入口**：生成 → comfyui → 洗图 → 人像
-- **说明**：在保持人物身份与构图的前提下，重绘皮肤、发丝与衣物质感。
-- **输入**：必需 1 张。来源：当前图层 / 当前选区 / 合并可见 / 粘贴 / 上传。默认取当前图层。
+- **说明**：人像洗图：在保持人物身份与构图的前提下，重绘皮肤、发丝与衣物质感。
+- **输入**：图像输入（必需，默认取layer）
 - **内置工作流**：`wf.wash.portrait`
-- **依赖节点**：`CheckpointLoaderSimple`、`KSampler`、`VAEEncode`、`VAEDecode`、`LoadImage`、`SaveImage`
+- **依赖节点**：`CLIPTextEncode`、`CheckpointLoaderSimple`、`ImageScale`、`KSampler`、`LoadImage`、`SaveImage`、`VAEDecode`、`VAEEncode`
 
-| 参数 | 控件 | 范围 | 默认 | 说明 |
+| 参数 | 控件 | 取值 | 默认 | 落点 |
 |---|---|---|---|---|
-| 提示词 `prompt` | 多行文本 + ✨优化 | — | 空 | 补充希望强化的方向，可留空 |
-| 负向提示词 `negativePrompt` | 多行文本（高级） | — | `lowres, blurry, watermark, text, deformed` | |
-| 随机种子 `seed` | 自动随机 / 随机 / 固定 | 0–4294967295 | 自动随机 | 固定时两次提交结果一致 |
-| 真实感 `realism` | 滑杆 | 0–1，步 0.01 | 0.60 | 提高皮肤/材质真实细节权重 |
-| 光影 `lighting` | 滑杆 | 0–1 | 0.35 | 0 保留原图光照，1 完全重打光 |
-| 强度 `strength` | 滑杆 | 0–1 | 0.55 | |
-| 重绘幅度 `denoise` | 滑杆 | 0–1 | 0.28 | 0.2~0.35 保结构 |
-| 采样器 `sampler` | 下拉（高级） | 实时来自 `/object_info` | `euler` | |
-| 调度器 `scheduler` | 下拉（高级） | 实时 | `normal` | |
-| 步数 `steps` | 滑杆（高级） | 1–100 | 20 | |
-| CFG `cfg` | 滑杆（高级） | 1–20 | 7.0 | |
-| 分辨率 `resolution` | 滑杆 | 512–2048，步 64 | 1024 | 长边基准 |
+| 图像输入 `image` | 图像输入 | layer / selection / mergedVisible / paste / upload | layer | `2.image` |
+| 提示词 `prompt` | 多行文本 + ✨优化 | — | 空 | `4.text` |
+| 负向提示词 `negativePrompt` | 多行文本（高级） | — | `lowres, blurry, watermark, text, deformed` | `5.text` |
+| 随机种子 `seed` | 三态 + 数值 | 0–4294967295 | 自动随机 | `3.seed` |
+| 真实感 `realism` | 滑杆 | 0–1，步 0.01 | 0.6 | `3.cfg` · 映射到 4.5–9 |
+| 重绘幅度 `denoise` | 滑杆 | 0–1，步 0.01 | 0.28 | `3.denoise` |
+| 采样器 `sampler` | 下拉（高级） | `euler` / `euler_ancestral` / `dpmpp_2m` / `dpmpp_2m_sde` / `dpmpp_3m_sde` / `res_multistep` / `ddim` / `uni_pc` / `lcm` | `dpmpp_2m` | `3.sampler_name` |
+| 调度器 `scheduler` | 下拉（高级） | `simple` / `normal` / `karras` / `sgm_uniform` / `exponential` / `beta` / `ddim_uniform` | `karras` | `3.scheduler` |
+| 步数 `steps` | 滑杆（高级） | 1–100，步 1 | 24 | `3.steps` |
+| 分辨率 `resolution` | 滑杆 | 512–2048，步 64 | 1024 | `7.width` · 推导宽<br>`7.height` · 推导高 |
 
-- **写回**：智能对象（默认）/ 像素图层 / 选区原位 / 仅存资产
+- **写回**：新建智能对象图层 / 新建像素图层 / 选区原位替换 / 仅存资产库（不写回）（默认新建智能对象图层）
 - **验收标准**：
-  1. 输入当前图层 → 出图分辨率与输入一致（或按分辨率参数缩放）
-  2. 重绘幅度 0.2 时人物五官与轮廓保持可辨识
+  1. 输入当前图层 → 出图按输入比例缩放到分辨率参数，不被压成正方形
+  2. 重绘幅度 0.28 时人物五官与轮廓保持可辨识
   3. 随机种子固定时两次提交结果一致
 
 #### 4.2.2 洗图 / 场景 `comfy.wash.scene`
 
 - **入口**：生成 → comfyui → 洗图 → 场景
-- **说明**：重绘环境、背景与氛围，保留主体位置与透视。
-- **输入**：必需 1 张，来源同上。
+- **说明**：场景洗图：重绘环境、背景与氛围，保留主体位置与透视。
+- **输入**：图像输入（必需，默认取layer）
 - **内置工作流**：`wf.wash.scene`
-- **参数**：与「人像」相同，仅默认值不同 —— 真实感 0.50 / 光影 0.50 / 强度 0.60 / 重绘幅度 0.35。
-- **验收标准**：① 主体位置与透视不变 ② 提示词为空时工作流仍能出图 ③ 强度滑杆对结果有可见影响
+- **依赖节点**：`CLIPTextEncode`、`CheckpointLoaderSimple`、`ImageScale`、`KSampler`、`LoadImage`、`SaveImage`、`VAEDecode`、`VAEEncode`
+
+| 参数 | 控件 | 取值 | 默认 | 落点 |
+|---|---|---|---|---|
+| 图像输入 `image` | 图像输入 | layer / selection / mergedVisible / paste / upload | layer | `2.image` |
+| 提示词 `prompt` | 多行文本 + ✨优化 | — | 空 | `4.text` |
+| 负向提示词 `negativePrompt` | 多行文本（高级） | — | `lowres, blurry, watermark, text, deformed` | `5.text` |
+| 随机种子 `seed` | 三态 + 数值 | 0–4294967295 | 自动随机 | `3.seed` |
+| 真实感 `realism` | 滑杆 | 0–1，步 0.01 | 0.5 | `3.cfg` · 映射到 4.5–9 |
+| 重绘幅度 `denoise` | 滑杆 | 0–1，步 0.01 | 0.4 | `3.denoise` |
+| 采样器 `sampler` | 下拉（高级） | `euler` / `euler_ancestral` / `dpmpp_2m` / `dpmpp_2m_sde` / `dpmpp_3m_sde` / `res_multistep` / `ddim` / `uni_pc` / `lcm` | `dpmpp_2m` | `3.sampler_name` |
+| 调度器 `scheduler` | 下拉（高级） | `simple` / `normal` / `karras` / `sgm_uniform` / `exponential` / `beta` / `ddim_uniform` | `karras` | `3.scheduler` |
+| 步数 `steps` | 滑杆（高级） | 1–100，步 1 | 24 | `3.steps` |
+| 分辨率 `resolution` | 滑杆 | 512–2048，步 64 | 1024 | `7.width` · 推导宽<br>`7.height` · 推导高 |
+
+- **写回**：新建智能对象图层 / 新建像素图层 / 选区原位替换 / 仅存资产库（不写回）（默认新建智能对象图层）
+- **验收标准**：
+  1. 主体位置与透视不变
+  2. 提示词为空时工作流仍能出图
+  3. 重绘幅度滑杆对结果有可见影响
 
 #### 4.2.3 光影溶图 / 固定视角 `comfy.relight.fixed`
 
 - **入口**：生成 → comfyui → 光影溶图 → 固定视角
-- **说明**：把主体按背景的光照重新打光并融合，机位保持不变。
-- **输入**：**两张**
-  - `image` 主体图（必需，建议已抠图或带透明通道）
-  - `background` 背景 / 参考光图（必需，默认来源 = 上传）
-- **内置工作流**：`wf.relight.fixed`（基于 IC-Light）
-- **依赖节点**：`LoadImage`、`KSampler`、`VAEDecode`、`SaveImage`
+- **说明**：光影溶图（固定视角）：把主体按背景的光照重新打光并融合，机位保持不变。
+- **输入**：主体图（必需，默认取layer）；背景 / 参考光图（必需，默认取upload）
+- **内置工作流**：`wf.relight.fixed`
+- **依赖节点**：`CLIPTextEncode`、`CheckpointLoaderSimple`、`ICLightConditioning`、`ImageScale`、`KSampler`、`LoadAndApplyICLightUnet`、`LoadImage`、`SaveImage`、`VAEDecode`、`VAEEncode`
 
-| 参数 | 控件 | 默认 | 说明 |
-|---|---|---|---|
-| 提示词 | 多行 + ✨ | 空 | 补充光照描述，例 `warm rim light from left` |
-| 负向提示词 | 多行（高级） | 见通用 | |
-| 随机种子 | 三态 | 自动随机 | |
-| 光影 `lighting` | 滑杆 0–1 | 0.70 | 重打光强度 |
-| 融合强度 `strength` | 滑杆 0–1 | 0.60 | |
-| 重绘幅度 | 滑杆 0–1 | 0.35 | |
-| 采样器/调度器/步数/CFG | 高级 | euler / normal / 20 / 7.0 | |
-| 分辨率 | 滑杆 | 1024 | |
+| 参数 | 控件 | 取值 | 默认 | 落点 |
+|---|---|---|---|---|
+| 主体图 `image` | 图像输入 | layer / selection / mergedVisible / paste / upload | layer | `2.image` |
+| 背景 / 参考光图 `background` | 图像输入 | layer / selection / mergedVisible / paste / upload | upload | `11.image` |
+| 提示词 `prompt` | 多行文本 + ✨优化 | — | 空 | `4.text` |
+| 负向提示词 `negativePrompt` | 多行文本（高级） | — | `lowres, blurry, watermark, text, deformed` | `5.text` |
+| 随机种子 `seed` | 三态 + 数值 | 0–4294967295 | 自动随机 | `3.seed` |
+| 光影 `lighting` | 滑杆 | 0–1，步 0.01 | 0.7 | `15.multiplier` · 映射到 0.1–1 |
+| 重绘幅度 `denoise` | 滑杆 | 0–1，步 0.01 | 0.9 | `3.denoise` |
+| 采样器 `sampler` | 下拉（高级） | `euler` / `euler_ancestral` / `dpmpp_2m` / `dpmpp_2m_sde` / `dpmpp_3m_sde` / `res_multistep` / `ddim` / `uni_pc` / `lcm` | `dpmpp_2m` | `3.sampler_name` |
+| 调度器 `scheduler` | 下拉（高级） | `simple` / `normal` / `karras` / `sgm_uniform` / `exponential` / `beta` / `ddim_uniform` | `karras` | `3.scheduler` |
+| 步数 `steps` | 滑杆（高级） | 1–100，步 1 | 24 | `3.steps` |
+| CFG `cfg` | 滑杆（高级） | 1–20，步 0.1 | 2.5 | `3.cfg` |
+| 分辨率 `resolution` | 滑杆 | 512–2048，步 64 | 768 | `7.width` · 推导宽<br>`7.height` · 推导高<br>`12.width` · 推导宽<br>`12.height` · 推导高 |
 
-- **写回**：智能对象 / 像素图层 / 选区原位 / 仅存资产
-- **验收标准**：① 主体轮廓与机位不变 ② 光照方向跟随背景图 ③ 光影滑杆 0 时接近原图光照
+- **写回**：新建智能对象图层 / 新建像素图层 / 选区原位替换 / 仅存资产库（不写回）（默认新建智能对象图层）
+- **验收标准**：
+  1. 主体轮廓与机位不变
+  2. 光照方向跟随背景图
+  3. 光影滑杆调低时更接近原图光照
 
 #### 4.2.4 光影溶图 / 自适应视角 `comfy.relight.adaptive`
 
 - **入口**：生成 → comfyui → 光影溶图 → 自适应视角
-- **说明**：允许小幅调整主体机位以贴合背景透视，再统一打光融合。
-- **输入**：主体图 + 背景图（同上）
+- **说明**：光影溶图（自适应视角）：允许小幅调整主体机位以贴合背景透视，再统一打光融合。
+- **输入**：主体图（必需，默认取layer）；背景 / 参考光图（必需，默认取upload）
 - **内置工作流**：`wf.relight.adaptive`
-- **额外参数**：**摄像机 3D 视窗调整 `camera`**（见 §5.4），默认 0°/0°，机位翻译出的英文片段自动拼进提示词。
-- **其余参数**：光影 0.70 / 融合强度 0.65 / 重绘幅度 0.45，其余同「固定视角」。
-- **验收标准**：① 立方体角度变化会改变输出机位 ② 稳定度为 C 时 UI 给出风险提示 ③ 融合后主体与背景无明显边缘
+- **依赖节点**：`CLIPTextEncode`、`CheckpointLoaderSimple`、`ICLightConditioning`、`ImageScale`、`KSampler`、`LoadAndApplyICLightUnet`、`LoadImage`、`SaveImage`、`VAEDecode`、`VAEEncode`
+
+| 参数 | 控件 | 取值 | 默认 | 落点 |
+|---|---|---|---|---|
+| 主体图 `image` | 图像输入 | layer / selection / mergedVisible / paste / upload | layer | `2.image` |
+| 背景 / 参考光图 `background` | 图像输入 | layer / selection / mergedVisible / paste / upload | upload | `11.image` |
+| 摄像机 3D 视窗调整 `camera` | 3D 立方体 | 水平 −180°–180° · 垂直 −90°–90° | 0° / 0° | `4.text` · 追加到提示词 |
+| 提示词 `prompt` | 多行文本 + ✨优化 | — | 空 | `4.text` |
+| 负向提示词 `negativePrompt` | 多行文本（高级） | — | `lowres, blurry, watermark, text, deformed` | `5.text` |
+| 随机种子 `seed` | 三态 + 数值 | 0–4294967295 | 自动随机 | `3.seed` |
+| 光影 `lighting` | 滑杆 | 0–1，步 0.01 | 0.7 | `15.multiplier` · 映射到 0.1–1 |
+| 重绘幅度 `denoise` | 滑杆 | 0–1，步 0.01 | 0.95 | `3.denoise` |
+| 采样器 `sampler` | 下拉（高级） | `euler` / `euler_ancestral` / `dpmpp_2m` / `dpmpp_2m_sde` / `dpmpp_3m_sde` / `res_multistep` / `ddim` / `uni_pc` / `lcm` | `dpmpp_2m` | `3.sampler_name` |
+| 调度器 `scheduler` | 下拉（高级） | `simple` / `normal` / `karras` / `sgm_uniform` / `exponential` / `beta` / `ddim_uniform` | `karras` | `3.scheduler` |
+| 步数 `steps` | 滑杆（高级） | 1–100，步 1 | 24 | `3.steps` |
+| CFG `cfg` | 滑杆（高级） | 1–20，步 0.1 | 2.5 | `3.cfg` |
+| 分辨率 `resolution` | 滑杆 | 512–2048，步 64 | 768 | `7.width` · 推导宽<br>`7.height` · 推导高<br>`12.width` · 推导宽<br>`12.height` · 推导高 |
+
+- **写回**：新建智能对象图层 / 新建像素图层 / 选区原位替换 / 仅存资产库（不写回）（默认新建智能对象图层）
+- **验收标准**：
+  1. 立方体角度会改变注入的机位提示词
+  2. 稳定度为 C 时 UI 给出风险提示
+  3. 融合后主体与背景无明显边缘
 
 #### 4.2.5 图像编辑 / 质感加强 `comfy.edit.texture`
 
 - **入口**：生成 → comfyui → 图像编辑 → 质感加强
-- **说明**：增强表面微结构、材质纹理与细节层次，不改变形体。
-- **输入**：必需 1 张
+- **说明**：图像编辑（质感加强）：增强表面微结构、材质纹理与细节层次，不改变形体。
+- **输入**：图像输入（必需，默认取layer）
 - **内置工作流**：`wf.edit.texture`
+- **依赖节点**：`CLIPTextEncode`、`CheckpointLoaderSimple`、`ImageScale`、`KSampler`、`LoadImage`、`SaveImage`、`VAEDecode`、`VAEEncode`
 
-| 参数 | 控件 | 默认 |
-|---|---|---|
-| 提示词 | 多行 + ✨，占位「指定要强化的材质，例如 brushed aluminium, matte leather...」 | 空 |
-| 负向提示词 | 高级 | 见通用 |
-| 随机种子 | 三态 | 自动随机 |
-| 质感强度 `texture` | 滑杆 0–1 | 0.55 |
-| 重绘幅度 | 滑杆 0–1 | 0.22 |
-| 采样器/调度器/步数/CFG/分辨率 | — | euler / normal / 20 / 7.0 / 1024 |
+| 参数 | 控件 | 取值 | 默认 | 落点 |
+|---|---|---|---|---|
+| 图像输入 `image` | 图像输入 | layer / selection / mergedVisible / paste / upload | layer | `2.image` |
+| 提示词 `prompt` | 多行文本 + ✨优化 | — | 空 | `4.text` |
+| 负向提示词 `negativePrompt` | 多行文本（高级） | — | `lowres, blurry, watermark, text, deformed` | `5.text` |
+| 随机种子 `seed` | 三态 + 数值 | 0–4294967295 | 自动随机 | `3.seed` |
+| 质感强度 `texture` | 滑杆 | 0–1，步 0.01 | 0.55 | `3.cfg` · 映射到 5–10 |
+| 重绘幅度 `denoise` | 滑杆 | 0–1，步 0.01 | 0.22 | `3.denoise` |
+| 采样器 `sampler` | 下拉（高级） | `euler` / `euler_ancestral` / `dpmpp_2m` / `dpmpp_2m_sde` / `dpmpp_3m_sde` / `res_multistep` / `ddim` / `uni_pc` / `lcm` | `dpmpp_2m` | `3.sampler_name` |
+| 调度器 `scheduler` | 下拉（高级） | `simple` / `normal` / `karras` / `sgm_uniform` / `exponential` / `beta` / `ddim_uniform` | `karras` | `3.scheduler` |
+| 步数 `steps` | 滑杆（高级） | 1–100，步 1 | 20 | `3.steps` |
+| 分辨率 `resolution` | 滑杆 | 512–2048，步 64 | 1024 | `7.width` · 推导宽<br>`7.height` · 推导高 |
 
-- **验收标准**：① 形体与轮廓不变 ② 质感强度滑杆对细节量有可见影响 ③ 不引入新的物体
+- **写回**：新建智能对象图层 / 新建像素图层 / 选区原位替换 / 仅存资产库（不写回）（默认新建智能对象图层）
+- **验收标准**：
+  1. 形体与轮廓不变
+  2. 质感强度滑杆对细节量有可见影响
+  3. 不引入新的物体
 
 #### 4.2.6 其他功能 / 放大 / 通用放大 `comfy.misc.upscale.general`
 
 - **入口**：生成 → comfyui → 其他功能 → 放大 → 通用放大
-- **说明**：放大同时用扩散模型补充细节。
-- **输入**：必需 1 张
+- **说明**：通用放大：先按倍数重采样，再用扩散模型补充细节，适合需要"越放越清晰"的场景。
+- **输入**：图像输入（必需，默认取layer）
 - **内置工作流**：`wf.upscale.general`
-- **依赖节点**：`LoadImage`、`UpscaleModelLoader`、`ImageUpscaleWithModel`、`KSampler`、`SaveImage`
+- **依赖节点**：`CLIPTextEncode`、`CheckpointLoaderSimple`、`ImageScaleBy`、`KSampler`、`LoadImage`、`SaveImage`、`VAEDecode`、`VAEEncode`
 
-| 参数 | 控件 | 默认 |
-|---|---|---|
-| 放大倍数 `upscaleFactor` | 分段：1.5× / 2× / 3× / 4× | 2× |
-| 提示词 | 多行 + ✨ | 空 |
-| 负向提示词 | 高级 | 见通用 |
-| 随机种子 | 三态 | 自动随机 |
-| 重绘幅度 | 滑杆 | 0.25 |
-| 采样器/调度器 | 高级 | euler / normal |
-| 步数 / CFG | 高级 | 15 / 6.0 |
+| 参数 | 控件 | 取值 | 默认 | 落点 |
+|---|---|---|---|---|
+| 图像输入 `image` | 图像输入 | layer / selection / mergedVisible / paste / upload | layer | `2.image` |
+| 放大倍数 `upscaleFactor` | 分段 | `1.5` / `2` / `3` / `4` | `2` | `20.scale_by` · 转数字 |
+| 提示词 `prompt` | 多行文本 + ✨优化 | — | 空 | `4.text` |
+| 负向提示词 `negativePrompt` | 多行文本（高级） | — | `lowres, blurry, watermark, text, deformed` | `5.text` |
+| 随机种子 `seed` | 三态 + 数值 | 0–4294967295 | 自动随机 | `3.seed` |
+| 重绘幅度 `denoise` | 滑杆 | 0–1，步 0.01 | 0.25 | `3.denoise` |
+| 采样器 `sampler` | 下拉（高级） | `euler` / `euler_ancestral` / `dpmpp_2m` / `dpmpp_2m_sde` / `dpmpp_3m_sde` / `res_multistep` / `ddim` / `uni_pc` / `lcm` | `dpmpp_2m` | `3.sampler_name` |
+| 调度器 `scheduler` | 下拉（高级） | `simple` / `normal` / `karras` / `sgm_uniform` / `exponential` / `beta` / `ddim_uniform` | `karras` | `3.scheduler` |
+| 步数 `steps` | 滑杆（高级） | 1–100，步 1 | 16 | `3.steps` |
+| CFG `cfg` | 滑杆（高级） | 1–20，步 0.1 | 6 | `3.cfg` |
 
-- **写回**：智能对象 / 像素图层 / 仅存资产（**不提供选区原位**，因为尺寸已变）
-- **验收标准**：① 输出尺寸 = 输入 × 放大倍数（±8px 对齐误差）② 细节量高于纯插值放大 ③ 重绘幅度 0 时不产生新内容
+- **写回**：新建智能对象图层 / 新建像素图层 / 仅存资产库（不写回）（默认新建智能对象图层）
+- **验收标准**：
+  1. 输出尺寸 = 输入 × 放大倍数（±8px 对齐误差）
+  2. 细节量高于纯插值放大
+  3. 重绘幅度调到最低时几乎不产生新内容
 
 #### 4.2.7 其他功能 / 放大 / 无损放大 `comfy.misc.upscale.lossless`
 
 - **入口**：生成 → comfyui → 其他功能 → 放大 → 无损放大
-- **说明**：纯放大模型推理，不做扩散重绘，绝不改变画面内容。
-- **输入**：必需 1 张
+- **说明**：无损放大：纯重采样，不经过扩散模型，绝不改变画面内容，同输入永远同输出。
+- **输入**：图像输入（必需，默认取layer）
 - **内置工作流**：`wf.upscale.lossless`
+- **依赖节点**：`ImageScaleBy`、`LoadImage`、`SaveImage`
 
-| 参数 | 控件 | 默认 |
-|---|---|---|
-| 放大倍数 | 分段 1.5×/2×/3×/4× | 2× |
-| 放大模型 `upscaleModel` | 下拉，实时来自 ComfyUI 已装的 upscale 模型 | （使用工作流默认） |
+| 参数 | 控件 | 取值 | 默认 | 落点 |
+|---|---|---|---|---|
+| 图像输入 `image` | 图像输入 | layer / selection / mergedVisible / paste / upload | layer | `2.image` |
+| 放大倍数 `upscaleFactor` | 分段 | `1.5` / `2` / `3` / `4` | `2` | `20.scale_by` · 转数字 |
+| 重采样方式 `upscaleMethod` | 下拉 | `lanczos` / `bicubic` / `bilinear` / `area` / `nearest-exact` | `lanczos` | `20.upscale_method` |
 
-- **写回**：智能对象 / 像素图层 / 仅存资产
-- **验收标准**：① 输出内容与输入逐物体一致（无新增/丢失元素）② 输出尺寸 = 输入 × 放大倍数 ③ 不含随机性：同输入两次结果一致
+- **写回**：新建智能对象图层 / 新建像素图层 / 仅存资产库（不写回）（默认新建智能对象图层）
+- **验收标准**：
+  1. 输出内容与输入逐物体一致（无新增/丢失元素）
+  2. 输出尺寸 = 输入 × 放大倍数
+  3. 不含随机性：同输入两次结果完全一致
 
-#### 4.2.8–4.2.10 其他功能 / 精修 / 产品·人物·场景
+#### 4.2.8 其他功能 / 精修 / 产品 `comfy.misc.retouch.product`
 
-三个功能结构完全相同，只有描述与内置工作流不同：
+- **入口**：生成 → comfyui → 其他功能 → 精修 → 产品
+- **说明**：精修（产品）：针对产品表面做局部提亮、瑕疵清理与细节收拾，保持原构图。
+- **输入**：图像输入（必需，默认取layer）
+- **内置工作流**：`wf.retouch.product`
+- **依赖节点**：`CLIPTextEncode`、`CheckpointLoaderSimple`、`ImageScale`、`KSampler`、`LoadImage`、`SaveImage`、`VAEDecode`、`VAEEncode`
 
-| 功能 ID | 标签 | 针对 | 内置工作流 |
-|---|---|---|---|
-| `comfy.misc.retouch.product` | 产品 | 产品表面 | `wf.retouch.product` |
-| `comfy.misc.retouch.person` | 人物 | 人物皮肤与五官 | `wf.retouch.person` |
-| `comfy.misc.retouch.scene` | 场景 | 场景环境与道具 | `wf.retouch.scene` |
+| 参数 | 控件 | 取值 | 默认 | 落点 |
+|---|---|---|---|---|
+| 图像输入 `image` | 图像输入 | layer / selection / mergedVisible / paste / upload | layer | `2.image` |
+| 提示词 `prompt` | 多行文本 + ✨优化 | — | 空 | `4.text` |
+| 负向提示词 `negativePrompt` | 多行文本（高级） | — | `lowres, blurry, watermark, text, deformed` | `5.text` |
+| 随机种子 `seed` | 三态 + 数值 | 0–4294967295 | 自动随机 | `3.seed` |
+| 精修强度 `strength` | 滑杆 | 0–1，步 0.01 | 0.5 | `3.denoise` · 映射到 0.05–0.5 |
+| 采样器 `sampler` | 下拉（高级） | `euler` / `euler_ancestral` / `dpmpp_2m` / `dpmpp_2m_sde` / `dpmpp_3m_sde` / `res_multistep` / `ddim` / `uni_pc` / `lcm` | `dpmpp_2m` | `3.sampler_name` |
+| 调度器 `scheduler` | 下拉（高级） | `simple` / `normal` / `karras` / `sgm_uniform` / `exponential` / `beta` / `ddim_uniform` | `karras` | `3.scheduler` |
+| 步数 `steps` | 滑杆（高级） | 1–100，步 1 | 22 | `3.steps` |
+| CFG `cfg` | 滑杆（高级） | 1–20，步 0.1 | 7 | `3.cfg` |
+| 分辨率 `resolution` | 滑杆 | 512–2048，步 64 | 1024 | `7.width` · 推导宽<br>`7.height` · 推导高 |
 
-- **说明**：局部提亮、瑕疵清理与细节收拾，保持原构图。
-- **输入**：必需 1 张
+- **写回**：新建智能对象图层 / 新建像素图层 / 选区原位替换 / 仅存资产库（不写回）（默认新建智能对象图层）
+- **验收标准**：
+  1. 构图与主体位置不变
+  2. 精修强度滑杆有可见影响
+  3. 不产生多余肢体/物体
 
-| 参数 | 控件 | 默认 |
-|---|---|---|
-| 提示词 | 多行 + ✨，占位「可指定要重点收拾的部分...」 | 空 |
-| 负向提示词 | 高级 | 见通用 |
-| 随机种子 | 三态 | 自动随机 |
-| 精修强度 `strength` | 滑杆 0–1 | 0.50 |
-| 重绘幅度 | 滑杆 0–1 | 0.20 |
-| 采样器/调度器/步数/CFG/分辨率 | — | euler / normal / 20 / 7.0 / 1024 |
+#### 4.2.9 其他功能 / 精修 / 人物 `comfy.misc.retouch.person`
 
-- **写回**：全部四种
-- **验收标准**：① 构图与主体位置不变 ② 精修强度滑杆有可见影响 ③ 不产生多余肢体/物体
+- **入口**：生成 → comfyui → 其他功能 → 精修 → 人物
+- **说明**：精修（人物）：针对人物皮肤与五官做局部提亮、瑕疵清理与细节收拾，保持原构图。
+- **输入**：图像输入（必需，默认取layer）
+- **内置工作流**：`wf.retouch.person`
+- **依赖节点**：`CLIPTextEncode`、`CheckpointLoaderSimple`、`ImageScale`、`KSampler`、`LoadImage`、`SaveImage`、`VAEDecode`、`VAEEncode`
+
+| 参数 | 控件 | 取值 | 默认 | 落点 |
+|---|---|---|---|---|
+| 图像输入 `image` | 图像输入 | layer / selection / mergedVisible / paste / upload | layer | `2.image` |
+| 提示词 `prompt` | 多行文本 + ✨优化 | — | 空 | `4.text` |
+| 负向提示词 `negativePrompt` | 多行文本（高级） | — | `lowres, blurry, watermark, text, deformed` | `5.text` |
+| 随机种子 `seed` | 三态 + 数值 | 0–4294967295 | 自动随机 | `3.seed` |
+| 精修强度 `strength` | 滑杆 | 0–1，步 0.01 | 0.5 | `3.denoise` · 映射到 0.05–0.5 |
+| 采样器 `sampler` | 下拉（高级） | `euler` / `euler_ancestral` / `dpmpp_2m` / `dpmpp_2m_sde` / `dpmpp_3m_sde` / `res_multistep` / `ddim` / `uni_pc` / `lcm` | `dpmpp_2m` | `3.sampler_name` |
+| 调度器 `scheduler` | 下拉（高级） | `simple` / `normal` / `karras` / `sgm_uniform` / `exponential` / `beta` / `ddim_uniform` | `karras` | `3.scheduler` |
+| 步数 `steps` | 滑杆（高级） | 1–100，步 1 | 22 | `3.steps` |
+| CFG `cfg` | 滑杆（高级） | 1–20，步 0.1 | 7 | `3.cfg` |
+| 分辨率 `resolution` | 滑杆 | 512–2048，步 64 | 1024 | `7.width` · 推导宽<br>`7.height` · 推导高 |
+
+- **写回**：新建智能对象图层 / 新建像素图层 / 选区原位替换 / 仅存资产库（不写回）（默认新建智能对象图层）
+- **验收标准**：
+  1. 构图与主体位置不变
+  2. 精修强度滑杆有可见影响
+  3. 不产生多余肢体/物体
+
+#### 4.2.10 其他功能 / 精修 / 场景 `comfy.misc.retouch.scene`
+
+- **入口**：生成 → comfyui → 其他功能 → 精修 → 场景
+- **说明**：精修（场景）：针对场景环境与道具做局部提亮、瑕疵清理与细节收拾，保持原构图。
+- **输入**：图像输入（必需，默认取layer）
+- **内置工作流**：`wf.retouch.scene`
+- **依赖节点**：`CLIPTextEncode`、`CheckpointLoaderSimple`、`ImageScale`、`KSampler`、`LoadImage`、`SaveImage`、`VAEDecode`、`VAEEncode`
+
+| 参数 | 控件 | 取值 | 默认 | 落点 |
+|---|---|---|---|---|
+| 图像输入 `image` | 图像输入 | layer / selection / mergedVisible / paste / upload | layer | `2.image` |
+| 提示词 `prompt` | 多行文本 + ✨优化 | — | 空 | `4.text` |
+| 负向提示词 `negativePrompt` | 多行文本（高级） | — | `lowres, blurry, watermark, text, deformed` | `5.text` |
+| 随机种子 `seed` | 三态 + 数值 | 0–4294967295 | 自动随机 | `3.seed` |
+| 精修强度 `strength` | 滑杆 | 0–1，步 0.01 | 0.5 | `3.denoise` · 映射到 0.05–0.5 |
+| 采样器 `sampler` | 下拉（高级） | `euler` / `euler_ancestral` / `dpmpp_2m` / `dpmpp_2m_sde` / `dpmpp_3m_sde` / `res_multistep` / `ddim` / `uni_pc` / `lcm` | `dpmpp_2m` | `3.sampler_name` |
+| 调度器 `scheduler` | 下拉（高级） | `simple` / `normal` / `karras` / `sgm_uniform` / `exponential` / `beta` / `ddim_uniform` | `karras` | `3.scheduler` |
+| 步数 `steps` | 滑杆（高级） | 1–100，步 1 | 22 | `3.steps` |
+| CFG `cfg` | 滑杆（高级） | 1–20，步 0.1 | 7 | `3.cfg` |
+| 分辨率 `resolution` | 滑杆 | 512–2048，步 64 | 1024 | `7.width` · 推导宽<br>`7.height` · 推导高 |
+
+- **写回**：新建智能对象图层 / 新建像素图层 / 选区原位替换 / 仅存资产库（不写回）（默认新建智能对象图层）
+- **验收标准**：
+  1. 构图与主体位置不变
+  2. 精修强度滑杆有可见影响
+  3. 不产生多余肢体/物体
 
 #### 4.2.11 其他功能 / 视角转换 / 360° 旋转 `comfy.misc.viewpoint.orbit`
 
 - **入口**：生成 → comfyui → 其他功能 → 视角转换 → 360° 旋转
-- **说明**：由单张图推出任意机位的同一主体，用于补齐多视角素材。
-- **输入**：必需 1 张
+- **说明**：视角转换（360° 旋转）：由单张图推出其他机位的同一主体，用于补齐多视角素材。
+- **输入**：图像输入（必需，默认取layer）
 - **内置工作流**：`wf.viewpoint.orbit`
+- **依赖节点**：`CLIPTextEncode`、`CheckpointLoaderSimple`、`ImageScale`、`KSampler`、`LoadImage`、`SaveImage`、`VAEDecode`、`VAEEncode`
 
-| 参数 | 控件 | 默认 |
-|---|---|---|
-| **摄像机 3D 视窗调整 `camera`** | 立方体拖拽（见 §5.4） | 水平 0° / 垂直 0° |
-| 提示词 | 多行 + ✨，占位「补充主体描述可提高一致性...」 | 空 |
-| 负向提示词 | 高级 | 见通用 |
-| 随机种子 | 三态 | 自动随机 |
-| 一致性强度 `strength` | 滑杆 0–1 | 0.70 |
-| 采样器/调度器/步数/CFG/分辨率 | — | euler / normal / 20 / 7.0 / 1024 |
+| 参数 | 控件 | 取值 | 默认 | 落点 |
+|---|---|---|---|---|
+| 图像输入 `image` | 图像输入 | layer / selection / mergedVisible / paste / upload | layer | `2.image` |
+| 摄像机 3D 视窗调整 `camera` | 3D 立方体 | 水平 −180°–180° · 垂直 −90°–90° | 0° / 0° | `4.text` · 追加到提示词 |
+| 提示词 `prompt` | 多行文本 + ✨优化 | — | 空 | `4.text` |
+| 负向提示词 `negativePrompt` | 多行文本（高级） | — | `lowres, blurry, watermark, text, deformed` | `5.text` |
+| 随机种子 `seed` | 三态 + 数值 | 0–4294967295 | 自动随机 | `3.seed` |
+| 视角改动幅度 `strength` | 滑杆 | 0–1，步 0.01 | 0.7 | `3.denoise` · 映射到 0.4–0.95 |
+| 采样器 `sampler` | 下拉（高级） | `euler` / `euler_ancestral` / `dpmpp_2m` / `dpmpp_2m_sde` / `dpmpp_3m_sde` / `res_multistep` / `ddim` / `uni_pc` / `lcm` | `dpmpp_2m` | `3.sampler_name` |
+| 调度器 `scheduler` | 下拉（高级） | `simple` / `normal` / `karras` / `sgm_uniform` / `exponential` / `beta` / `ddim_uniform` | `karras` | `3.scheduler` |
+| 步数 `steps` | 滑杆（高级） | 1–100，步 1 | 26 | `3.steps` |
+| CFG `cfg` | 滑杆（高级） | 1–20，步 0.1 | 7 | `3.cfg` |
+| 分辨率 `resolution` | 滑杆 | 512–2048，步 64 | 768 | `7.width` · 推导宽<br>`7.height` · 推导高 |
 
-- **写回**：智能对象 / 像素图层 / 仅存资产
-- **验收标准**：① 水平角 0 / 垂直角 0 时输出接近输入 ② 水平角 −90 时输出为主体右侧视图 ③ 稳定度徽章随角度变化（0/0 显示 `S+ 最稳定`）
+- **写回**：新建智能对象图层 / 新建像素图层 / 仅存资产库（不写回）（默认新建智能对象图层）
+- **验收标准**：
+  1. 水平角 0 / 垂直角 0 时输出接近输入
+  2. 改变水平角会改变注入工作流的机位提示词
+  3. 稳定度徽章随角度变化（0/0 显示 S+ 最稳定）
+
+<!-- END:GENERATED-FEATURES -->
 
 ### 4.3 ComfyUI 分支 · 自定义工作流 `comfy.custom`
 
@@ -1472,25 +1612,29 @@ HTTP 状态码与 `error.code` 一一对应，不允许 200 里塞失败。
 
 ## 附录 A · 功能与参数索引
 
+<!-- BEGIN:GENERATED-APPENDIX-A -->
+
 | 功能 ID | 路径 | 引擎 | 内置工作流 | 参数数 |
 |---|---|---|---|---|
-| `comfy.wash.portrait` | 生成/comfyui/洗图/人像 | comfy-workflow | `wf.wash.portrait` | 13 |
-| `comfy.wash.scene` | 生成/comfyui/洗图/场景 | comfy-workflow | `wf.wash.scene` | 13 |
-| `comfy.relight.fixed` | 生成/comfyui/光影溶图/固定视角 | comfy-workflow | `wf.relight.fixed` | 13 |
-| `comfy.relight.adaptive` | 生成/comfyui/光影溶图/自适应视角 | comfy-workflow | `wf.relight.adaptive` | 14 |
-| `comfy.edit.texture` | 生成/comfyui/图像编辑/质感加强 | comfy-workflow | `wf.edit.texture` | 11 |
-| `comfy.misc.upscale.general` | 生成/comfyui/其他功能/放大/通用放大 | comfy-workflow | `wf.upscale.general` | 9 |
+| `comfy.wash.portrait` | 生成/comfyui/洗图/人像 | comfy-workflow | `wf.wash.portrait` | 10 |
+| `comfy.wash.scene` | 生成/comfyui/洗图/场景 | comfy-workflow | `wf.wash.scene` | 10 |
+| `comfy.relight.fixed` | 生成/comfyui/光影溶图/固定视角 | comfy-workflow | `wf.relight.fixed` | 12 |
+| `comfy.relight.adaptive` | 生成/comfyui/光影溶图/自适应视角 | comfy-workflow | `wf.relight.adaptive` | 13 |
+| `comfy.edit.texture` | 生成/comfyui/图像编辑/质感加强 | comfy-workflow | `wf.edit.texture` | 10 |
+| `comfy.misc.upscale.general` | 生成/comfyui/其他功能/放大/通用放大 | comfy-workflow | `wf.upscale.general` | 10 |
 | `comfy.misc.upscale.lossless` | 生成/comfyui/其他功能/放大/无损放大 | comfy-workflow | `wf.upscale.lossless` | 3 |
-| `comfy.misc.retouch.product` | 生成/comfyui/其他功能/精修/产品 | comfy-workflow | `wf.retouch.product` | 11 |
-| `comfy.misc.retouch.person` | 生成/comfyui/其他功能/精修/人物 | comfy-workflow | `wf.retouch.person` | 11 |
-| `comfy.misc.retouch.scene` | 生成/comfyui/其他功能/精修/场景 | comfy-workflow | `wf.retouch.scene` | 11 |
-| `comfy.misc.viewpoint.orbit` | 生成/comfyui/其他功能/视角转换/360°旋转 | comfy-workflow | `wf.viewpoint.orbit` | 11 |
-| `comfy.custom` | 生成/comfyui/自定义工作流 | comfy-workflow | （用户绑定） | 动态 |
-| `cloud.wash` | 生成/闭源模型/洗图·去噪 | cloud-image | — | 9 |
+| `comfy.misc.retouch.product` | 生成/comfyui/其他功能/精修/产品 | comfy-workflow | `wf.retouch.product` | 10 |
+| `comfy.misc.retouch.person` | 生成/comfyui/其他功能/精修/人物 | comfy-workflow | `wf.retouch.person` | 10 |
+| `comfy.misc.retouch.scene` | 生成/comfyui/其他功能/精修/场景 | comfy-workflow | `wf.retouch.scene` | 10 |
+| `comfy.misc.viewpoint.orbit` | 生成/comfyui/其他功能/视角转换/360° 旋转 | comfy-workflow | `wf.viewpoint.orbit` | 11 |
+| `comfy.custom` | 生成/comfyui/自定义工作流 | comfy-workflow | — | 1 |
+| `cloud.wash` | 生成/闭源模型/洗图 / 去噪 | cloud-image | — | 10 |
 | `cloud.t2i` | 生成/闭源模型/文生图 | cloud-image | — | 7 |
 | `cloud.i2i` | 生成/闭源模型/图生图 | cloud-image | — | 9 |
 | `cloud.product.multiview` | 生成/闭源模型/高质量产品渲染/产品多视角 | cloud-image | — | 10 |
 | `cloud.product.whitebg` | 生成/闭源模型/高质量产品渲染/精修白底图 | cloud-image | — | 7 |
+
+<!-- END:GENERATED-APPENDIX-A -->
 
 ## 附录 B · 错误码总表
 

@@ -1,0 +1,7 @@
+{
+  "id": "wf.upscale.lossless",
+  "name": "放大 · 无损放大",
+  "version": "1.0.0",
+  "featureId": "comfy.misc.upscale.lossless",
+  "notes": "纯 ImageScaleBy 重采样，不经过扩散模型，同输入必得同输出。装了 ESRGAN 类放大模型后可换成 ImageUpscaleWithModel 获得更好效果。"
+}

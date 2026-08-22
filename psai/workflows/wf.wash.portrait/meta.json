@@ -1,0 +1,7 @@
+{
+  "id": "wf.wash.portrait",
+  "name": "洗图 · 人像",
+  "version": "1.0.0",
+  "featureId": "comfy.wash.portrait",
+  "notes": "真实感滑杆映射到 KSampler.cfg（4.5–9），重绘幅度直连 KSampler.denoise。"
+}

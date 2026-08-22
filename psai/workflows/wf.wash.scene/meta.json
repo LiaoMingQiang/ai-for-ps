@@ -1,0 +1,7 @@
+{
+  "id": "wf.wash.scene",
+  "name": "洗图 · 场景",
+  "version": "1.0.0",
+  "featureId": "comfy.wash.scene",
+  "notes": "与人像同构，提示词种子与默认重绘幅度偏向环境重绘。"
+}

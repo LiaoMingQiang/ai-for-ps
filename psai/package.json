@@ -4,8 +4,14 @@
   "private": true,
   "description": "AI for PS v2 - Photoshop UXP AI workbench (plugin + local helper)",
   "type": "module",
-  "engines": { "node": ">=22.5" },
-  "workspaces": ["packages/shared", "packages/helper", "packages/plugin"],
+  "engines": {
+    "node": ">=22.5"
+  },
+  "workspaces": [
+    "packages/shared",
+    "packages/helper",
+    "packages/plugin"
+  ],
   "scripts": {
     "build": "npm run build -w @psai/shared && npm run build -w @psai/helper && npm run build -w @psai/plugin",
     "typecheck": "npm run typecheck -w @psai/shared && npm run typecheck -w @psai/helper && npm run typecheck -w @psai/plugin",
@@ -13,13 +19,17 @@
     "validate": "node tools/validate-manifest.mjs",
     "check": "npm run typecheck && npm run lint && npm run validate",
     "test": "node tools/run-tests.mjs",
-    "test:comfy:real": "node tools/test-workflows-real.mjs",
+    "test:comfy:real": "node tools/test-comfy-real.mjs",
     "stub": "python tools/comfy_stub.py 18190",
-    "release": "node tools/make-release.mjs"
+    "release": "node tools/make-release.mjs",
+    "test:workflows:real": "node tools/test-workflows-real.mjs",
+    "workflows:author": "node tools/author-builtin-workflows.mjs",
+    "prd:artifact": "node tools/build-prd-artifact.mjs"
   },
   "devDependencies": {
     "@types/node": "^24.10.0",
     "esbuild": "^0.28.2",
+    "marked": "^18.0.10",
     "typescript": "^5.9.3"
   },
   "license": "UNLICENSED"

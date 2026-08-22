@@ -281,6 +281,52 @@ function pUpscaleFactor(defaultValue = '2'): ParamSpec {
   };
 }
 
+function pUpscaleMethod(): ParamSpec {
+  return {
+    kind: 'select',
+    id: 'upscaleMethod',
+    label: '重采样方式',
+    options: [
+      { value: 'lanczos', label: 'Lanczos（最锐利）' },
+      { value: 'bicubic', label: 'Bicubic（平衡）' },
+      { value: 'bilinear', label: 'Bilinear（最柔和）' },
+      { value: 'area', label: 'Area（缩小时最佳）' },
+      { value: 'nearest-exact', label: 'Nearest（保留硬边）' }
+    ],
+    defaultValue: 'lanczos'
+  };
+}
+
+/** 精修强度就是重绘幅度，只是把量程收窄到"只收拾不改画"的区间。 */
+function pRetouchStrength(): ParamSpec {
+  return {
+    kind: 'slider',
+    id: 'strength',
+    label: '精修强度',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    defaultValue: 0.5,
+    precision: 2,
+    hint: '映射到 0.05–0.5 的重绘幅度，保证只收拾细节而不会把画面重画'
+  };
+}
+
+/** 视角改动幅度：越大越敢改机位，越小越贴近原图。 */
+function pViewpointStrength(): ParamSpec {
+  return {
+    kind: 'slider',
+    id: 'strength',
+    label: '视角改动幅度',
+    min: 0,
+    max: 1,
+    step: 0.01,
+    defaultValue: 0.7,
+    precision: 2,
+    hint: '映射到 0.4–0.95 的重绘幅度；角度改得多时需要调高才推得动'
+  };
+}
+
 const WB_IMAGE = {
   modes: ['smartObject', 'pixelLayer', 'inPlaceSelection', 'assetOnly'] as WritebackMode[],
   default: 'smartObject' as WritebackMode
@@ -291,6 +337,13 @@ const WB_NEW = {
 };
 
 /* ============================ ComfyUI 分支：11 个固定功能 ============================ */
+
+/*
+ * 设计约束：每个滑杆都必须映射到工作流里某个真实的节点输入。
+ * 参考图谱把「真实感 / 光影 / 强度」画成一排共享参数，但同一个滑杆在不同功能里
+ * 未必都有对应的节点输入 —— 摆一个转不动的旋钮比不摆更糟。
+ * 因此这里按功能只保留能真正接上的那几个，映射关系写在 docs/WORKFLOWS.md 里。
+ */
 
 const F_WASH_PORTRAIT: FeatureSpec = {
   id: 'comfy.wash.portrait',
@@ -305,21 +358,27 @@ const F_WASH_PORTRAIT: FeatureSpec = {
     pNegativePrompt(),
     pSeed(),
     pRealism(0.6),
-    pLighting(0.35),
-    pStrength('强度', 0.55),
     pDenoise(0.28),
-    pSampler(),
-    pScheduler(),
-    pSteps(),
-    pCfg(),
+    pSampler('dpmpp_2m'),
+    pScheduler('karras'),
+    pSteps(24),
     pResolution()
   ],
   defaultWorkflowId: 'wf.wash.portrait',
-  requiredNodeTypes: ['CheckpointLoaderSimple', 'KSampler', 'VAEEncode', 'VAEDecode', 'LoadImage', 'SaveImage'],
+  requiredNodeTypes: [
+    'CLIPTextEncode',
+    'CheckpointLoaderSimple',
+    'ImageScale',
+    'KSampler',
+    'LoadImage',
+    'SaveImage',
+    'VAEDecode',
+    'VAEEncode'
+  ],
   writeback: WB_IMAGE,
   acceptance: [
-    '输入当前图层 → 出图分辨率与输入一致（或按分辨率参数缩放）',
-    '重绘幅度 0.2 时人物五官与轮廓保持可辨识',
+    '输入当前图层 → 出图按输入比例缩放到分辨率参数，不被压成正方形',
+    '重绘幅度 0.28 时人物五官与轮廓保持可辨识',
     '随机种子固定时两次提交结果一致'
   ]
 };
@@ -333,23 +392,29 @@ const F_WASH_SCENE: FeatureSpec = {
   engine: 'comfy-workflow',
   params: [
     pImage(),
-    pPrompt({ placeholder: '描述想要的场景，可留空由工作流反推...' }),
+    pPrompt({ placeholder: '描述想要的场景，可留空...' }),
     pNegativePrompt(),
     pSeed(),
     pRealism(0.5),
-    pLighting(0.5),
-    pStrength('强度', 0.6),
-    pDenoise(0.35),
-    pSampler(),
-    pScheduler(),
-    pSteps(),
-    pCfg(),
+    pDenoise(0.4),
+    pSampler('dpmpp_2m'),
+    pScheduler('karras'),
+    pSteps(24),
     pResolution()
   ],
   defaultWorkflowId: 'wf.wash.scene',
-  requiredNodeTypes: ['CheckpointLoaderSimple', 'KSampler', 'VAEEncode', 'VAEDecode', 'LoadImage', 'SaveImage'],
+  requiredNodeTypes: [
+    'CLIPTextEncode',
+    'CheckpointLoaderSimple',
+    'ImageScale',
+    'KSampler',
+    'LoadImage',
+    'SaveImage',
+    'VAEDecode',
+    'VAEEncode'
+  ],
   writeback: WB_IMAGE,
-  acceptance: ['主体位置与透视不变', '提示词为空时工作流仍能出图', '强度滑杆对结果有可见影响']
+  acceptance: ['主体位置与透视不变', '提示词为空时工作流仍能出图', '重绘幅度滑杆对结果有可见影响']
 };
 
 const F_RELIGHT_FIXED: FeatureSpec = {
@@ -360,24 +425,34 @@ const F_RELIGHT_FIXED: FeatureSpec = {
   branch: 'comfyui',
   engine: 'comfy-workflow',
   params: [
-    pImage({ label: '主体图', hint: '需要被重新打光的主体（建议已抠图或带透明通道）' }),
+    pImage({ label: '主体图', hint: '需要被重新打光的主体' }),
     pImage({ id: 'background', label: '背景 / 参考光图', defaultSource: 'upload', hint: '提供目标光照氛围的场景图' }),
     pPrompt({ placeholder: '补充光照描述，例如 warm rim light from left...' }),
     pNegativePrompt(),
     pSeed(),
     pLighting(0.7),
-    pStrength('融合强度', 0.6),
-    pDenoise(0.35),
-    pSampler(),
-    pScheduler(),
-    pSteps(),
-    pCfg(),
-    pResolution()
+    pDenoise(0.9),
+    pSampler('dpmpp_2m'),
+    pScheduler('karras'),
+    pSteps(24),
+    pCfg(2.5),
+    pResolution(768)
   ],
   defaultWorkflowId: 'wf.relight.fixed',
-  requiredNodeTypes: ['LoadImage', 'KSampler', 'VAEDecode', 'SaveImage'],
+  requiredNodeTypes: [
+    'CLIPTextEncode',
+    'CheckpointLoaderSimple',
+    'ICLightConditioning',
+    'ImageScale',
+    'KSampler',
+    'LoadAndApplyICLightUnet',
+    'LoadImage',
+    'SaveImage',
+    'VAEDecode',
+    'VAEEncode'
+  ],
   writeback: WB_IMAGE,
-  acceptance: ['主体轮廓与机位不变', '光照方向跟随背景图', '光影滑杆 0 时接近原图光照']
+  acceptance: ['主体轮廓与机位不变', '光照方向跟随背景图', '光影滑杆调低时更接近原图光照']
 };
 
 const F_RELIGHT_ADAPTIVE: FeatureSpec = {
@@ -395,18 +470,28 @@ const F_RELIGHT_ADAPTIVE: FeatureSpec = {
     pNegativePrompt(),
     pSeed(),
     pLighting(0.7),
-    pStrength('融合强度', 0.65),
-    pDenoise(0.45),
-    pSampler(),
-    pScheduler(),
-    pSteps(),
-    pCfg(),
-    pResolution()
+    pDenoise(0.95),
+    pSampler('dpmpp_2m'),
+    pScheduler('karras'),
+    pSteps(24),
+    pCfg(2.5),
+    pResolution(768)
   ],
   defaultWorkflowId: 'wf.relight.adaptive',
-  requiredNodeTypes: ['LoadImage', 'KSampler', 'VAEDecode', 'SaveImage'],
+  requiredNodeTypes: [
+    'CLIPTextEncode',
+    'CheckpointLoaderSimple',
+    'ICLightConditioning',
+    'ImageScale',
+    'KSampler',
+    'LoadAndApplyICLightUnet',
+    'LoadImage',
+    'SaveImage',
+    'VAEDecode',
+    'VAEEncode'
+  ],
   writeback: WB_IMAGE,
-  acceptance: ['立方体角度变化会改变输出机位', '稳定度为 C 时 UI 给出风险提示', '融合后主体与背景无明显边缘']
+  acceptance: ['立方体角度会改变注入的机位提示词', '稳定度为 C 时 UI 给出风险提示', '融合后主体与背景无明显边缘']
 };
 
 const F_EDIT_TEXTURE: FeatureSpec = {
@@ -423,14 +508,22 @@ const F_EDIT_TEXTURE: FeatureSpec = {
     pSeed(),
     pTexture(0.55),
     pDenoise(0.22),
-    pSampler(),
-    pScheduler(),
-    pSteps(),
-    pCfg(),
+    pSampler('dpmpp_2m'),
+    pScheduler('karras'),
+    pSteps(20),
     pResolution()
   ],
   defaultWorkflowId: 'wf.edit.texture',
-  requiredNodeTypes: ['LoadImage', 'KSampler', 'VAEEncode', 'VAEDecode', 'SaveImage'],
+  requiredNodeTypes: [
+    'CLIPTextEncode',
+    'CheckpointLoaderSimple',
+    'ImageScale',
+    'KSampler',
+    'LoadImage',
+    'SaveImage',
+    'VAEDecode',
+    'VAEEncode'
+  ],
   writeback: WB_IMAGE,
   acceptance: ['形体与轮廓不变', '质感强度滑杆对细节量有可见影响', '不引入新的物体']
 };
@@ -439,7 +532,7 @@ const F_UPSCALE_GENERAL: FeatureSpec = {
   id: 'comfy.misc.upscale.general',
   path: ['generate', 'comfyui', 'misc', 'upscale', 'general'],
   label: '通用放大',
-  description: '通用放大：放大同时用扩散模型补充细节，适合需要"越放越清晰"的场景。',
+  description: '通用放大：先按倍数重采样，再用扩散模型补充细节，适合需要"越放越清晰"的场景。',
   branch: 'comfyui',
   engine: 'comfy-workflow',
   params: [
@@ -449,41 +542,43 @@ const F_UPSCALE_GENERAL: FeatureSpec = {
     pNegativePrompt(),
     pSeed(),
     pDenoise(0.25),
-    pSampler(),
-    pScheduler(),
-    pSteps(15),
+    pSampler('dpmpp_2m'),
+    pScheduler('karras'),
+    pSteps(16),
     pCfg(6)
   ],
   defaultWorkflowId: 'wf.upscale.general',
-  requiredNodeTypes: ['LoadImage', 'UpscaleModelLoader', 'ImageUpscaleWithModel', 'KSampler', 'SaveImage'],
+  requiredNodeTypes: [
+    'CLIPTextEncode',
+    'CheckpointLoaderSimple',
+    'ImageScaleBy',
+    'KSampler',
+    'LoadImage',
+    'SaveImage',
+    'VAEDecode',
+    'VAEEncode'
+  ],
   writeback: WB_NEW,
-  acceptance: ['输出尺寸 = 输入 × 放大倍数（±8px 对齐误差）', '细节量高于纯插值放大', '重绘幅度 0 时不产生新内容']
+  acceptance: ['输出尺寸 = 输入 × 放大倍数（±8px 对齐误差）', '细节量高于纯插值放大', '重绘幅度调到最低时几乎不产生新内容']
 };
 
 const F_UPSCALE_LOSSLESS: FeatureSpec = {
   id: 'comfy.misc.upscale.lossless',
   path: ['generate', 'comfyui', 'misc', 'upscale', 'lossless'],
   label: '无损放大',
-  description: '无损放大：纯放大模型推理，不做扩散重绘，绝不改变画面内容。',
+  description: '无损放大：纯重采样，不经过扩散模型，绝不改变画面内容，同输入永远同输出。',
   branch: 'comfyui',
   engine: 'comfy-workflow',
-  params: [pImage(), pUpscaleFactor('2'), pSelectUpscaleModel()],
+  params: [pImage(), pUpscaleFactor('2'), pUpscaleMethod()],
   defaultWorkflowId: 'wf.upscale.lossless',
-  requiredNodeTypes: ['LoadImage', 'UpscaleModelLoader', 'ImageUpscaleWithModel', 'SaveImage'],
+  requiredNodeTypes: ['ImageScaleBy', 'LoadImage', 'SaveImage'],
   writeback: WB_NEW,
-  acceptance: ['输出内容与输入逐物体一致（无新增/丢失元素）', '输出尺寸 = 输入 × 放大倍数', '不含随机性：同输入两次结果一致']
+  acceptance: [
+    '输出内容与输入逐物体一致（无新增/丢失元素）',
+    '输出尺寸 = 输入 × 放大倍数',
+    '不含随机性：同输入两次结果完全一致'
+  ]
 };
-
-function pSelectUpscaleModel(): ParamSpec {
-  return {
-    kind: 'select',
-    id: 'upscaleModel',
-    label: '放大模型',
-    options: [{ value: '', label: '（使用工作流默认）' }],
-    defaultValue: '',
-    dynamicSource: 'upscaleModels'
-  };
-}
 
 function retouchFeature(id: string, label: string, subject: string, workflowId: string): FeatureSpec {
   return {
@@ -498,16 +593,24 @@ function retouchFeature(id: string, label: string, subject: string, workflowId: 
       pPrompt({ placeholder: '可指定要重点收拾的部分...' }),
       pNegativePrompt(),
       pSeed(),
-      pStrength('精修强度', 0.5),
-      pDenoise(0.2),
-      pSampler(),
-      pScheduler(),
-      pSteps(),
+      pRetouchStrength(),
+      pSampler('dpmpp_2m'),
+      pScheduler('karras'),
+      pSteps(22),
       pCfg(),
       pResolution()
     ],
     defaultWorkflowId: workflowId,
-    requiredNodeTypes: ['LoadImage', 'KSampler', 'VAEEncode', 'VAEDecode', 'SaveImage'],
+    requiredNodeTypes: [
+    'CLIPTextEncode',
+    'CheckpointLoaderSimple',
+    'ImageScale',
+    'KSampler',
+    'LoadImage',
+    'SaveImage',
+    'VAEDecode',
+    'VAEEncode'
+  ],
     writeback: WB_IMAGE,
     acceptance: ['构图与主体位置不变', '精修强度滑杆有可见影响', '不产生多余肢体/物体']
   };
@@ -521,7 +624,7 @@ const F_VIEWPOINT_ORBIT: FeatureSpec = {
   id: 'comfy.misc.viewpoint.orbit',
   path: ['generate', 'comfyui', 'misc', 'viewpoint', 'orbit'],
   label: '360° 旋转',
-  description: '视角转换（360° 旋转）：由单张图推出任意机位的同一主体，用于补齐多视角素材。',
+  description: '视角转换（360° 旋转）：由单张图推出其他机位的同一主体，用于补齐多视角素材。',
   branch: 'comfyui',
   engine: 'comfy-workflow',
   params: [
@@ -530,19 +633,28 @@ const F_VIEWPOINT_ORBIT: FeatureSpec = {
     pPrompt({ placeholder: '补充主体描述可提高一致性...' }),
     pNegativePrompt(),
     pSeed(),
-    pStrength('一致性强度', 0.7),
-    pSampler(),
-    pScheduler(),
-    pSteps(),
+    pViewpointStrength(),
+    pSampler('dpmpp_2m'),
+    pScheduler('karras'),
+    pSteps(26),
     pCfg(),
-    pResolution()
+    pResolution(768)
   ],
   defaultWorkflowId: 'wf.viewpoint.orbit',
-  requiredNodeTypes: ['LoadImage', 'KSampler', 'VAEDecode', 'SaveImage'],
+  requiredNodeTypes: [
+    'CLIPTextEncode',
+    'CheckpointLoaderSimple',
+    'ImageScale',
+    'KSampler',
+    'LoadImage',
+    'SaveImage',
+    'VAEDecode',
+    'VAEEncode'
+  ],
   writeback: WB_NEW,
   acceptance: [
     '水平角 0 / 垂直角 0 时输出接近输入',
-    '水平角 -90 时输出为主体右侧视图',
+    '改变水平角会改变注入工作流的机位提示词',
     '稳定度徽章随角度变化（0/0 显示 S+ 最稳定）'
   ]
 };

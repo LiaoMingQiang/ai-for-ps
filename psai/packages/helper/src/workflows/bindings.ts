@@ -110,6 +110,8 @@ function transform(
         const n = toNumber(raw);
         return n === undefined ? undefined : Math.round(n);
       }
+      case 'number':
+        return toNumber(raw);
       case 'not':
         return raw === undefined ? undefined : !raw;
     }

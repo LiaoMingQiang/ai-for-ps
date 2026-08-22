@@ -42,6 +42,7 @@ import type { ProviderManager } from '../providers/manager.js';
 import type { EventHub } from '../events.js';
 import type { InputImage, RemoteState } from '../providers/types.js';
 import { resolveJobParams, reversePresetOf, wantsEnhance } from './resolve.js';
+import type { ResolveOptions } from './resolve.js';
 
 interface RunningEntry {
   jobId: string;
@@ -246,7 +247,11 @@ export class JobEngine {
         index: i.index,
         buffer: this.assets.read(i.assetId),
         mime: rec.mime,
-        filename: `psai_${jobId}_${i.paramId}_${i.index}.${extOf(rec.mime)}`
+        // 用内容哈希命名，不要用任务 id。
+        // ComfyUI 会把整份 prompt（含输入文件名）写进输出 PNG 的元数据，
+        // 文件名带任务 id 会让同输入同参数的两次运行产出不同字节，
+        // 无损放大这类确定性功能就不再确定；内容寻址还能让远端复用同一份上传。
+        filename: `psai_${rec.sha256.slice(0, 16)}.${extOf(rec.mime)}`
       };
     });
 
@@ -269,9 +274,14 @@ export class JobEngine {
     }
 
     // 4. 归一化参数
-    const opts: { reverseText?: string; enhancedPrompt?: string } = {};
+    const opts: ResolveOptions = {};
     if (reverseText !== undefined) opts.reverseText = reverseText;
     if (enhanced !== undefined) opts.enhancedPrompt = enhanced;
+    // 图生图按输入图的比例缩放，而不是把竖图压成正方形
+    const primary = inputs.find((i) => i.index === 0) ?? inputs[0];
+    if (primary && primary.width > 0 && primary.height > 0) {
+      opts.inputSize = { width: primary.width, height: primary.height };
+    }
     const resolved = resolveJobParams(feature, job.params, this.prompts, opts);
     this.db
       .prepare('UPDATE jobs SET resolved_params_json = ?, updated_at = ? WHERE id = ?')

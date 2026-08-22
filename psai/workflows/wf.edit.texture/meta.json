@@ -1,0 +1,7 @@
+{
+  "id": "wf.edit.texture",
+  "name": "图像编辑 · 质感加强",
+  "version": "1.0.0",
+  "featureId": "comfy.edit.texture",
+  "notes": "质感强度映射到 KSampler.cfg（5–10）；默认低重绘幅度以保住形体。"
+}

@@ -34,11 +34,18 @@ export interface ResolvedJobParams {
   promptBreakdown: Array<{ label: string; text: string }>;
 }
 
+export interface ResolveOptions {
+  reverseText?: string;
+  enhancedPrompt?: string;
+  /** 第一张输入图的尺寸。图生图类功能靠它按原始比例缩放，而不是硬套正方形。 */
+  inputSize?: { width: number; height: number };
+}
+
 export function resolveJobParams(
   feature: FeatureSpec,
   raw: Record<string, unknown>,
   prompts: PromptStore,
-  opts: { reverseText?: string; enhancedPrompt?: string } = {}
+  opts: ResolveOptions = {}
 ): ResolvedJobParams {
   const values: Record<string, unknown> = {};
   const breakdown: Array<{ label: string; text: string }> = [];
@@ -110,12 +117,20 @@ export function resolveJobParams(
     }
   }
 
-  // 2. 宽高：优先用比例 + 分辨率推导；没有比例参数就用分辨率做正方形基准
+  // 2. 宽高
+  //    有「生图比例」参数 → 比例 + 分辨率推导（文生图那一类）
+  //    没有比例参数但有输入图 → 保持输入图的长宽比，把长边缩到分辨率（图生图那一类）
+  //    两者都没有 → 分辨率当正方形
   const resolutionSpec = specById.get('resolution');
   const baseEdge = resolutionSpec ? Number(values['resolution'] ?? 1024) : 1024;
   const aspect = values['aspect'] as AspectValue | undefined;
   if (aspect) {
     const size = resolveSize(aspect, baseEdge, 8);
+    width = size.width;
+    height = size.height;
+  } else if (opts.inputSize && opts.inputSize.width > 0 && opts.inputSize.height > 0) {
+    const { width: iw, height: ih } = opts.inputSize;
+    const size = resolveSize({ id: 'custom', customW: iw, customH: ih }, baseEdge, 8);
     width = size.width;
     height = size.height;
   } else {

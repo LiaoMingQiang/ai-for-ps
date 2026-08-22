@@ -26,6 +26,8 @@ export type BindingTransform =
   | { type: 'appendText'; separator: string }
   /** 覆盖为整数 */
   | { type: 'int' }
+  /** 强制转成数字（分段控件的值是字符串，但节点要的是 FLOAT/INT） */
+  | { type: 'number' }
   /** 取 resolveSize 的宽 */
   | { type: 'sizeWidth' }
   /** 取 resolveSize 的高 */

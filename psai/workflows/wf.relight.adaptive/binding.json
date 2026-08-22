@@ -1,0 +1,123 @@
+{
+  "bindings": [
+    {
+      "paramId": "image",
+      "nodeId": "2",
+      "input": "image",
+      "required": true
+    },
+    {
+      "paramId": "background",
+      "nodeId": "11",
+      "input": "image",
+      "required": true
+    },
+    {
+      "paramId": "prompt",
+      "nodeId": "4",
+      "input": "text",
+      "required": false
+    },
+    {
+      "paramId": "negativePrompt",
+      "nodeId": "5",
+      "input": "text",
+      "required": false
+    },
+    {
+      "paramId": "seed",
+      "nodeId": "3",
+      "input": "seed",
+      "required": true
+    },
+    {
+      "paramId": "steps",
+      "nodeId": "3",
+      "input": "steps",
+      "required": false
+    },
+    {
+      "paramId": "sampler",
+      "nodeId": "3",
+      "input": "sampler_name",
+      "required": false
+    },
+    {
+      "paramId": "scheduler",
+      "nodeId": "3",
+      "input": "scheduler",
+      "required": false
+    },
+    {
+      "paramId": "cfg",
+      "nodeId": "3",
+      "input": "cfg",
+      "required": false
+    },
+    {
+      "paramId": "denoise",
+      "nodeId": "3",
+      "input": "denoise",
+      "required": false
+    },
+    {
+      "paramId": "resolution",
+      "nodeId": "7",
+      "input": "width",
+      "required": false,
+      "transform": {
+        "type": "sizeWidth"
+      }
+    },
+    {
+      "paramId": "resolution",
+      "nodeId": "7",
+      "input": "height",
+      "required": false,
+      "transform": {
+        "type": "sizeHeight"
+      }
+    },
+    {
+      "paramId": "resolution",
+      "nodeId": "12",
+      "input": "width",
+      "required": false,
+      "transform": {
+        "type": "sizeWidth"
+      }
+    },
+    {
+      "paramId": "resolution",
+      "nodeId": "12",
+      "input": "height",
+      "required": false,
+      "transform": {
+        "type": "sizeHeight"
+      }
+    },
+    {
+      "paramId": "lighting",
+      "nodeId": "15",
+      "input": "multiplier",
+      "required": false,
+      "transform": {
+        "type": "linear",
+        "inMin": 0,
+        "inMax": 1,
+        "outMin": 0.1,
+        "outMax": 1
+      }
+    },
+    {
+      "paramId": "camera",
+      "nodeId": "4",
+      "input": "text",
+      "required": false,
+      "transform": {
+        "type": "appendText",
+        "separator": ", "
+      }
+    }
+  ]
+}

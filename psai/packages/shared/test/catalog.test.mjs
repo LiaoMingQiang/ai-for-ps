@@ -188,6 +188,31 @@ test('每个功能都写进了 PRD', () => {
   }
 });
 
+test('PRD 的参数表与目录严格一致，不允许漂移', () => {
+  // §4.2 是从 catalog 生成的；这条测试防止有人手改了 PRD 却没改代码（或反过来）
+  for (const f of allFeatures().filter((x) => x.engine === 'comfy-workflow' && x.id !== 'comfy.custom')) {
+    const escapedId = f.id.replaceAll('.', '\\.');
+    const heading = new RegExp('#### 4\\.2\\.\\d+ [^\\n]*`' + escapedId + '`');
+    const m = heading.exec(PRD);
+    assert.ok(m, `PRD 里没有 ${f.id} 的小节`);
+
+    const rest = PRD.slice(m.index + m[0].length);
+    const nextIdx = rest.search(/\n#### |\n### /);
+    const section = nextIdx >= 0 ? rest.slice(0, nextIdx) : rest;
+
+    // 表格首列形如：| 真实感 `realism` | ...
+    const listed = new Set([...section.matchAll(/^\| [^|]*`([a-zA-Z]+)` \|/gm)].map((x) => x[1]));
+    const declared = new Set(f.params.map((p) => p.id));
+
+    for (const id of declared) {
+      assert.ok(listed.has(id), `PRD 的 ${f.id} 参数表缺少 ${id}`);
+    }
+    for (const id of listed) {
+      assert.ok(declared.has(id), `PRD 的 ${f.id} 参数表多出了 ${id}（目录里没有这个参数）`);
+    }
+  }
+});
+
 test('内置工作流 id 全部写进了 PRD', () => {
   for (const f of fixedComfyFeatures()) {
     assert.ok(PRD.includes(f.defaultWorkflowId), `PRD 里没有工作流 ${f.defaultWorkflowId}`);

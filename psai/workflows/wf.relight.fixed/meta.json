@@ -1,0 +1,7 @@
+{
+  "id": "wf.relight.fixed",
+  "name": "光影溶图 · 固定视角",
+  "version": "1.0.0",
+  "featureId": "comfy.relight.fixed",
+  "notes": "光影滑杆映射到 ICLightConditioning.multiplier（0.1–1.0），机位不动。"
+}

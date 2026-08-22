@@ -1,0 +1,7 @@
+{
+  "id": "wf.viewpoint.orbit",
+  "name": "视角转换 · 360° 旋转",
+  "version": "1.0.0",
+  "featureId": "comfy.misc.viewpoint.orbit",
+  "notes": "机位片段追加到正向提示词；视角改动幅度映射到 KSampler.denoise（0.4–0.95）。"
+}

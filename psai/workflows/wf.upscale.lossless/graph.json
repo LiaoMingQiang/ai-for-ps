@@ -1,0 +1,38 @@
+{
+  "2": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "example.png"
+    },
+    "_meta": {
+      "title": "输入图"
+    }
+  },
+  "9": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": [
+        "20",
+        0
+      ],
+      "filename_prefix": "psai/wf.upscale.lossless"
+    },
+    "_meta": {
+      "title": "输出"
+    }
+  },
+  "20": {
+    "class_type": "ImageScaleBy",
+    "inputs": {
+      "image": [
+        "2",
+        0
+      ],
+      "upscale_method": "lanczos",
+      "scale_by": 2
+    },
+    "_meta": {
+      "title": "按倍数放大"
+    }
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "id": "wf.retouch.person",
+  "name": "精修 · 人物",
+  "version": "1.0.0",
+  "featureId": "comfy.misc.retouch.person",
+  "notes": "精修强度映射到 KSampler.denoise（0.05–0.5），保证只收拾细节不重画。"
+}

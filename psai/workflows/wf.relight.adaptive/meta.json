@@ -1,0 +1,7 @@
+{
+  "id": "wf.relight.adaptive",
+  "name": "光影溶图 · 自适应视角",
+  "version": "1.0.0",
+  "featureId": "comfy.relight.adaptive",
+  "notes": "在固定视角基础上，把摄像机立方体翻译出的英文机位片段追加到正向提示词。"
+}

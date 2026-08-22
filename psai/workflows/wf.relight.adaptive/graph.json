@@ -1,0 +1,220 @@
+{
+  "1": {
+    "class_type": "CheckpointLoaderSimple",
+    "inputs": {
+      "ckpt_name": "v1-5-pruned-emaonly-fp16.safetensors"
+    },
+    "_meta": {
+      "title": "基础模型"
+    }
+  },
+  "2": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "example.png"
+    },
+    "_meta": {
+      "title": "输入图"
+    }
+  },
+  "3": {
+    "class_type": "KSampler",
+    "inputs": {
+      "model": [
+        "10",
+        0
+      ],
+      "seed": 0,
+      "steps": 24,
+      "cfg": 2.5,
+      "sampler_name": "dpmpp_2m",
+      "scheduler": "karras",
+      "positive": [
+        "15",
+        0
+      ],
+      "negative": [
+        "15",
+        1
+      ],
+      "latent_image": [
+        "15",
+        2
+      ],
+      "denoise": 0.95
+    },
+    "_meta": {
+      "title": "采样器"
+    }
+  },
+  "4": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "natural lighting, seamless composite, consistent shadows and reflections",
+      "clip": [
+        "1",
+        1
+      ]
+    },
+    "_meta": {
+      "title": "正向提示词"
+    }
+  },
+  "5": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "text": "lowres, blurry, jpeg artifacts, watermark, text, logo, deformed, extra limbs, flat lighting, cut-out look",
+      "clip": [
+        "1",
+        1
+      ]
+    },
+    "_meta": {
+      "title": "Negative 负向提示词"
+    }
+  },
+  "6": {
+    "class_type": "VAEEncode",
+    "inputs": {
+      "pixels": [
+        "7",
+        0
+      ],
+      "vae": [
+        "1",
+        2
+      ]
+    },
+    "_meta": {
+      "title": "编码主图"
+    }
+  },
+  "7": {
+    "class_type": "ImageScale",
+    "inputs": {
+      "image": [
+        "2",
+        0
+      ],
+      "upscale_method": "lanczos",
+      "width": 1024,
+      "height": 1024,
+      "crop": "disabled"
+    },
+    "_meta": {
+      "title": "缩放到目标尺寸"
+    }
+  },
+  "8": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": [
+        "3",
+        0
+      ],
+      "vae": [
+        "1",
+        2
+      ]
+    },
+    "_meta": {
+      "title": "解码"
+    }
+  },
+  "9": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": [
+        "8",
+        0
+      ],
+      "filename_prefix": "psai/wf.relight.adaptive"
+    },
+    "_meta": {
+      "title": "输出"
+    }
+  },
+  "10": {
+    "class_type": "LoadAndApplyICLightUnet",
+    "inputs": {
+      "model": [
+        "1",
+        0
+      ],
+      "model_path": "IC-Light\\iclight_sd15_fbc.safetensors"
+    },
+    "_meta": {
+      "title": "IC-Light 重打光模型"
+    }
+  },
+  "11": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "example.png"
+    },
+    "_meta": {
+      "title": "背景 / 参考光图"
+    }
+  },
+  "12": {
+    "class_type": "ImageScale",
+    "inputs": {
+      "image": [
+        "11",
+        0
+      ],
+      "upscale_method": "lanczos",
+      "width": 768,
+      "height": 768,
+      "crop": "center"
+    },
+    "_meta": {
+      "title": "缩放背景"
+    }
+  },
+  "13": {
+    "class_type": "VAEEncode",
+    "inputs": {
+      "pixels": [
+        "12",
+        0
+      ],
+      "vae": [
+        "1",
+        2
+      ]
+    },
+    "_meta": {
+      "title": "编码背景"
+    }
+  },
+  "15": {
+    "class_type": "ICLightConditioning",
+    "inputs": {
+      "positive": [
+        "4",
+        0
+      ],
+      "negative": [
+        "5",
+        0
+      ],
+      "vae": [
+        "1",
+        2
+      ],
+      "foreground": [
+        "6",
+        0
+      ],
+      "multiplier": 0.7,
+      "opt_background": [
+        "13",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "IC-Light 条件"
+    }
+  }
+}

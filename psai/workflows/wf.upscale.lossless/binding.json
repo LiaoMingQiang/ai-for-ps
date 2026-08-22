@@ -1,0 +1,25 @@
+{
+  "bindings": [
+    {
+      "paramId": "image",
+      "nodeId": "2",
+      "input": "image",
+      "required": true
+    },
+    {
+      "paramId": "upscaleFactor",
+      "nodeId": "20",
+      "input": "scale_by",
+      "required": true,
+      "transform": {
+        "type": "number"
+      }
+    },
+    {
+      "paramId": "upscaleMethod",
+      "nodeId": "20",
+      "input": "upscale_method",
+      "required": false
+    }
+  ]
+}

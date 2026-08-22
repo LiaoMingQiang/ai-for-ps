@@ -1,0 +1,7 @@
+{
+  "id": "wf.upscale.general",
+  "name": "放大 · 通用放大",
+  "version": "1.0.0",
+  "featureId": "comfy.misc.upscale.general",
+  "notes": "先 ImageScaleBy 按倍数重采样，再低重绘幅度过一遍扩散模型补细节。"
+}
