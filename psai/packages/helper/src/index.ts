@@ -70,12 +70,36 @@ function releaseLock(cfg: HelperConfig): void {
   }
 }
 
+/**
+ * 打成单文件 exe（Node SEA）之后代码是 CJS，`import.meta.url` 是 undefined，
+ * 直接 fileURLToPath 会在启动第一步就崩。所以这里三级兜底：
+ * ESM 的 import.meta.url → CJS 的 __dirname → 退到 exe 所在目录。
+ */
+function selfDir(): string | null {
+  try {
+    const url = import.meta.url as string | undefined;
+    if (url) return dirname(fileURLToPath(url));
+  } catch {
+    /* CJS 下取不到，继续往下 */
+  }
+  const cjsDir = (globalThis as { __dirname?: string }).__dirname;
+  if (typeof cjsDir === 'string' && cjsDir) return cjsDir;
+  return null;
+}
+
+/** 是否运行在打包后的单文件 exe 里。 */
+function isPackaged(): boolean {
+  return selfDir() === null;
+}
+
 function builtinWorkflowsDir(): string {
-  // 开发：packages/helper/dist -> psai/workflows；打包后由 PSAI_WORKFLOWS_DIR 指定
   const env = process.env['PSAI_WORKFLOWS_DIR'];
   if (env) return env;
-  const here = dirname(fileURLToPath(import.meta.url));
-  return resolve(here, '../../../workflows');
+  const here = selfDir();
+  // 开发：packages/helper/dist → psai/workflows
+  if (here) return resolve(here, '../../../workflows');
+  // 打包：workflows/ 就放在 exe 旁边
+  return resolve(dirname(process.execPath), 'workflows');
 }
 
 export async function startHelper(overrides: Partial<HelperConfig> = {}): Promise<StartedHelper> {
@@ -130,14 +154,26 @@ export async function startHelper(overrides: Partial<HelperConfig> = {}): Promis
   const url = `http://${cfg.host === '0.0.0.0' ? '127.0.0.1' : cfg.host}:${cfg.port}`;
   log.info(`Helper 已就绪 ${url}`);
 
+  // 启动就探一次 ComfyUI，否则 /v1/health 在有人主动测试之前一直报"离线"，
+  // 面板状态条会对着一个其实好好的 ComfyUI 亮红灯。
+  const probed = providers
+    .probe('comfyui')
+    .then((s) => {
+      log.info('ComfyUI 探测', { online: s.online, baseUrl: s.baseUrl, reason: s.reason });
+    })
+    .catch(() => undefined);
+
   // 恢复未完成的任务（先查远端，不重复提交）。
   // 不阻塞启动，但要留下句柄：关闭时必须等它跑完，否则会对着已关闭的数据库写。
-  const recovered = jobs.recover().then(
-    () => undefined,
-    (e: unknown) => {
-      log.error('任务恢复失败', String(e));
-    }
-  );
+  const recovered = Promise.all([
+    probed,
+    jobs.recover().then(
+      () => undefined,
+      (e: unknown) => {
+        log.error('任务恢复失败', String(e));
+      }
+    )
+  ]).then(() => undefined);
 
   let stopped = false;
   const stop = async (): Promise<void> => {
@@ -179,9 +215,20 @@ export async function startHelper(overrides: Partial<HelperConfig> = {}): Promis
   };
 }
 
-// 直接执行时启动
-const isMain = process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url));
-if (isMain) {
+/**
+ * 直接执行时启动。
+ * 打包成 exe 时没有 import.meta.url 可比，进程存在的唯一目的就是跑 Helper，直接起。
+ * 被测试 import 时既不是 packaged 也不是入口脚本，不会自启。
+ */
+function shouldAutoStart(): boolean {
+  if (isPackaged()) return true;
+  const here = selfDir();
+  if (!here || !process.argv[1]) return false;
+  const entry = resolve(process.argv[1]);
+  return entry === resolve(here, 'index.js') || entry === resolve(here, 'index.ts');
+}
+
+if (shouldAutoStart()) {
   startHelper().catch((e) => {
     console.error('Helper 启动失败:', e instanceof Error ? e.message : String(e));
     process.exit(1);

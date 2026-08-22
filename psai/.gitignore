@@ -1,8 +1,8 @@
-node_modules/
-dist/
-out/
-release/
 *.log
 .tmp/
-tools/.artifacts/
+/.tmp/
+dist/
+node_modules/
+out/
+release/
 tools/.artifacts/

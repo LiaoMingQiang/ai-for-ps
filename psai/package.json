@@ -24,12 +24,17 @@
     "release": "node tools/make-release.mjs",
     "test:workflows:real": "node tools/test-workflows-real.mjs",
     "workflows:author": "node tools/author-builtin-workflows.mjs",
-    "prd:artifact": "node tools/build-prd-artifact.mjs"
+    "prd:artifact": "node tools/build-prd-artifact.mjs",
+    "dev:preview": "node tools/dev-preview.mjs",
+    "bundle:helper": "node tools/bundle-helper.mjs",
+    "docs:workflows": "node tools/build-workflows-doc.mjs",
+    "docs:prd": "node tools/sync-prd-features.mjs"
   },
   "devDependencies": {
     "@types/node": "^24.10.0",
     "esbuild": "^0.28.2",
     "marked": "^18.0.10",
+    "postject": "^1.0.0-alpha.6",
     "typescript": "^5.9.3"
   },
   "license": "UNLICENSED"
