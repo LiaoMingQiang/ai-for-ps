@@ -23,7 +23,7 @@ function crc32(buf) {
   return c ^ 0xffffffff;
 }
 
-function encodePng(width, height, rgbRows) {
+function encodePng(width, height, rgbRows, colorType = 2) {
   const chunk = (type, data) => {
     const len = Buffer.alloc(4);
     len.writeUInt32BE(data.length);
@@ -36,7 +36,7 @@ function encodePng(width, height, rgbRows) {
   ihdr.writeUInt32BE(width, 0);
   ihdr.writeUInt32BE(height, 4);
   ihdr[8] = 8;
-  ihdr[9] = 2;
+  ihdr[9] = colorType;
   return Buffer.concat([
     Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
     chunk('IHDR', ihdr),
@@ -93,6 +93,48 @@ export function makeStructuredPng(width = 512, height = 512) {
     }
   }
   return encodePng(width, height, raw);
+}
+
+/**
+ * 生成带 alpha 的测试图：底图同 makeStructuredPng，再按 rect 把一块区域挖成全透明。
+ *
+ * 局部重绘 / 一键消除这类工作流是靠 LoadImage 的 MASK 输出确定处理区域的
+ * （ComfyUI 把 alpha 反相后当 mask），所以验证它们必须用真的带 alpha 的图，
+ * 拿不带 alpha 的图去测等于整张图都是重绘区，测不出绑定对不对。
+ *
+ * rect 用 0..1 的相对坐标，避免调用方还要跟着尺寸算像素。
+ */
+export function makeMaskedPng(width = 768, height = 768, rect = { x: 0.55, y: 0.5, w: 0.3, h: 0.3 }) {
+  const raw = Buffer.alloc((width * 4 + 1) * height);
+  let o = 0;
+  const cx = width * 0.35;
+  const cy = height * 0.4;
+  const r = Math.min(width, height) * 0.22;
+  const x0 = Math.round(rect.x * width);
+  const x1 = Math.round((rect.x + rect.w) * width);
+  const y0 = Math.round(rect.y * height);
+  const y1 = Math.round((rect.y + rect.h) * height);
+
+  for (let y = 0; y < height; y++) {
+    raw[o++] = 0;
+    for (let x = 0; x < width; x++) {
+      let R = Math.round(40 + (x / width) * 120);
+      let G = Math.round(60 + (y / height) * 110);
+      let B = Math.round(150 - (x / width) * 60);
+      const dx = x - cx;
+      const dy = y - cy;
+      if (dx * dx + dy * dy < r * r) { R = 230; G = 90; B = 60; }
+      if (x % 64 === 0 || y % 64 === 0) {
+        R = Math.min(255, R + 60); G = Math.min(255, G + 60); B = Math.min(255, B + 60);
+      }
+      const inRect = x >= x0 && x < x1 && y >= y0 && y < y1;
+      raw[o++] = R;
+      raw[o++] = G;
+      raw[o++] = B;
+      raw[o++] = inRect ? 0 : 255;
+    }
+  }
+  return { png: encodePng(width, height, raw, 6), rect: { x0, y0, x1, y1 } };
 }
 
 /** 解出 PNG 的像素（仅支持本工具生成的 8 位 truecolor，无交错）。 */
@@ -180,4 +222,38 @@ export function meanAbsDiff(aBuf, bBuf) {
     }
   }
   return sum / n;
+}
+
+/**
+ * 在一张已有的 PNG 上挖一块全透明区域，得到可以直接喂给「局部重绘 / 消除」的 RGBA 图。
+ *
+ * 合成图（渐变 + 圆 + 方块）当重绘输入其实测不出什么：
+ * 模型面对一块没有语义的色块，最省事的解法就是把周围的渐变延续过去，
+ * 于是"提示词有没有生效"这件事根本无从判断。
+ * 用一张真实照片挖洞才问得出「这里出现了提示词要的东西吗」。
+ *
+ * rect 用 0..1 的相对坐标。
+ */
+export function punchAlphaHole(png, rect = { x: 0.34, y: 0.55, w: 0.3, h: 0.3 }) {
+  const img = decodePng(png);
+  const { width, height, channels, data } = img;
+  const raw = Buffer.alloc((width * 4 + 1) * height);
+  const x0 = Math.round(rect.x * width);
+  const x1 = Math.round((rect.x + rect.w) * width);
+  const y0 = Math.round(rect.y * height);
+  const y1 = Math.round((rect.y + rect.h) * height);
+
+  let o = 0;
+  for (let y = 0; y < height; y++) {
+    raw[o++] = 0;
+    for (let x = 0; x < width; x++) {
+      const si = (y * width + x) * channels;
+      const inRect = x >= x0 && x < x1 && y >= y0 && y < y1;
+      raw[o++] = data[si];
+      raw[o++] = data[si + 1];
+      raw[o++] = data[si + 2];
+      raw[o++] = inRect ? 0 : 255;
+    }
+  }
+  return { png: encodePng(width, height, raw, 6), rect: { x0, y0, x1, y1 }, width, height };
 }

@@ -28,7 +28,10 @@
     "dev:preview": "node tools/dev-preview.mjs",
     "bundle:helper": "node tools/bundle-helper.mjs",
     "docs:workflows": "node tools/build-workflows-doc.mjs",
-    "docs:prd": "node tools/sync-prd-features.mjs"
+    "docs:prd": "node tools/sync-prd-features.mjs",
+    "verify:rh": "node tools/verify-runninghub.mjs",
+    "docs:rh": "node tools/build-runninghub-doc.mjs",
+    "test:cloud:real": "node tools/test-cloud-real.mjs"
   },
   "devDependencies": {
     "@types/node": "^24.10.0",

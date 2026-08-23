@@ -4,7 +4,7 @@
 
 import { JOB_STATE_LABELS, WRITEBACK_MODE_LABELS, isTerminal, AI_SUCCEEDED_STATES } from '@psai/shared';
 import type { JobRecord, WritebackMode } from '@psai/shared';
-import { h, clear, formatDuration } from '../app/dom.js';
+import { h, clear, formatDuration, toggleClass } from '../app/dom.js';
 import { api, assetImgSrc } from '../app/api.js';
 
 export interface ResultsOptions {
@@ -147,7 +147,7 @@ export function renderResults(opts: ResultsOptions): HTMLElement {
         stage.appendChild(details);
       }
 
-      for (const [n, b] of Array.from(strip.children).entries()) b.classList.toggle('active', n === i);
+      for (const [n, b] of Array.from(strip.children).entries()) toggleClass(b, 'active', n === i);
     };
 
     if (job.results.length > 1) {

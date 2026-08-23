@@ -44,7 +44,17 @@ const FORBIDDEN_IN_PLUGIN = [
   { re: /<input[^>]+type=["']file["']/i, why: 'UXP 必须用 localFileSystem 选文件' },
   { re: /\bXMLHttpRequest\b/, why: 'UXP 请用 fetch' },
   { re: /transform-style\s*:\s*preserve-3d/, why: 'UXP 对 CSS 3D 变换支持不可靠，立方体请用 SVG 投影' },
-  { re: /\bwindow\.open\s*\(/, why: 'UXP 请用 uxp.shell.openExternal' }
+  { re: /\bwindow\.open\s*\(/, why: 'UXP 请用 uxp.shell.openExternal' },
+  // 下面两条是真机上踩出来的：UXP 的 DOM 是浏览器 DOM 的子集，
+  // 调用不存在的方法会当场抛错，整个页面白屏，而且只有装进 Photoshop 才复现。
+  {
+    re: /\.toggleAttribute\s*\(/,
+    why: 'UXP 没有 Element.toggleAttribute（会整页白屏），请用 dom.ts 的 setAttr(el, name, on)'
+  },
+  {
+    re: /\.classList\.toggle\s*\([^)]*,/,
+    why: 'UXP 对 classList.toggle(name, force) 两参数形式不可靠，请用 dom.ts 的 toggleClass(el, name, on)'
+  }
 ];
 
 const THIRD_PARTY_HOSTS = [
@@ -78,7 +88,10 @@ for (const f of [...tsFiles, ...mjsFiles]) {
   const code = stripComments(src);
   const isPluginSrc = rel.startsWith('packages/plugin/src/');
 
-  if (isPluginSrc) {
+  // dom.ts 是这些封装的实现处，注释与实现里必然提到被禁的 API，豁免它
+  const isDomHelper = rel === 'packages/plugin/src/app/dom.ts';
+
+  if (isPluginSrc && !isDomHelper) {
     for (const rule of FORBIDDEN_IN_PLUGIN) {
       if (rule.re.test(code)) problems.push(`${rel}: ${rule.why}`);
     }

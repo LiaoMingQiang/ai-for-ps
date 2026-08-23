@@ -14,7 +14,7 @@ import {
   MAX_REFERENCE_IMAGES
 } from '@psai/shared';
 import type { ParamSpec, SeedValue, AspectValue, CameraValue } from '@psai/shared';
-import { h, clear, debounce } from '../app/dom.js';
+import { h, clear, debounce, setAttr, toggleClass } from '../app/dom.js';
 import { createCameraCube } from './cube.js';
 
 export interface ParamContext {
@@ -245,9 +245,9 @@ function renderPresetPrompt(spec: Extract<ParamSpec, { kind: 'presetPrompt' }>, 
           current.enabled = next;
           ctx.set(spec.id, { ...current, enabled: next });
           const btn = e.currentTarget as HTMLElement;
-          btn.classList.toggle('on', next);
+          toggleClass(btn, 'on', next);
           btn.setAttribute('aria-checked', String(next));
-          preview.classList.toggle('dim', !next);
+          toggleClass(preview, 'dim', !next);
         }
       })
     : null;
@@ -308,14 +308,14 @@ function renderSeed(spec: Extract<ParamSpec, { kind: 'seed' }>, ctx: ParamContex
           ctx.set(spec.id, { mode, value: current.value });
           for (const b of Array.from(seg.children)) b.classList.remove('active');
           btn.classList.add('active');
-          numInput.toggleAttribute('readonly', mode !== 'fixed');
+          setAttr(numInput, 'readonly', mode !== 'fixed');
         }
       },
       SEED_MODE_LABELS[mode]
     );
     seg.appendChild(btn);
   }
-  numInput.toggleAttribute('readonly', current.mode !== 'fixed');
+  setAttr(numInput, 'readonly', current.mode !== 'fixed');
 
   return field(spec, h('div', { class: 'seed' }, seg, numInput));
 }
@@ -423,7 +423,7 @@ function renderToggle(spec: Extract<ParamSpec, { kind: 'toggle' }>, ctx: ParamCo
     'aria-checked': String(current),
     onclick: () => {
       const next = !btn.classList.contains('on');
-      btn.classList.toggle('on', next);
+      toggleClass(btn, 'on', next);
       btn.setAttribute('aria-checked', String(next));
       ctx.set(spec.id, next);
     }
@@ -474,7 +474,7 @@ function renderAspect(spec: Extract<ParamSpec, { kind: 'aspect' }>, ctx: ParamCo
           ctx.set(spec.id, { ...current });
           for (const b of buttons) b.classList.remove('active');
           btn.classList.add('active');
-          customBox.classList.toggle('hidden', a.id !== 'custom');
+          toggleClass(customBox, 'hidden', a.id !== 'custom');
         }
       },
       h('span', { class: 'aspect-label' }, a.label),

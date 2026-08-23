@@ -70,6 +70,25 @@ function append(el: HTMLElement, children: Child[]): void {
   }
 }
 
+/**
+ * UXP 的 DOM 是浏览器 DOM 的子集，下面两个是踩过的坑，必须用这里的封装：
+ *
+ *   el.toggleAttribute(name, force)      UXP 里根本没有这个方法，
+ *                                        调用直接抛 "is not a function"，整页白屏
+ *   el.classList.toggle(name, force)     带第二个参数的写法在 UXP 里不可靠
+ *
+ * tools/lint.mjs 里有规则禁止在插件源码里直接用这两个 API。
+ */
+export function setAttr(el: Element, name: string, on: boolean): void {
+  if (on) el.setAttribute(name, '');
+  else el.removeAttribute(name);
+}
+
+export function toggleClass(el: Element, name: string, on: boolean): void {
+  if (on) el.classList.add(name);
+  else el.classList.remove(name);
+}
+
 export function clear(el: Element): void {
   while (el.firstChild) el.removeChild(el.firstChild);
 }

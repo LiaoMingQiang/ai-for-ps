@@ -9,6 +9,7 @@ export * from './catalog.js';
 export * from './job.js';
 export * from './providers.js';
 export * from './workflow.js';
+export * from './runninghub.js';
 export * from './settings.js';
 
 /**

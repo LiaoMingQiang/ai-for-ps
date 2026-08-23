@@ -14,6 +14,8 @@ export interface InputImage {
   buffer: Buffer;
   mime: string;
   filename: string;
+  /** 是否带 alpha 通道；靠遮罩工作的工作流在提交前要据此拦截 */
+  hasAlpha: boolean;
 }
 
 export interface SubmitContext {

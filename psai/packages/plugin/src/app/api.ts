@@ -178,6 +178,19 @@ async function saveToken(value: string): Promise<void> {
   }
 }
 
+/**
+ * 直接指定 Helper 地址与已有 token，跳过探测与配对。
+ *
+ * 两个用处：
+ *  - 用户把 Helper 跑在非默认端口时（PSAI_PORT），面板得能被指过去
+ *  - 页面渲染冒烟测试要连自己起的那个临时 Helper，不能去碰用户真正在用的那一个
+ */
+export function useHelperAt(baseUrl: string, existingToken?: string): void {
+  BASE = baseUrl.replace(/\/+$/, '');
+  lastProbes = [{ url: BASE, ok: true, detail: '由调用方指定' }];
+  if (existingToken) token = existingToken;
+}
+
 export async function clearToken(): Promise<void> {
   token = null;
   try {

@@ -3,9 +3,9 @@
  * 页面结构对所有 17 个功能都一样，差异全部来自功能目录。
  */
 
-import { defaultValues, isTerminal } from '@psai/shared';
+import { defaultValues, isTerminal, rhPresetByWorkflowId } from '@psai/shared';
 import type { ParamSpec, WritebackMode, JobRecord } from '@psai/shared';
-import { h, clear } from '../app/dom.js';
+import { h, clear, setAttr, toggleClass } from '../app/dom.js';
 import { api, ApiError } from '../app/api.js';
 import type { FeatureView } from '../app/api.js';
 import { getState, setState, setParam, paramsOf, setParams, toast, featureView, jobById } from '../app/store.js';
@@ -77,8 +77,16 @@ export async function renderGeneratePage(host: HTMLElement): Promise<void> {
   }
 
   /* ---- 参数取值初始化 ---- */
+  // 绑了云端预设时，用预设推荐的取值盖掉功能默认值。
+  // 同一个功能挂不同预设，合适的默认值能差很远：「质感加强」默认重绘幅度 0.22 是对的，
+  // 但挂上局部重绘就意味着遮罩区几乎不变 —— 用户点了生成什么也没发生。
+  // 这些值照常显示在参数面板里，用户随时能改，不是背着他改。
   if (!getState().paramValues[view.id]) {
-    setParams(view.id, { ...(view.defaults as Record<string, unknown>) });
+    const preset = rhPresetByWorkflowId(view.binding?.remoteWorkflowId ?? '');
+    setParams(view.id, {
+      ...(view.defaults as Record<string, unknown>),
+      ...(preset?.paramDefaults ?? {})
+    });
   }
 
   /* ---- 图像输入 ---- */
@@ -194,9 +202,9 @@ export async function renderGeneratePage(host: HTMLElement): Promise<void> {
 
   function updateSubmitState(): void {
     const reason = blockingReason();
-    submitBtn.toggleAttribute('disabled', !!reason);
+    setAttr(submitBtn, 'disabled', !!reason);
     submitReason.textContent = reason ?? `将使用 ${view!.providerId ?? '默认后端'}${view!.workflowName ? ` · ${view!.workflowName}` : ''}`;
-    submitReason.classList.toggle('err', !!reason);
+    toggleClass(submitReason, 'err', !!reason);
   }
   updateSubmitState();
 

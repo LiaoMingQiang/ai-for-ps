@@ -17,7 +17,8 @@ import {
   isActive,
   findFeature,
   renderLayerName,
-  breadcrumb
+  breadcrumb,
+  rhPresetByWorkflowId
 } from '@psai/shared';
 import type {
   JobRecord,
@@ -40,7 +41,8 @@ import type { PromptStore } from '../prompts.js';
 import type { WorkflowStore } from '../workflows/store.js';
 import type { ProviderManager } from '../providers/manager.js';
 import type { EventHub } from '../events.js';
-import type { InputImage, RemoteState } from '../providers/types.js';
+import type { InputImage, RemoteState, ProviderAdapter } from '../providers/types.js';
+import { parseImageMeta } from '../image-meta.js';
 import { resolveJobParams, reversePresetOf, wantsEnhance } from './resolve.js';
 import type { ResolveOptions } from './resolve.js';
 
@@ -55,6 +57,12 @@ interface RunningEntry {
 
 const UNKNOWN_GRACE_MS = 45_000;
 const POLL_INTERVAL_MS = 1200;
+/**
+ * 提交遇到远端队列已满时的退避节奏（毫秒）。
+ * 云端一个任务通常跑几十秒到两三分钟，所以退避拉到分钟级才有意义，
+ * 每两秒重试一次只会把限流打得更死。总共等约 6 分钟还排不上就如实报失败。
+ */
+const SUBMIT_RETRY_DELAYS_MS = [5_000, 15_000, 30_000, 60_000, 120_000, 120_000];
 
 export class JobEngine {
   private queue: string[] = [];
@@ -242,11 +250,13 @@ export class JobEngine {
     const inputs = this.inputsOf(jobId);
     const images: InputImage[] = inputs.map((i) => {
       const rec = this.assets.get(i.assetId);
+      const buffer = this.assets.read(i.assetId);
       return {
         paramId: i.paramId,
         index: i.index,
-        buffer: this.assets.read(i.assetId),
+        buffer,
         mime: rec.mime,
+        hasAlpha: parseImageMeta(buffer)?.hasAlpha ?? false,
         // 用内容哈希命名，不要用任务 id。
         // ComfyUI 会把整份 prompt（含输入文件名）写进输出 PNG 的元数据，
         // 文件名带任务 id 会让同输入同参数的两次运行产出不同字节，
@@ -282,7 +292,16 @@ export class JobEngine {
     if (primary && primary.width > 0 && primary.height > 0) {
       opts.inputSize = { width: primary.width, height: primary.height };
     }
-    const resolved = resolveJobParams(feature, job.params, this.prompts, opts);
+    // 云端预设可以给出比功能默认值更合适的取值。
+    // 例：「质感加强」的重绘幅度默认 0.22（保结构，对它自己是对的），
+    // 但挂上 Flux Fill 局部重绘时 0.22 意味着遮罩区几乎没变化 —— 用户会以为插件坏了。
+    // 只填补用户没给的键，用户填过的一律以用户为准。
+    const presetDefaults = rhPresetByWorkflowId(this.settings.binding(job.featureId)?.remoteWorkflowId ?? '')
+      ?.paramDefaults;
+    const paramsWithPresetDefaults = presetDefaults
+      ? { ...presetDefaults, ...stripUndefined(job.params) }
+      : job.params;
+    const resolved = resolveJobParams(feature, paramsWithPresetDefaults, this.prompts, opts);
     this.db
       .prepare('UPDATE jobs SET resolved_params_json = ?, updated_at = ? WHERE id = ?')
       .run(JSON.stringify({ ...resolved.values, __promptBreakdown: resolved.promptBreakdown }), Date.now(), jobId);
@@ -313,7 +332,7 @@ export class JobEngine {
 
     const started = Date.now();
     this.db.prepare('UPDATE jobs SET started_at = ? WHERE id = ?').run(started, jobId);
-    const submitted = await adapter.submit(ctx);
+    const submitted = await this.submitWithBackoff(adapter, ctx, jobId);
     this.db.prepare('UPDATE jobs SET remote_id = ? WHERE id = ?').run(submitted.remoteId, jobId);
     this.transition(jobId, 'submitted', `远端任务 ${submitted.remoteId}`);
 
@@ -329,6 +348,43 @@ export class JobEngine {
       entry.unsubscribe = adapter.subscribe(submitted.remoteId, (p) => this.setProgress(jobId, p));
     }
     this.schedulePoll(jobId, submitted.remoteId, started);
+  }
+
+  /**
+   * 提交时遇到「限流 / 远端队列已满」不该判死，要退避重试。
+   *
+   * RunningHub 的 NORMAL 账号同时只允许跑一个任务，第二个提交会收到 TASK_QUEUE_MAXED。
+   * 那不是失败，是"再等等"—— 直接判失败的话，用户看到的是一次莫名其妙的报错，
+   * 手动重试一下又好了，这种失败最消耗信任。
+   *
+   * 只对可重试的错误码退避；鉴权失败、额度耗尽、绑定错误这些重试多少次都是一样的结果，
+   * 立刻抛出去让用户看到真正的原因。
+   */
+  private async submitWithBackoff(
+    adapter: ProviderAdapter,
+    ctx: Parameters<ProviderAdapter['submit']>[0],
+    jobId: string
+  ): Promise<Awaited<ReturnType<ProviderAdapter['submit']>>> {
+    const delays = SUBMIT_RETRY_DELAYS_MS;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await adapter.submit(ctx);
+      } catch (e) {
+        const shape = toErrorShape(e);
+        const canWait = shape.code === 'PROVIDER_RATE_LIMIT' && attempt < delays.length;
+        if (!canWait) throw e;
+        const wait = delays[attempt]!;
+        this.log.info('远端队列已满，退避后重试提交', { jobId, attempt: attempt + 1, waitMs: wait });
+        this.setProgress(jobId, {
+          ...emptyProgressRecord(`远端队列已满，${Math.round(wait / 1000)} 秒后重试（第 ${attempt + 1} 次）`),
+          value: null
+        });
+        await new Promise((r) => setTimeout(r, wait));
+        if (this.running.get(jobId)?.cancelled || this.stopped) {
+          throw new PsaiError('JOB_CANCELLED', '等待远端队列期间任务已取消');
+        }
+      }
+    }
   }
 
   private schedulePoll(jobId: string, remoteId: string, startedAt: number): void {
@@ -940,4 +996,16 @@ function extOf(mime: string): string {
   if (mime === 'image/jpeg') return 'jpg';
   if (mime === 'image/webp') return 'webp';
   return 'png';
+}
+
+/**
+ * 去掉值为 undefined 的键。
+ *
+ * 展开合并时 `{...defaults, ...user}` 里 user 的 undefined 会把 default 打掉，
+ * 结果是"用户什么都没填，默认值也没了"。这个函数保证只有真正给了值的键才参与覆盖。
+ */
+function stripUndefined(obj: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(obj)) if (v !== undefined) out[k] = v;
+  return out;
 }

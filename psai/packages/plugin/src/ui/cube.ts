@@ -11,7 +11,7 @@
 
 import { describeCamera, CAMERA_YAW_STEP, CAMERA_PITCH_STEP, CUBE_FACE_LABELS, normalizeYaw, clampInt } from '@psai/shared';
 import type { CameraValue, CameraDescriptor } from '@psai/shared';
-import { h, svgEl, clear } from '../app/dom.js';
+import { h, svgEl, clear, toggleClass } from '../app/dom.js';
 
 type Vec3 = [number, number, number];
 
@@ -207,7 +207,7 @@ export function createCameraCube(opts: CubeOptions): { el: HTMLElement; setValue
     nameField.appendChild(h('label', { class: 'cube-label' }, '视角名称'));
     nameField.appendChild(h('div', { class: 'cube-name' }, d.name));
 
-    root.classList.toggle('is-risky', d.stability === 'C');
+    toggleClass(root, 'is-risky', d.stability === 'C');
     let warn = root.querySelector('.cube-warn');
     if (d.stability === 'C') {
       if (!warn) {

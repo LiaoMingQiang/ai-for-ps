@@ -10,8 +10,8 @@
  * 这一点必须诚实，否则用户以为取消了却继续被扣费。
  */
 
-import { PsaiError, toErrorShape } from '@psai/shared';
-import type { JobProgress, ProviderCapability } from '@psai/shared';
+import { PsaiError, toErrorShape, rhPresetByWorkflowId } from '@psai/shared';
+import type { JobProgress, ProviderCapability, ComfyApiGraph } from '@psai/shared';
 import type {
   ProviderAdapter,
   SubmitContext,
@@ -23,6 +23,8 @@ import type {
 } from './types.js';
 import { emptyProgress } from './types.js';
 import { httpFetch, jsonOf, normalizeBaseUrl, codeForStatus, buildMultipart, ensureOk } from './http.js';
+import { bindingsToNodeInfoList } from '../workflows/bindings.js';
+import type { BindingValues } from '../workflows/bindings.js';
 import type { Logger } from '../log.js';
 
 export interface RunningHubOptions {
@@ -41,13 +43,18 @@ interface RhEnvelope<T> {
 export class RunningHubAdapter implements ProviderAdapter {
   readonly id = 'runninghub';
 
+  /** workflowId → 云端 API 格式图；进程内缓存，updateOptions 时清空 */
+  private graphCache = new Map<string, ComfyApiGraph>();
+
   constructor(
     private opts: RunningHubOptions,
     private readonly log: Logger
   ) {}
 
   updateOptions(opts: RunningHubOptions): void {
+    const keyChanged = opts.apiKey !== this.opts.apiKey || opts.baseUrl !== this.opts.baseUrl;
     this.opts = opts;
+    if (keyChanged) this.graphCache.clear();
   }
 
   private base(): string {
@@ -87,12 +94,15 @@ export class RunningHubAdapter implements ProviderAdapter {
     const json = await jsonOf<RhEnvelope<T>>(res, url);
     if (json.code !== undefined && json.code !== 0) {
       const msg = json.msg ?? `code=${json.code}`;
-      const code = /key|auth|token/i.test(msg)
-        ? 'PROVIDER_AUTH_FAILED'
-        : /balance|quota|余额|额度/i.test(msg)
-          ? 'PROVIDER_QUOTA_EXCEEDED'
-          : /limit|频繁|排队/i.test(msg)
-            ? 'PROVIDER_RATE_LIMIT'
+      // TASK_QUEUE_MAXED 是 RunningHub 的并发上限（NORMAL 账号同时只能跑 1 个任务）。
+      // 它不是错误，是"再等等"—— 必须归到可重试那一类，否则第二个任务会直接判死，
+      // 而用户看到的是一次莫名其妙的失败，重试一下又好了。
+      const code = /TASK_QUEUE_MAXED|limit|频繁|排队|too many|busy/i.test(msg)
+        ? 'PROVIDER_RATE_LIMIT'
+        : /key|auth|token/i.test(msg)
+          ? 'PROVIDER_AUTH_FAILED'
+          : /balance|quota|余额|额度|coins/i.test(msg)
+            ? 'PROVIDER_QUOTA_EXCEEDED'
             : 'PROVIDER_BAD_RESPONSE';
       throw new PsaiError(code, `RunningHub: ${msg}`);
     }
@@ -155,26 +165,84 @@ export class RunningHubAdapter implements ProviderAdapter {
     return name;
   }
 
+  /**
+   * 拉云端工作流的 ComfyUI API 格式图。
+   *
+   * 有了真图才能在提交前校验绑定、复用本地那套变换逻辑，
+   * 并且只把**真正改动过**的字段放进 nodeInfoList。
+   * 同一个 workflowId 在进程内缓存，避免每次提交都多打一次接口。
+   */
+  private async remoteGraph(workflowId: string): Promise<ComfyApiGraph> {
+    const cached = this.graphCache.get(workflowId);
+    if (cached) return cached;
+    const data = await this.post<{ prompt?: string }>('/api/openapi/getJsonApiFormat', { workflowId });
+    if (!data.prompt) {
+      throw new PsaiError('PROVIDER_BAD_RESPONSE', `RunningHub 没有返回工作流 ${workflowId} 的 API 格式图`);
+    }
+    let graph: ComfyApiGraph;
+    try {
+      graph = JSON.parse(data.prompt) as ComfyApiGraph;
+    } catch {
+      throw new PsaiError('PROVIDER_BAD_RESPONSE', `RunningHub 返回的工作流 ${workflowId} 不是合法 JSON`);
+    }
+    this.graphCache.set(workflowId, graph);
+    return graph;
+  }
+
   async submit(ctx: SubmitContext): Promise<SubmitResult> {
     this.requireConfigured();
     const workflowId = ctx.remoteWorkflowId || this.opts.defaultWorkflowId;
     if (!workflowId) {
-      throw new PsaiError('WORKFLOW_NOT_BOUND', 'RunningHub 需要先在设置里填写云端工作流 ID');
+      throw new PsaiError('WORKFLOW_NOT_BOUND', 'RunningHub 需要先在设置里选一个云端工作流预设，或填写工作流 ID');
     }
 
-    // 输入图先传上去，再按绑定表把 fileName 写进对应节点
-    const uploaded: Record<string, string> = {};
+    // 绑定表的来源，优先级很关键：
+    //   1. 内置预设 —— 节点号是对着云端真图核对过的，最可靠
+    //   2. 用户自己导入的工作流的绑定表 —— 只有当他的本地工作流就是这份云端工作流时才成立
+    // 两者都没有就必须报错。空的 nodeInfoList 提交上去 RunningHub 会照跑不误，
+    // 用作者预置的示例图出一张图 —— 那是一张跟用户输入毫无关系、却看起来"成功了"的图，
+    // 这种假成功比直接失败危险得多。
+    const preset = rhPresetByWorkflowId(workflowId);
+    const bindings = preset?.bindings ?? ctx.workflow?.bindings ?? [];
+    if (bindings.length === 0) {
+      throw new PsaiError(
+        'WORKFLOW_NOT_BOUND',
+        `云端工作流 ${workflowId} 没有参数绑定表。它不是内置预设，也没有对应的本地工作流绑定 —— ` +
+          `直接提交会让云端拿作者的示例图出图，结果和你的输入无关。请在设置里选一个内置预设，或先导入这份工作流并完成绑定。`
+      );
+    }
+
+    if (preset?.needsMask && !ctx.inputs.some((i) => i.hasAlpha)) {
+      throw new PsaiError(
+        'JOB_PARAM_INVALID',
+        `「${preset.label}」靠输入图的 alpha 通道识别处理区域，但这次的输入图没有透明通道。` +
+          `请在 Photoshop 里先建立选区（或给图层加蒙版）再提交。`
+      );
+    }
+
+    // 输入图先传上去，拿到云端文件名再按绑定落位
+    const values: BindingValues = { ...ctx.params };
     for (const img of ctx.inputs) {
-      uploaded[`${img.paramId}[${img.index}]`] = await this.uploadImage(img.buffer, img.filename, img.mime);
-      if (img.index === 0) uploaded[img.paramId] = uploaded[`${img.paramId}[${img.index}]`]!;
+      const name = await this.uploadImage(img.buffer, img.filename, img.mime);
+      for (const key of imageAliases(img.paramId, img.index)) values[key] = name;
     }
 
-    // nodeInfoList 来自本地工作流的绑定表：告诉云端要覆盖哪些节点的哪些字段
-    const nodeInfoList: Array<{ nodeId: string; fieldName: string; fieldValue: unknown }> = [];
-    for (const b of ctx.workflow?.bindings ?? []) {
-      const value = uploaded[b.paramId] ?? ctx.params[b.paramId];
-      if (value === undefined || value === null || value === '') continue;
-      nodeInfoList.push({ nodeId: b.nodeId, fieldName: b.input, fieldValue: value });
+    const graph = await this.remoteGraph(workflowId);
+    const { nodeInfoList, report } = bindingsToNodeInfoList(graph, bindings, values);
+    if (report.skipped.length) {
+      this.log.debug('部分云端绑定被跳过', { jobId: ctx.jobId, workflowId, skipped: report.skipped });
+    }
+    // 图必须真的落进去了，否则又是"跑作者的示例图"那种假成功
+    const imageBindings = bindings.filter((b) => b.paramId === 'image' || b.paramId.startsWith('image['));
+    if (ctx.inputs.length > 0 && imageBindings.length > 0) {
+      const landed = nodeInfoList.some((n) => imageBindings.some((b) => b.nodeId === n.nodeId && b.input === n.fieldName));
+      if (!landed) {
+        throw new PsaiError(
+          'WORKFLOW_BINDING_INVALID',
+          `输入图没能写进云端工作流 ${workflowId} 的任何节点，提交会变成用作者的示例图出图。` +
+            `多半是云端作者改了图，请运行 npm run verify:rh 复核绑定。`
+        );
+      }
     }
 
     const data = await this.post<{ taskId?: string; taskStatus?: string }>(
@@ -183,6 +251,13 @@ export class RunningHubAdapter implements ProviderAdapter {
       Math.max(this.opts.timeoutMs, 60_000)
     );
     if (!data.taskId) throw new PsaiError('PROVIDER_BAD_RESPONSE', 'RunningHub 没有返回 taskId');
+    this.log.info('RunningHub 已提交', {
+      jobId: ctx.jobId,
+      workflowId,
+      preset: preset?.id ?? '(自定义绑定)',
+      taskId: data.taskId,
+      覆盖字段数: nodeInfoList.length
+    });
     return { remoteId: data.taskId };
   }
 
@@ -259,4 +334,31 @@ function hostOf(base: string): string {
   } catch {
     return '';
   }
+}
+
+/**
+ * 一张输入图在绑定表里可能被叫成什么。
+ *
+ * 内置预设是按**语义**写绑定的（第一张图叫 image，第二张参考图叫 reference），
+ * 而功能目录里同一个位置可能叫 image、images、background……
+ * 云端预设要能挂到不同功能上，就得让这些名字互相认得。
+ *
+ * 只做别名，不做猜测：第 0 张永远是主图，第 1 张永远是参考图/背景图，
+ * 位置语义是稳定的，不会把两张图弄反。
+ */
+function imageAliases(paramId: string, index: number): string[] {
+  const keys = new Set<string>([`${paramId}[${index}]`]);
+  if (index === 0) {
+    keys.add(paramId);
+    keys.add('image');
+    keys.add('images');
+    keys.add('image[0]');
+    keys.add('images[0]');
+  } else if (index === 1) {
+    keys.add('reference');
+    keys.add('background');
+    keys.add('image[1]');
+    keys.add('images[1]');
+  }
+  return [...keys];
 }

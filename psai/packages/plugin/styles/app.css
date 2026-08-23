@@ -1418,7 +1418,8 @@ body {
   font-weight: 600;
 }
 .binding-row .select,
-.binding-row .input {
+.binding-row .input,
+.binding-row .rh-picker {
   flex: 1 1 130px;
   min-width: 0;
 }
@@ -1736,4 +1737,49 @@ summary:focus-visible {
 }
 .offline-diag-row.err span {
   color: var(--err);
+}
+
+/* ---------- RunningHub 云端工作流选择器 ---------- */
+/* 绑定表格的「工作流 / 模型」这一列原本只放一个控件，
+   云端这一列要多带一段预设说明，所以让它纵向堆叠。 */
+.rh-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.rh-custom {
+  font-family: var(--mono, "Cascadia Mono", Consolas, monospace);
+}
+
+.rh-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.rh-meta {
+  color: var(--text-3);
+}
+
+.warn-text {
+  color: var(--warn);
+}
+
+.btn-link {
+  align-self: flex-start;
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--info);
+  font-size: 11px;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.btn-link:hover {
+  color: var(--text);
 }

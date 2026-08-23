@@ -155,3 +155,41 @@ export function validateBindings(graph: ComfyApiGraph, bindings: readonly ParamB
   }
   return problems;
 }
+
+/** RunningHub 的 nodeInfoList 一条。 */
+export interface NodeInfo {
+  nodeId: string;
+  fieldName: string;
+  fieldValue: unknown;
+}
+
+/**
+ * 把绑定表变成 RunningHub 的 nodeInfoList。
+ *
+ * 做法是先在云端工作流的真实图上跑一遍 applyBindings，再和原图做差 ——
+ * 这样节点存在性校验、连线输入保护、以及 sizeWidth / linear / appendText
+ * 这些变换，云端和本地走的是同一套代码，不会两边行为不一致。
+ *
+ * 只有真正被改动的字段才会进 nodeInfoList：没变的值没必要覆盖，
+ * 覆盖了反而在云端作者调整默认值时把用户锁死在旧值上。
+ */
+export function bindingsToNodeInfoList(
+  graph: ComfyApiGraph,
+  bindings: readonly ParamBinding[],
+  values: BindingValues
+): { nodeInfoList: NodeInfo[]; report: ApplyReport } {
+  const { graph: applied, report } = applyBindings(graph, bindings, values);
+  const nodeInfoList: NodeInfo[] = [];
+  const seen = new Set<string>();
+  for (const b of bindings) {
+    const key = `${b.nodeId}\u0000${b.input}`;
+    if (seen.has(key)) continue;
+    const before = graph[b.nodeId]?.inputs?.[b.input];
+    const after = applied[b.nodeId]?.inputs?.[b.input];
+    if (after === undefined || Array.isArray(after)) continue;
+    if (before === after) continue;
+    seen.add(key);
+    nodeInfoList.push({ nodeId: b.nodeId, fieldName: b.input, fieldValue: after });
+  }
+  return { nodeInfoList, report };
+}

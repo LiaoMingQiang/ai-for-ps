@@ -3,11 +3,23 @@
  * 所有设置的真相源都在 Helper，这里只是编辑器。
  */
 
-import { COMFY_MODE_LABELS, COMFY_MODES, COMFY_MODE_HINTS, WRITEBACK_MODE_LABELS, WRITEBACK_MODES, breadcrumb } from '@psai/shared';
+import {
+  COMFY_MODE_LABELS,
+  COMFY_MODES,
+  COMFY_MODE_HINTS,
+  WRITEBACK_MODE_LABELS,
+  WRITEBACK_MODES,
+  breadcrumb,
+  RUNNINGHUB_PRESETS,
+  RH_CATEGORY_LABELS,
+  rhPresetsForFeature,
+  rhPresetByWorkflowId,
+  rhPostUrl
+} from '@psai/shared';
 import type { AppSettings, WritebackMode, ComfyMode } from '@psai/shared';
-import { h, clear, formatBytes } from '../app/dom.js';
+import { h, clear, formatBytes, toggleClass } from '../app/dom.js';
 import { api, ApiError, clearToken, ensurePaired, CLIENT_VERSION } from '../app/api.js';
-import type { ProviderView, WorkflowSummary } from '../app/api.js';
+import type { ProviderView, WorkflowSummary, FeatureView } from '../app/api.js';
 import { getState, setState, toast } from '../app/store.js';
 import * as bridge from '../ps/bridge.js';
 
@@ -336,15 +348,7 @@ async function renderBindings(host: HTMLElement): Promise<void> {
       }
       detailControl = wfSelect;
     } else if (f.providerId === 'runninghub') {
-      detailControl = h('input', {
-        class: 'input',
-        type: 'text',
-        placeholder: '云端工作流 ID',
-        value: f.binding?.remoteWorkflowId ?? '',
-        onchange: async (e: Event) => {
-          await api.setBinding(f.id, { remoteWorkflowId: (e.target as HTMLInputElement).value.trim() });
-        }
-      });
+      detailControl = renderRunningHubPicker(f);
     } else {
       detailControl = h('input', {
         class: 'input',
@@ -605,7 +609,7 @@ function providerCard(p: ProviderView, host: HTMLElement): HTMLElement {
       onclick: async (e: Event) => {
         const next = !(e.currentTarget as HTMLElement).classList.contains('on');
         await api.patchProvider(p.id, { enabled: next });
-        (e.currentTarget as HTMLElement).classList.toggle('on', next);
+        toggleClass(e.currentTarget as HTMLElement, 'on', next);
       }
     }
   );
@@ -782,7 +786,7 @@ async function renderDefaults(host: HTMLElement, settings: AppSettings): Promise
         'aria-checked': String(g.autoWriteback),
         onclick: async (e: Event) => {
           const next = !(e.currentTarget as HTMLElement).classList.contains('on');
-          (e.currentTarget as HTMLElement).classList.toggle('on', next);
+          toggleClass(e.currentTarget as HTMLElement, 'on', next);
           await patch({ generation: { ...g, autoWriteback: next } });
         }
       }),
@@ -934,4 +938,93 @@ async function renderAbout(host: HTMLElement): Promise<void> {
   );
 
   host.appendChild(card('关于与诊断', ...rows));
+}
+
+/**
+ * RunningHub 云端工作流选择器。
+ *
+ * 以前这里是个纯文本框，让用户自己去 runninghub.cn 抄一串 19 位数字 —— 抄对了也未必能用：
+ * 云端工作流不带参数绑定表，我们不知道该把图和提示词写进哪个节点，
+ * 提交上去只会拿作者的示例图出图，出来一张跟用户输入毫无关系却"成功了"的图。
+ * 所以默认给内置预设（节点绑定都对着云端真图核对过），
+ * 手填 ID 作为高级选项保留，但会明确提示它需要自行完成绑定。
+ */
+function renderRunningHubPicker(f: FeatureView): HTMLElement {
+  const wrap = h('div', { class: 'rh-picker' });
+  const current = f.binding?.remoteWorkflowId ?? '';
+  const recommended = rhPresetsForFeature(f.id);
+  const others = RUNNINGHUB_PRESETS.filter((p) => !recommended.includes(p));
+  const known = rhPresetByWorkflowId(current);
+  const isCustom = !!current && !known;
+
+  const select = h('select', { class: 'input select' }) as HTMLSelectElement;
+  const addOption = (value: string, label: string, selected: boolean): void => {
+    const opt = h('option', { value }, label) as HTMLOptionElement;
+    if (selected) opt.setAttribute('selected', '');
+    select.appendChild(opt);
+  };
+
+  addOption('', '未绑定', !current);
+  if (recommended.length) {
+    for (const p of recommended) addOption(p.workflowId, `★ ${p.label}`, p.workflowId === current);
+  }
+  for (const p of others) addOption(p.workflowId, `${RH_CATEGORY_LABELS[p.category]} · ${p.label}`, p.workflowId === current);
+  addOption('__custom__', '自定义工作流 ID…', isCustom);
+
+  const detail = h('div', { class: 'rh-detail muted' });
+  const customInput = h('input', {
+    class: 'input rh-custom',
+    type: 'text',
+    placeholder: '云端工作流 ID（19 位数字）'
+  }) as HTMLInputElement;
+  customInput.value = isCustom ? current : '';
+
+  const paint = (): void => {
+    const v = select.value;
+    const showCustom = v === '__custom__';
+    toggleClass(customInput, 'hidden', !showCustom);
+    clear(detail);
+    if (showCustom) {
+      detail.appendChild(
+        h(
+          'span',
+          { class: 'warn-text' },
+          '自定义工作流没有内置绑定表：需要先在「工作流」里导入同一份图并完成参数绑定，否则提交会被拦下。'
+        )
+      );
+      return;
+    }
+    const p = rhPresetByWorkflowId(v);
+    if (!p) return;
+    detail.appendChild(h('div', {}, p.description));
+    const bits = [`${p.nodeCount} 节点`, p.stack];
+    if (p.needsMask) bits.push('需要选区/蒙版（输入图必须带透明通道）');
+    detail.appendChild(h('div', { class: 'rh-meta' }, bits.join(' · ')));
+    detail.appendChild(
+      h(
+        'button',
+        {
+          class: 'btn-link',
+          type: 'button',
+          onclick: () => openExternal(rhPostUrl(p.workflowId))
+        },
+        '在 RunningHub 查看这个工作流'
+      )
+    );
+  };
+
+  select.addEventListener('change', () => {
+    paint();
+    if (select.value === '__custom__') return;
+    void api.setBinding(f.id, { remoteWorkflowId: select.value });
+  });
+  customInput.addEventListener('change', () => {
+    void api.setBinding(f.id, { remoteWorkflowId: customInput.value.trim() });
+  });
+
+  wrap.appendChild(select);
+  wrap.appendChild(customInput);
+  wrap.appendChild(detail);
+  paint();
+  return wrap;
 }
