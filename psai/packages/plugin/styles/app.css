@@ -167,7 +167,7 @@ body {
   flex: 1 1 auto;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 10px 10px 90px;
+  padding: 10px 10px 14px;
   display: flex;
   flex-direction: column;
   gap: var(--gap);
@@ -1082,12 +1082,24 @@ body {
 
 /* ---------------- 底部提交 ---------------- */
 
+/*
+ * 主行动按钮那一行。
+ *
+ * 它现在挂在 .action-host 上 —— 根节点的一个固定行，在滚动区外面。
+ * 以前是 position: sticky + margin-bottom: -90px 钉在 page-host 底部：
+ * 浏览器里没问题，但 UXP 不支持 sticky，退化成 static 之后那条负边距
+ * 又把可滚动高度吃掉了 90px，于是在 Photoshop 里怎么滚都滚不到这个按钮。
+ * 参数一多就完全没有入口可以提交。
+ *
+ * 所以这里不再用任何"看起来固定"的技巧，它本来就不在滚动区里。
+ */
+.action-host {
+  flex: none;
+  border-top: 1px solid var(--line);
+  background: var(--bg-2);
+}
 .submitbar {
-  position: sticky;
-  bottom: 0;
-  margin: 4px -10px -90px;
   padding: 9px 10px 11px;
-  background: linear-gradient(180deg, rgba(30, 31, 34, 0) 0%, var(--bg) 26%);
   display: flex;
   flex-direction: column;
   gap: 4px;

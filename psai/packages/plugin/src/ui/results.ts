@@ -105,7 +105,10 @@ export function renderResults(opts: ResultsOptions): HTMLElement {
       clear(stage);
       const r = job.results[i]!;
       const img = h('img', { class: 'result-img', alt: `结果 ${i + 1}` }) as HTMLImageElement;
-      void assetImgSrc(r.assetId).then((src) => (img.src = src));
+      // 主图和下面的前后对比是同一张图，转一次两处共用。
+      // assetImgSrc 内部也有缓存，这里显式复用是为了让意图明确。
+      const srcPromise = assetImgSrc(r.assetId);
+      void srcPromise.then((src) => (img.src = src));
       stage.appendChild(img);
       stage.appendChild(h('div', { class: 'result-meta muted' }, `${r.width}×${r.height}`));
 
@@ -115,7 +118,7 @@ export function renderResults(opts: ResultsOptions): HTMLElement {
         const before = h('img', { class: 'compare-before', src: opts.inputPreview, alt: '原图' });
         const afterWrap = h('div', { class: 'compare-after-wrap' });
         const after = h('img', { class: 'compare-after', alt: '结果' }) as HTMLImageElement;
-        void assetImgSrc(r.assetId).then((src) => (after.src = src));
+        void srcPromise.then((src) => (after.src = src));
         afterWrap.appendChild(after);
         const handle = h('div', { class: 'compare-handle' });
         compare.appendChild(before);

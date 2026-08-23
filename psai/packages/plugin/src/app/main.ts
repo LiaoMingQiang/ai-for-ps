@@ -19,7 +19,7 @@ import {
 import { getState, setState, subscribe, upsertJob, toast, dismissToast, resetStore } from './store.js';
 import * as bridge from '../ps/bridge.js';
 import { renderTopNav } from '../ui/nav.js';
-import { renderGeneratePage } from '../ui/page-generate.js';
+import { renderGeneratePage, refreshGenerateResults, detachGenerateResults } from '../ui/page-generate.js';
 import { renderHistoryPage } from '../ui/page-history.js';
 import { renderSettingsPage } from '../ui/page-settings.js';
 import { renderComfyWebPage } from '../ui/page-comfyweb.js';
@@ -290,6 +290,14 @@ export async function mountMainPanel(root: HTMLElement): Promise<void> {
   const statusHost = h('div', { class: 'status-host' });
   const navHost = h('div', { class: 'nav-host' });
   const pageHost = h('main', { class: 'page-host' });
+  // 主行动按钮放在滚动区**外面**，永远可见。
+  //
+  // 之前它在 page-host 里靠 position: sticky 钉在底部 —— 浏览器里没问题，
+  // 但 UXP 不支持 sticky，退化成 static 之后又被那条 -90px 的负边距吃掉了
+  // 可滚动高度，于是在 Photoshop 里怎么滚都滚不到「开始处理」这个按钮。
+  // 参数一多就完全没有入口可以提交，这是致命的。
+  // 现在它是根节点的一个固定行，不参与滚动，结构上就不可能再消失。
+  const actionHost = h('div', { class: 'action-host' });
   const toastHost = h('div', { class: 'toast-host' });
 
   clear(root);
@@ -297,6 +305,7 @@ export async function mountMainPanel(root: HTMLElement): Promise<void> {
   root.appendChild(statusHost);
   root.appendChild(navHost);
   root.appendChild(pageHost);
+  root.appendChild(actionHost);
   root.appendChild(toastHost);
 
   const goSettings = (): void => setState({ page: 'settings' });
@@ -315,13 +324,17 @@ export async function mountMainPanel(root: HTMLElement): Promise<void> {
     try {
       const page = getState().page;
       clear(pageHost);
+      // 只有生成页有主行动按钮，切页时先清掉，免得别的页面底下挂着一个上一页的按钮
+      clear(actionHost);
+      // 上一版生成页的 DOM 已经被 clear 掉了，别再让外部拿着它的重画回调
+      detachGenerateResults();
       if (!getState().health.online) {
         pageHost.appendChild(offlineNotice());
         return;
       }
       switch (page) {
         case 'generate':
-          await renderGeneratePage(pageHost);
+          await renderGeneratePage(pageHost, actionHost);
           break;
         case 'history':
           await renderHistoryPage(pageHost);
@@ -335,6 +348,7 @@ export async function mountMainPanel(root: HTMLElement): Promise<void> {
       }
     } catch (e) {
       clear(pageHost);
+      clear(actionHost);
       pageHost.appendChild(
         h('div', { class: 'notice warn' }, '页面渲染出错：', String(e instanceof Error ? e.message : e))
       );
@@ -361,8 +375,11 @@ export async function mountMainPanel(root: HTMLElement): Promise<void> {
     void paintPage();
   });
   const unsubJobs = subscribe(['jobs', 'activeJobId'], () => {
-    // 生成页正在跟踪的任务变了才重绘，避免历史页刷新时整页闪
-    if (getState().page === 'generate') void paintPage();
+    if (getState().page !== 'generate') return;
+    // 只重画结果区。整页重建会把正在输入的提示词、刚选好的图和立方体角度全冲掉，
+    // 而生成过程中这个订阅一秒会触发好几次。
+    // 万一生成页还没登记回调（刚切过来、还在渲染），才退回整页重绘。
+    if (!refreshGenerateResults()) void paintPage();
   });
   const unsubToast = subscribe(['toasts'], paintToasts);
 

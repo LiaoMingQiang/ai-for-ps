@@ -338,3 +338,65 @@ test('用量接口真的在汇总 usage 表，「关于」页会把它显示出�
   assert.match(host.textContent, /用量/, '关于页应该显示用量');
   dom.root.removeChild(host);
 });
+
+test('生成页的主行动按钮在滚动区外面，参数再多也不用滚就能看到', async () => {
+  // 以前它在 page-host 里靠 position: sticky 钉底部：浏览器没问题，
+  // 但 UXP 不支持 sticky，退化成 static 之后又被 -90px 的负边距吃掉了可滚动高度，
+  // 在 Photoshop 里怎么滚都滚不到「开始处理」，等于没有提交入口。
+  const { features } = await ui.api.features();
+  ui.setState({ features });
+  // 挑一个参数最多的功能，最能暴露"要滚很久"的问题
+  const rich = features.find((f) => f.id === 'comfy.relight.adaptive') ?? features[0];
+  ui.setState({ featureId: rich.id, activeJobId: null });
+
+  const host = dom.document.createElement('div');
+  const actionHost = dom.document.createElement('div');
+  dom.root.appendChild(host);
+  dom.root.appendChild(actionHost);
+  await ui.renderGeneratePage(host, actionHost);
+
+  const bar = actionHost.querySelector('.submitbar');
+  assert.ok(bar, '主行动按钮必须挂在滚动区外面的 actionHost 上');
+  assert.equal(host.querySelector('.submitbar'), null, '滚动区里不该再有一份');
+
+  const btn = actionHost.querySelectorAll('button').find((b) => b.classList.contains('btn-submit'));
+  assert.ok(btn, '找不到提交按钮');
+  assert.match(btn.textContent, /开始/, `按钮文案应说明这一步做什么，实际：${btn.textContent}`);
+
+  dom.root.removeChild(host);
+  dom.root.removeChild(actionHost);
+});
+
+test('没有 actionHost 时按钮退回画在页面里，不会凭空消失', async () => {
+  const { features } = await ui.api.features();
+  ui.setState({ features, featureId: features[0].id, activeJobId: null });
+  const host = dom.document.createElement('div');
+  dom.root.appendChild(host);
+  await ui.renderGeneratePage(host);
+  assert.ok(host.querySelector('.submitbar'), '不传 actionHost 时必须退回画在 host 里');
+  dom.root.removeChild(host);
+});
+
+test('云端功能即使没有显式绑定，也能解析出可用的 Provider', async () => {
+  // /v1/features 以前自己算 providerId，少了「按能力挑一个已配置 Provider」的兜底，
+  // 于是没绑定过的云端功能一律被判成「未配置任何闭源模型 Provider」并禁用 ——
+  // 而提交路径其实是能跑通的。界面说不能用、后端说能用，两边各算各的。
+  await ui.api.setCredentials('comfly', { apiKey: 'sk-FAKEtest0000000000000000' });
+  await ui.api.patchProvider('comfly', { enabled: true });
+
+  const { features } = await ui.api.features();
+  // 只看**没有显式绑定**的云端功能 —— 这正是当初出问题的那一类。
+  // 显式绑到某个没配 Key 的后端上而不可用，是正确行为，不该混进来。
+  const cloud = features.filter((f) => f.branch === 'cloud' && !f.binding?.providerId);
+  assert.ok(cloud.length > 0, '前置条件：应该有没绑定过的云端功能');
+
+  const unresolved = cloud.filter((f) => !f.providerId);
+  assert.deepEqual(
+    unresolved.map((f) => f.id),
+    [],
+    `配了闭源 Provider 之后，这些云端功能仍然解析不出后端：${unresolved.map((f) => f.id).join(', ')}`
+  );
+  // 解析得出来，生成页才会去拉模型列表 —— 否则模型下拉永远停在「尚未拉取模型列表」
+  const notReady = cloud.filter((f) => !f.ready).map((f) => `${f.id}: ${f.reason}`);
+  assert.deepEqual(notReady, [], `这些未绑定的云端功能应该可用：${notReady.join(' | ')}`);
+});

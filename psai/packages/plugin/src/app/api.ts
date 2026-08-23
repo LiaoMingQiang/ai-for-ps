@@ -440,9 +440,10 @@ export const api = {
   },
 
   /** 取资产字节（写回时需要落到临时文件） */
-  assetBytes: async (assetId: string): Promise<ArrayBuffer> => {
+  assetBytes: async (assetId: string, opts: { thumb?: boolean } = {}): Promise<ArrayBuffer> => {
     const t = await loadToken();
-    const res = await fetch(`${BASE}/v1/assets/${encodeURIComponent(assetId)}`, {
+    const q = opts.thumb ? '?thumb=1' : '';
+    const res = await fetch(`${BASE}/v1/assets/${encodeURIComponent(assetId)}${q}`, {
       headers: t ? { Authorization: `Bearer ${t}` } : {}
     });
     if (!res.ok) throw new ApiError({ code: 'ASSET_NOT_FOUND', message: '取结果失败', retryable: false }, res.status);
@@ -450,16 +451,54 @@ export const api = {
   }
 };
 
-/** 带 token 的资产 URL，供 <img src> 使用（UXP 的 img 不带 Authorization 头）。 */
-export async function assetImgSrc(assetId: string): Promise<string> {
-  const buf = await api.assetBytes(assetId);
-  const bytes = new Uint8Array(buf);
-  let bin = '';
-  const chunk = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunk) {
-    bin += String.fromCharCode(...bytes.subarray(i, i + chunk));
+/**
+ * 资产的 data URI，供 <img src> 使用（UXP 的 img 带不了 Authorization 头，只能内联）。
+ *
+ * 这里是面板卡顿的老巢，两条都要守住：
+ *
+ * 1. **缩略图必须走 thumb**。历史页一屏几十个 46×46 的小方块，
+ *    以前每个都在拉原图 —— 实测平均 1.59MB、最大 15.4MB（Photoshop 按文档位深导出，
+ *    16 位/通道的 PSD 出来就是这么大），转成 base64 还要再涨三分之一。
+ *    Helper 侧缩过之后同一张图是 55KB，小了 280 倍。
+ *
+ * 2. **转换结果要缓存**。同一个 assetId 在一次会话里会被反复渲染
+ *    （切页、状态更新、前后对比要用两次），每次重转纯属白烧 CPU。
+ *    资产是内容寻址的，同一个 id 的字节永远不变，缓存不会过期。
+ */
+const imgSrcCache = new Map<string, Promise<string>>();
+
+/** 缓存上限：按最大的缩略图算也就几十兆，够用又不会无限涨。 */
+const IMG_CACHE_MAX = 200;
+
+export async function assetImgSrc(assetId: string, opts: { thumb?: boolean } = {}): Promise<string> {
+  const key = `${assetId}${opts.thumb ? ':t' : ''}`;
+  const hit = imgSrcCache.get(key);
+  if (hit) return hit;
+
+  const task = (async () => {
+    const buf = await api.assetBytes(assetId, opts);
+    const bytes = new Uint8Array(buf);
+    let bin = '';
+    // 8KB 一段。以前是 32KB 并且用 String.fromCharCode(...chunk) 展开 ——
+    // 三万多个参数的展开既慢又有爆栈风险，改成逐字节拼更稳。
+    const chunk = 0x2000;
+    for (let i = 0; i < bytes.length; i += chunk) {
+      const end = Math.min(i + chunk, bytes.length);
+      let part = '';
+      for (let j = i; j < end; j++) part += String.fromCharCode(bytes[j]!);
+      bin += part;
+    }
+    return `data:image/png;base64,${btoa(bin)}`;
+  })();
+
+  if (imgSrcCache.size >= IMG_CACHE_MAX) {
+    const oldest = imgSrcCache.keys().next().value;
+    if (oldest !== undefined) imgSrcCache.delete(oldest);
   }
-  return `data:image/png;base64,${btoa(bin)}`;
+  imgSrcCache.set(key, task);
+  // 失败的不要留在缓存里，否则一次网络抖动会让这张图永远加载不出来
+  task.catch(() => imgSrcCache.delete(key));
+  return task;
 }
 
 /* ---------------- WebSocket ---------------- */

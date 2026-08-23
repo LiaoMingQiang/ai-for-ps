@@ -39,6 +39,8 @@ import type { JobEngine } from './jobs/engine.js';
 import type { EventHub } from './events.js';
 import { readGpuInfo } from './gpu.js';
 import { ComfyUiAdapter } from './providers/comfyui.js';
+import { join } from 'node:path';
+import { thumbnailFor } from './thumbs.js';
 
 export interface ServerDeps {
   cfg: HelperConfig;
@@ -358,7 +360,9 @@ export async function buildServer(d: ServerDeps): Promise<FastifyInstance> {
     const statuses = new Map(d.providers.allStatus().map((s) => [s.id, s]));
     const features = allFeatures().map((f) => {
       const b = bindings.find((x) => x.featureId === f.id) ?? null;
-      const providerId = b?.providerId ?? (f.engine === 'comfy-workflow' ? 'comfyui' : null);
+      // 用和提交时同一套解析，别再自己算一遍 —— 两边算法不同就会出现
+      // 「界面说这个功能不能用，实际提交却跑得通」这种自相矛盾的状态。
+      const providerId = d.providers.resolveProviderIdOrNull(f.id);
       const ps = providerId ? statuses.get(providerId) : undefined;
       const workflowId = b?.workflowId ?? f.defaultWorkflowId;
       const wf = workflowId ? d.workflows.find(workflowId) : null;
@@ -565,6 +569,23 @@ export async function buildServer(d: ServerDeps): Promise<FastifyInstance> {
     try {
       const { id } = req.params as { id: string };
       const rec = d.assets.get(id);
+
+      // ?thumb=1 给缩略图。历史页一屏几十个 46×46 的小方块，
+      // 以前每个都在拉原图（平均 1.59MB、最大 15.4MB）再由插件在 UXP 的
+      // JS 线程上转 base64 —— 面板卡顿掉帧就是这么来的。
+      // 缩放放在这边做，只做一次、结果落盘缓存。
+      if ((req.query as { thumb?: string }).thumb) {
+        const thumb = thumbnailFor(d.assets.absPathOf(rec), join(d.cfg.dataDir, 'thumbs'), rec.sha256);
+        if (thumb) {
+          return reply
+            .header('Content-Type', thumb.mime)
+            // 内容寻址：同一个 id 的缩略图永远不会变，可以放心长缓存
+            .header('Cache-Control', 'private, max-age=604800, immutable')
+            .send(thumb.bytes);
+        }
+        // 缩不动就老老实实发原图，不返回一张错的图
+      }
+
       return reply.header('Content-Type', rec.mime).header('Cache-Control', 'private, max-age=3600').send(d.assets.read(id));
     } catch (e) {
       return fail(reply, e);

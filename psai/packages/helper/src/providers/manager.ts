@@ -174,6 +174,28 @@ export class ProviderManager {
    * 1) 有绑定用绑定；2) comfy 类功能只认 ComfyUI，不回退云端；
    * 3) 闭源功能按注册表顺序取第一个"已启用+已配置+能力匹配"的。
    */
+  /**
+   * 这个功能实际会用哪个 Provider —— 解析不出来就返回 null，不抛。
+   *
+   * 存在的理由：`/v1/features` 以前自己算了一遍
+   *   `binding?.providerId ?? (comfy 就用 comfyui : null)`
+   * 少了 resolveProvider 里那段「没绑定就按能力挑一个已配置的闭源 Provider」的兜底。
+   * 于是没显式绑定过的云端功能一律被判成「未配置任何闭源模型 Provider」并禁用，
+   * 可实际上提交是能跑通的 —— 界面说不能用、后端说能用，两边各算各的。
+   *
+   * 更糟的是生成页靠 view.providerId 去拉模型列表，它是 null 就整段跳过，
+   * 模型下拉永远停在「尚未拉取模型列表」。设置里明明已经拉到模型了。
+   *
+   * 所以判定和执行必须共用同一套解析，这个方法就是那份唯一事实源。
+   */
+  resolveProviderIdOrNull(featureId: string): string | null {
+    try {
+      return this.resolveProvider(featureId).providerId;
+    } catch {
+      return null;
+    }
+  }
+
   resolveProvider(featureId: string, override?: string): { providerId: string; feature: FeatureSpec } {
     const feature = findFeature(featureId);
     if (!feature) throw new PsaiError('JOB_PARAM_INVALID', `未知功能: ${featureId}`);

@@ -59,6 +59,8 @@ interface PsDocument {
   selection?: PsSelection;
   duplicate(name?: string, mergeLayersOnly?: boolean): Promise<PsDocument>;
   mergeVisibleLayers(): Promise<void>;
+  /** 改色彩模式；降位深前要先确保是 RGB，否则某些模式下不允许改 */
+  changeMode?(mode: unknown): Promise<void>;
   close(save?: unknown): Promise<void>;
   saveAs: { png(entry: unknown, opts?: unknown, asCopy?: boolean): Promise<void> };
 }
@@ -310,7 +312,16 @@ async function captureWith(
   const ctx = readContext(srcDoc)!;
 
   return core!.executeAsModal(async () => {
-    const copy = await srcDoc.duplicate(`psai_snap_${uid()}`, true);
+    // duplicate 的第二个参数是 merge：传 true 会把副本拍平成一个合并图层。
+    // 拍平之后原来的图层 id 就都不存在了，「当前图层」那条路径
+    // 拿 id 去副本里找必然找不到，永远报「目标图层在快照副本中不可见」。
+    //
+    // 三条捕获路径其实都不需要它拍平：
+    //   当前图层   —— 自己 hideAll 再单独打开要的那几层
+    //   合并可见   —— 自己调 mergeVisibleLayers()
+    //   当前选区   —— 同上，再按选区裁剪
+    // 而且导出 PNG 本来就会把可见内容压平。所以这里一律不合并。
+    const copy = await srcDoc.duplicate(`psai_snap_${uid()}`);
     try {
       await prepare(copy, ctx);
 
@@ -332,6 +343,23 @@ async function captureWith(
           ],
           {}
         );
+      }
+
+      // 快照统一降到 8 位/通道再导出。
+      //
+      // Photoshop 是按文档位深导出 PNG 的：16 位/通道的 PSD 出来的快照是 16 位 PNG，
+      // 实测一张 2048×3640 就有 15.4MB，正好是 8 位的两倍。
+      // 而下游没有一个环节吃得到这多出来的一倍 —— ComfyUI、RunningHub、
+      // 各家闭源模型全都在 8 位上工作，多出来的字节一路占着上传带宽、
+      // 占着资产库、还要在面板上转成更长的 base64。
+      // 这里降一次，整条链路都轻一半。
+      try {
+        if (Math.round(copy.bitsPerChannel ?? 8) > 8) {
+          await copy.changeMode?.(constants!['ChangeMode']?.['RGB'] ?? 'RGB');
+          copy.bitsPerChannel = 8;
+        }
+      } catch {
+        // 降不了就照原样导出：宁可大一点，也不能因为这一步把整次捕获弄失败
       }
 
       const folder = await localFileSystem!.getDataFolder();

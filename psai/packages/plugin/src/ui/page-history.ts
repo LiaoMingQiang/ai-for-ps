@@ -78,7 +78,9 @@ export async function renderHistoryPage(host: HTMLElement): Promise<void> {
   async function load(): Promise<void> {
     clear(listHost);
     listHost.appendChild(h('div', { class: 'muted pad' }, '正在载入…'));
-    const query: Record<string, string | number> = { limit: 200 };
+    // 一次 200 条意味着一屏要渲染两百个缩略图。改成 60 条 ——
+    // 面板本来就是窄栏，再多也翻不完，而渲染成本是实打实的。
+    const query: Record<string, string | number> = { limit: 60 };
     if (filters.state) query['state'] = filters.state;
     if (filters.featureId) query['featureId'] = filters.featureId;
     if (filters.currentDocOnly) {
@@ -114,7 +116,8 @@ export async function renderHistoryPage(host: HTMLElement): Promise<void> {
     const thumb = h('div', { class: 'hist-thumb' });
     if (job.results[0]) {
       const img = h('img', { alt: '' }) as HTMLImageElement;
-      void assetImgSrc(job.results[0].assetId).then((src) => (img.src = src));
+      // 46×46 的小方块用缩略图就够了，别去拉十几兆的原图
+      void assetImgSrc(job.results[0].assetId, { thumb: true }).then((src) => (img.src = src));
       thumb.appendChild(img);
     } else {
       thumb.appendChild(h('span', { class: 'hist-thumb-none' }, '—'));

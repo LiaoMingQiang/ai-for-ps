@@ -102,6 +102,11 @@ export class AssetStore {
     return rowToAsset(row);
   }
 
+  /** 资产在磁盘上的绝对路径（缩略图生成要直接读它）。 */
+  absPathOf(rec: { relPath: string }): string {
+    return join(this.assetsDir, rec.relPath);
+  }
+
   find(id: string): AssetRecord | null {
     const row = this.db.prepare('SELECT * FROM assets WHERE id = ?').get(id) as Record<string, unknown> | undefined;
     return row ? rowToAsset(row) : null;

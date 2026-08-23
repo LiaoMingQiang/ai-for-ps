@@ -77,7 +77,8 @@ export function createImageInput(
     setBusy('上传中…');
     try {
       const asset = await api.uploadAsset(bytes, name);
-      const previewSrc = await assetImgSrc(asset.id);
+      // 输入区的预览框也就一百多像素高，同样用缩略图
+      const previewSrc = await assetImgSrc(asset.id, { thumb: true });
       const picked: PickedImage = {
         assetId: asset.id,
         width: asset.width,

@@ -23,7 +23,30 @@ let currentImages: Record<string, PickedImage[]> = {};
 let runtimeOptions: Record<string, string[]> = {};
 let presetCache: Record<string, ParamContext['presets']> = {};
 
-export async function renderGeneratePage(host: HTMLElement): Promise<void> {
+/**
+ * 只重画「结果」那一块的回调，由当前挂载的生成页登记。
+ *
+ * 作业状态每变一次就整页重建是不行的：生成过程中 WebSocket 进度事件加上
+ * 1.2 秒一轮的轮询，一秒能来好几次，而整页重建要重新渲染导航、图像输入、
+ * 全部参数控件和那个 SVG 立方体 —— 面板卡顿、掉帧就是这么来的，
+ * 顺带还会把正在输入的提示词和刚选好的图冲掉。
+ * 任务变化真正会影响的只有结果区和提交按钮的可用状态，重画这两块就够了。
+ */
+let repaintResults: (() => void) | null = null;
+
+/** 作业更新时调用：只刷新结果区，不动页面其余部分。返回是否真的刷新了。 */
+export function refreshGenerateResults(): boolean {
+  if (!repaintResults) return false;
+  repaintResults();
+  return true;
+}
+
+/**
+ * @param host       滚动区，参数面板和结果都画在这里
+ * @param actionHost 滚动区外面那一行，放主行动按钮。不传就退回画在 host 末尾
+ *                   （页面渲染冒烟测试是这么用的，那里没有面板外壳）。
+ */
+export async function renderGeneratePage(host: HTMLElement, actionHost?: HTMLElement): Promise<void> {
   const state = getState();
   const view = featureView(state.featureId);
 
@@ -177,11 +200,25 @@ export async function renderGeneratePage(host: HTMLElement): Promise<void> {
   }
   paintResults();
 
-  /* ---- 底部提交 ---- */
-  const submitBtn = h('button', { class: 'btn-primary btn-submit', type: 'button' }, '开始处理');
+  // 登记给外部：任务更新时只重画这一块
+  repaintResults = () => {
+    paintResults();
+    updateSubmitState();
+  };
+
+  /* ---- 主行动按钮 ---- */
+  // 按钮上直接写清楚这一步要做什么，而不是笼统的「开始处理」——
+  // 用户传完图之后要一眼看到"接下来点这里"。
+  const submitBtn = h('button', { class: 'btn-primary btn-submit', type: 'button' }, `开始${view.label}`);
   const submitReason = h('div', { class: 'submit-reason muted' });
   const bar = h('div', { class: 'submitbar' }, submitBtn, submitReason);
-  host.appendChild(bar);
+  // 优先挂到滚动区外面那一行，保证参数再多也不用滚动就能看到它
+  if (actionHost) {
+    clear(actionHost);
+    actionHost.appendChild(bar);
+  } else {
+    host.appendChild(bar);
+  }
 
   function blockingReason(): string | null {
     const s = getState();
@@ -366,6 +403,11 @@ async function ensureRuntimeOptions(view: FeatureView): Promise<void> {
       runtimeOptions = { ...runtimeOptions, models: [] };
     }
   }
+}
+
+/** 生成页被换下去时调用，免得外部还拿着一个指向已销毁 DOM 的回调。 */
+export function detachGenerateResults(): void {
+  repaintResults = null;
 }
 
 /** 切换功能时重置该页的一次性状态。 */
