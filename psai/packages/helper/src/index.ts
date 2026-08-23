@@ -151,7 +151,15 @@ export async function startHelper(overrides: Partial<HelperConfig> = {}): Promis
   const server = app.server;
   events.attach(server as unknown as ReturnType<typeof createServer>);
 
-  const url = `http://${cfg.host === '0.0.0.0' ? '127.0.0.1' : cfg.host}:${cfg.port}`;
+  // 端口以**实际绑上的**为准，不是以配置里写的为准。
+  // 配 0 的时候由系统分配一个空闲端口（测试要的就是这个：写死端口时，
+  // 上一次跑崩留下的进程会一直占着，后面每次跑都报 EADDRINUSE）。
+  // 配置里写死的端口这里拿到的就是同一个值，行为不变。
+  const addr = server.address();
+  const boundPort = addr && typeof addr === 'object' ? addr.port : cfg.port;
+  cfg.port = boundPort;
+
+  const url = `http://${cfg.host === '0.0.0.0' ? '127.0.0.1' : cfg.host}:${boundPort}`;
   log.info(`Helper 已就绪 ${url}`);
 
   // 启动就探一次 ComfyUI，否则 /v1/health 在有人主动测试之前一直报"离线"，

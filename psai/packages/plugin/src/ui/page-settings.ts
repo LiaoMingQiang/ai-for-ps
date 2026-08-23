@@ -14,10 +14,13 @@ import {
   RH_CATEGORY_LABELS,
   rhPresetsForFeature,
   rhPresetByWorkflowId,
-  rhPostUrl
+  rhPostUrl,
+  findProvider,
+  BINDABLE_PARAMS,
+  SEMANTIC_TO_PARAM
 } from '@psai/shared';
 import type { AppSettings, WritebackMode, ComfyMode } from '@psai/shared';
-import { h, clear, formatBytes, toggleClass } from '../app/dom.js';
+import { h, clear, formatBytes, formatDuration, formatTime, toggleClass } from '../app/dom.js';
 import { api, ApiError, clearToken, ensurePaired, CLIENT_VERSION } from '../app/api.js';
 import type { ProviderView, WorkflowSummary, FeatureView } from '../app/api.js';
 import { getState, setState, toast } from '../app/store.js';
@@ -522,7 +525,32 @@ function workflowRow(w: WorkflowSummary, host: HTMLElement): HTMLElement {
       '依赖检查'
     )
   );
+  // 绑定编辑只对导入的工作流开放：内置工作流的绑定是随内置图一起版本化的，
+  // 让用户改它等于改出厂配置，出了问题谁也说不清是哪一版的行为。
+  const editorHost = h('div', { class: 'wf-bindings-host hidden' });
   if (w.source === 'imported') {
+    let loaded = false;
+    actions.appendChild(
+      h(
+        'button',
+        {
+          class: 'btn-ghost',
+          type: 'button',
+          onclick: async (e: Event) => {
+            const btn = e.currentTarget as HTMLElement;
+            const open = editorHost.classList.contains('hidden');
+            toggleClass(editorHost, 'hidden', !open);
+            btn.textContent = open ? '收起绑定' : '参数绑定';
+            if (open && !loaded) {
+              loaded = true;
+              clear(editorHost);
+              editorHost.appendChild(await renderBindingEditor(w, host));
+            }
+          }
+        },
+        '参数绑定'
+      )
+    );
     actions.appendChild(
       h(
         'button',
@@ -558,7 +586,8 @@ function workflowRow(w: WorkflowSummary, host: HTMLElement): HTMLElement {
       ),
       w.notes ? h('div', { class: 'muted wf-notes' }, w.notes) : null
     ),
-    actions
+    actions,
+    editorHost
   );
 }
 
@@ -904,6 +933,20 @@ async function renderAbout(host: HTMLElement): Promise<void> {
     rows.push(kv('系统信息', '读取失败', 'err'));
   }
 
+  // 用量：本地跑还是云端跑，用户是靠这组数字决定的
+  try {
+    const usage = await api.usage();
+    if (usage.length > 0) {
+      for (const u of usage) {
+        const label = findProvider(u.providerId)?.label ?? u.providerId;
+        const gpuPart = u.gpuMs > 0 ? ` · GPU 累计 ${formatDuration(u.gpuMs)}` : '';
+        rows.push(kv(`用量 · ${label}`, `${u.runs} 次${gpuPart} · 最近 ${formatTime(u.lastAt)}`));
+      }
+    }
+  } catch {
+    /* 用量读不到不影响别的信息，静默跳过 */
+  }
+
   const gpu = state.gpu;
   if (gpu) {
     rows.push(
@@ -1027,4 +1070,109 @@ function renderRunningHubPicker(f: FeatureView): HTMLElement {
   wrap.appendChild(detail);
   paint();
   return wrap;
+}
+
+/**
+ * 导入工作流的参数绑定编辑器。
+ *
+ * 导入时扫描器会**猜**一套绑定（按节点类型和字段名猜语义）。猜得不错，
+ * 但猜错的时候后果很隐蔽：那个参数的滑杆照样显示、照样能拖，
+ * 提交时却落不到任何节点上 —— 一个转不动的旋钮，正是本项目第一条纪律要杜绝的。
+ *
+ * 后端一直有 PUT /v1/workflows/:id/bindings 可以存修正后的绑定，
+ * 只是界面上没有入口，用户没法改。这里把入口补上。
+ *
+ * 交互方向是「一行一个可写字段，选它由哪个参数驱动」，
+ * 而不是「一行一个参数，选它写到哪个节点」—— 因为可写字段是工作流客观存在的，
+ * 而参数列表是我们定义的；顺着客观的那一侧列，用户不会看到不存在的选项。
+ */
+async function renderBindingEditor(w: WorkflowSummary, host: HTMLElement): Promise<HTMLElement> {
+  const box = h('div', { class: 'wf-bindings' });
+  box.appendChild(h('div', { class: 'muted' }, '正在读取工作流…'));
+
+  try {
+    const record = await api.workflow(w.id);
+    const scan = await api.scanWorkflow(record.graph);
+    clear(box);
+
+    if (scan.fields.length === 0) {
+      box.appendChild(h('div', { class: 'muted' }, '这份工作流里没有扫描到可绑定的字段。'));
+      return box;
+    }
+
+    // nodeId.input → 当前绑到哪个参数
+    const current = new Map<string, string>();
+    for (const b of record.bindings) current.set(`${b.nodeId}.${b.input}`, b.paramId);
+
+    const picks = new Map<string, string>();
+    const rows = h('div', { class: 'wf-binding-rows' });
+
+    for (const f of scan.fields) {
+      const key = `${f.nodeId}.${f.input}`;
+      const preset = current.get(key) ?? (f.semantic ? SEMANTIC_TO_PARAM[f.semantic] : undefined) ?? '';
+      picks.set(key, preset);
+
+      const select = h('select', { class: 'input select' }) as HTMLSelectElement;
+      const addOpt = (value: string, label: string): void => {
+        const o = h('option', { value }, label) as HTMLOptionElement;
+        if (value === preset) o.setAttribute('selected', '');
+        select.appendChild(o);
+      };
+      addOpt('', '不绑定（用工作流里的固定值）');
+      for (const p of BINDABLE_PARAMS) addOpt(p.id, p.label);
+      select.addEventListener('change', () => picks.set(key, select.value));
+
+      rows.appendChild(
+        h(
+          'div',
+          { class: 'wf-binding-row' },
+          h(
+            'div',
+            { class: 'wf-binding-field' },
+            h('div', { class: 'wf-binding-node' }, `节点 ${f.nodeId} · ${f.input}`),
+            h('div', { class: 'muted wf-binding-sub' }, `${f.classType}${f.title && f.title !== f.classType ? ` · ${f.title}` : ''} · 当前值 ${JSON.stringify(f.value).slice(0, 40)}`)
+          ),
+          select
+        )
+      );
+    }
+
+    const status = h('div', { class: 'muted' });
+    const saveBtn = h(
+      'button',
+      {
+        class: 'btn-primary',
+        type: 'button',
+        onclick: async () => {
+          const bindings = [...picks.entries()]
+            .filter(([, paramId]) => paramId)
+            .map(([key, paramId]) => {
+              const dot = key.lastIndexOf('.');
+              return { paramId, nodeId: key.slice(0, dot), input: key.slice(dot + 1), required: false };
+            });
+          try {
+            const saved = await api.saveWorkflowBindings(w.id, bindings);
+            status.className = 'ok';
+            status.textContent = `已保存 ${saved.bindings.length} 条绑定`;
+            toast('绑定已保存', `${saved.name} · ${saved.bindings.length} 条`);
+            await renderSettingsPage(host.parentElement as HTMLElement);
+          } catch (e) {
+            status.className = 'err';
+            status.textContent = e instanceof ApiError ? e.display : String(e);
+          }
+        }
+      },
+      '保存绑定'
+    );
+
+    box.appendChild(
+      h('div', { class: 'muted' }, `扫描到 ${scan.fields.length} 个可写字段。留空表示这个字段用工作流里的固定值。`)
+    );
+    box.appendChild(rows);
+    box.appendChild(h('div', { class: 'row gap' }, saveBtn, status));
+  } catch (e) {
+    clear(box);
+    box.appendChild(h('div', { class: 'err' }, e instanceof ApiError ? e.display : String(e)));
+  }
+  return box;
 }

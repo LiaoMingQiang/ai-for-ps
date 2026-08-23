@@ -19,12 +19,15 @@ import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { build } from 'esbuild';
+import { DatabaseSync } from 'node:sqlite';
 
 import { startHelper } from '../../helper/dist/index.js';
 import { installUxpDom } from './uxp-dom.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const PORT = 34214;
+// 端口用 0 让系统分配：写死端口时，上一次跑崩留下的进程会一直占着，
+// 后面每次 npm test 都报 EADDRINUSE，看起来像测试坏了，其实是环境脏了。
+let PORT = 0;
 
 let helper;
 let dataDir;
@@ -42,7 +45,7 @@ async function bundlePagesForTest(outfile) {
       "export { renderHistoryPage } from '../src/ui/page-history.js';",
       "export { renderSettingsPage } from '../src/ui/page-settings.js';",
       "export { renderComfyWebPage } from '../src/ui/page-comfyweb.js';",
-      "export { setState, getState } from '../src/app/store.js';",
+      "export { setState, getState, paramsOf, setParams } from '../src/app/store.js';",
       "export { api, useHelperAt } from '../src/app/api.js';"
     ].join('\n'),
     'utf8'
@@ -85,7 +88,8 @@ async function bundlePagesForTest(outfile) {
 
 before(async () => {
   dataDir = mkdtempSync(join(tmpdir(), 'psai-pages-'));
-  helper = await startHelper({ port: PORT, dataDir, workflowsDir: resolve(here, '../../../workflows') });
+  helper = await startHelper({ port: 0, dataDir, workflowsDir: resolve(here, '../../../workflows') });
+  PORT = Number(new URL(helper.url).port);
 
   dom = installUxpDom();
 
@@ -205,5 +209,132 @@ test('设置页在绑定 RunningHub 时画出预设选择器而不是裸输入�
   const text = picker.textContent;
   assert.ok(text.includes('BiRefNet'), `选择器里应显示预设名，实际：${text.slice(0, 120)}`);
   assert.ok(text.includes('节点'), '应显示节点数等元信息');
+  dom.root.removeChild(host);
+});
+
+test('token 失效时请求层会自动重新配对并重放，而不是一直 401', async () => {
+  // 装一个假 token，模拟「Helper 换过数据目录 / 用户点过重新配对」之后的状态
+  ui.useHelperAt(`http://127.0.0.1:${PORT}`, 'this-token-is-not-in-the-database');
+
+  // 这一句以前会抛 HELPER_UNAUTHORIZED：/v1/health 免鉴权所以状态条显示已连接，
+  // 但每个卡片都是「未配对或配对已失效」，界面说连上了、功能全是坏的。
+  const settings = await ui.api.settings();
+  assert.ok(settings?.comfy, '自动重配对后应该能正常拿到设置');
+
+  // 重放用的必须是新换来的 token，不是那个假的
+  const jobs = await ui.api.jobs({ limit: 1 });
+  assert.ok(Array.isArray(jobs), '重新配对后其它接口也应该可用');
+});
+
+test('并发的多个 401 只会触发一次重新配对', async () => {
+  const countPairings = () => {
+    const db = new DatabaseSync(join(dataDir, 'psai.sqlite'), { readOnly: true });
+    try {
+      return db.prepare('SELECT COUNT(*) AS n FROM pairing WHERE revoked = 0').get().n;
+    } finally {
+      db.close();
+    }
+  };
+
+  const before = countPairings();
+  ui.useHelperAt(`http://127.0.0.1:${PORT}`, 'another-bogus-token');
+
+  // 六个请求同时撞上 401。每个各配一次的话会凭空多出六条配对记录，
+  // 数据库里堆一堆没人用的长期 token —— 既是垃圾也是攻击面。
+  const results = await Promise.all([
+    ui.api.settings(),
+    ui.api.providers(),
+    ui.api.workflows(),
+    ui.api.features(),
+    ui.api.jobs({ limit: 1 }),
+    ui.api.settings()
+  ]);
+  assert.ok(results.every((r) => r !== undefined && r !== null), '六个请求都应该成功');
+  assert.equal(countPairings(), before + 1, `六个并发 401 只该产生 1 条新配对，实际多了 ${countPairings() - before} 条`);
+});
+
+test('导入的工作流可以在设置页改参数绑定，并且真的存回后端', async () => {
+  // 造一份最小可用的 API 格式工作流：一个 LoadImage + 一个 CLIPTextEncode + SaveImage
+  const graph = {
+    1: { class_type: 'LoadImage', inputs: { image: 'sample.png', upload: 'image' } },
+    2: { class_type: 'CLIPTextEncode', inputs: { text: '一只猫' } },
+    3: { class_type: 'KSampler', inputs: { seed: 1, steps: 20, cfg: 7, denoise: 1, sampler_name: 'euler', scheduler: 'normal' } },
+    4: { class_type: 'SaveImage', inputs: { filename_prefix: 'x', images: ['1', 0] } }
+  };
+  const imported = await ui.api.importWorkflow(graph, '绑定编辑器测试用');
+  const id = imported.workflow.id;
+
+  // 扫描器先猜一套绑定
+  const before = await ui.api.workflow(id);
+  assert.ok(before.bindings.length > 0, '导入时应该自动带上扫描器猜的绑定');
+
+  // 用户把「重绘幅度」改绑到 KSampler.denoise，并把提示词那条去掉
+  const corrected = [
+    { paramId: 'image', nodeId: '1', input: 'image', required: false },
+    { paramId: 'denoise', nodeId: '3', input: 'denoise', required: false },
+    { paramId: 'steps', nodeId: '3', input: 'steps', required: false }
+  ];
+  const saved = await ui.api.saveWorkflowBindings(id, corrected);
+  assert.equal(saved.bindings.length, 3, '保存后的绑定条数应该是 3');
+
+  const after = await ui.api.workflow(id);
+  const keys = after.bindings.map((b) => `${b.paramId}->${b.nodeId}.${b.input}`).sort();
+  assert.deepEqual(keys, ['denoise->3.denoise', 'image->1.image', 'steps->3.steps'], `实际存下来的是 ${keys.join(', ')}`);
+  assert.ok(!after.bindings.some((b) => b.paramId === 'prompt'), '被用户去掉的提示词绑定不该还在');
+
+  await ui.api.deleteWorkflow(id);
+});
+
+test('绑定编辑器只对导入的工作流出现，内置工作流不给改', async () => {
+  const workflows = await ui.api.workflows();
+  const builtin = workflows.find((w) => w.source === 'builtin');
+  const host = dom.document.createElement('div');
+  dom.root.appendChild(host);
+  await ui.renderSettingsPage(host);
+  const tab = host.querySelectorAll('.subtab').find((b) => b.textContent === '工作流');
+  tab.dispatchEvent({ type: 'click' });
+  await new Promise((r) => setTimeout(r, 400));
+
+  assert.ok(builtin, '前置条件：应该有内置工作流');
+  const rows = host.querySelectorAll('.wf-row');
+  assert.ok(rows.length > 0, '工作流列表应该有内容');
+  // 内置工作流那一行不该有「参数绑定」按钮
+  const builtinRow = rows.find((r) => r.textContent.includes(builtin.name) && r.textContent.includes('内置'));
+  assert.ok(builtinRow, '找不到内置工作流那一行');
+  assert.ok(!builtinRow.textContent.includes('参数绑定'), '内置工作流不该出现参数绑定入口');
+  dom.root.removeChild(host);
+});
+
+test('用量接口真的在汇总 usage 表，「关于」页会把它显示出来', async () => {
+  // usage 表以前只写不读 —— 一直在长大，界面上却没有任何地方能看到。
+  // 这里既验接口的聚合是对的，也验「关于」页确实消费了它。
+  const db = new DatabaseSync(join(dataDir, 'psai.sqlite'));
+  try {
+    const ins = db.prepare('INSERT INTO usage(job_id, provider_id, at, gpu_ms, note) VALUES(?, ?, ?, ?, ?)');
+    ins.run('job_a', 'comfyui', 1000, 5000, '本地 GPU 时长');
+    ins.run('job_b', 'comfyui', 2000, 7000, '本地 GPU 时长');
+    ins.run('job_c', 'runninghub', 3000, null, '云端调用');
+  } finally {
+    db.close();
+  }
+
+  const usage = await ui.api.usage();
+  const comfy = usage.find((u) => u.providerId === 'comfyui');
+  const rh = usage.find((u) => u.providerId === 'runninghub');
+  assert.ok(comfy, '应该聚合出 comfyui 一行');
+  assert.equal(comfy.runs, 2, 'comfyui 应该是 2 次');
+  assert.equal(comfy.gpuMs, 12000, 'GPU 时长应该累加成 12000');
+  assert.equal(comfy.lastAt, 2000, '最近一次应该取最大的 at');
+  assert.ok(rh, '应该聚合出 runninghub 一行');
+  assert.equal(rh.gpuMs, 0, '云端没有本地 GPU 时长，SUM(NULL) 要归零而不是 null');
+
+  // 「关于」页必须真的把它画出来
+  const host = dom.document.createElement('div');
+  dom.root.appendChild(host);
+  await ui.renderSettingsPage(host);
+  const tab = host.querySelectorAll('.subtab').find((b) => b.textContent === '关于');
+  tab.dispatchEvent({ type: 'click' });
+  await new Promise((r) => setTimeout(r, 400));
+  assert.match(host.textContent, /用量/, '关于页应该显示用量');
   dom.root.removeChild(host);
 });

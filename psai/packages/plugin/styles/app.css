@@ -1783,3 +1783,117 @@ summary:focus-visible {
 .btn-link:hover {
   color: var(--text);
 }
+
+/* ============================================================
+   UXP flexbox 修正：纵向容器里的子项一律不许压缩
+   ============================================================
+
+   浏览器里 flex 子项有一条「自动最小尺寸」规则（min-height: auto），
+   内容再多也不会被压到比内容还矮。**UXP 没有实现这条规则。**
+
+   于是同一份 CSS 在浏览器里好好的，装进 Photoshop 就变成：
+   历史页几十条记录被按比例压扁到刚好塞满可视区，每行只剩几个像素高，
+   文字全部溢出、上下重叠成一团；设置页的推荐平台卡片同理。
+   症状很好认 —— 内容不多不少正好填满一屏、没有滚动条、文字互相压着。
+
+   我们的布局没有任何一处需要纵向压缩：该滚动的是 .page-host，
+   它内部的东西都应该保持自然高度然后滚动。所以统一把 flex-shrink 关掉。
+
+   这里逐个列出容器而不是写 `* { flex-shrink: 0 }`，是因为 flex-shrink
+   作用在主轴上：横向容器（比如 .hist-main）确实需要子项能横向收缩，
+   .hist-meta 靠它才能配合 min-width: 0 做出省略号。一刀切会把那个弄坏。 */
+
+.page-host > *,
+.featnav > *,
+.card > *,
+.params > *,
+.param-list > *,
+.param > *,
+.prompt-box > *,
+.aspect > *,
+.preset > *,
+.cube > *,
+.cube-badge > *,
+.cube-field > *,
+.writeback > *,
+.submitbar > *,
+.errbox > *,
+.offline > *,
+.offline-diag > *,
+.offline-diag-row > *,
+.settings-body > *,
+.setting > *,
+.provider > *,
+.bindings > *,
+.wf-list > *,
+.wf-import > *,
+.preset-list > *,
+.history-list > *,
+.hist-row > *,
+.hist-detail > *,
+.prompt-breakdown > *,
+.rh-picker > *,
+.rh-detail > *,
+.toasts > *,
+.toast > * {
+  flex-shrink: 0;
+}
+
+/* .page-host 自己是唯一该被压缩的那个：它要缩到状态条和导航剩下的空间里，
+   然后在内部滚动。min-height: 0 是让 flex 子项真的能滚起来的那把钥匙。 */
+.page-host {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* ---------- 导入工作流的参数绑定编辑器 ---------- */
+.wf-row {
+  flex-wrap: wrap;
+}
+.wf-bindings-host {
+  flex: 1 1 100%;
+  min-width: 0;
+}
+.wf-bindings {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding-top: 7px;
+  border-top: 1px solid var(--line-soft);
+  font-size: 11.5px;
+}
+.wf-bindings > * {
+  flex-shrink: 0;
+}
+.wf-binding-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.wf-binding-rows > * {
+  flex-shrink: 0;
+}
+.wf-binding-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.wf-binding-field {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.wf-binding-row .select {
+  flex: 0 1 190px;
+  min-width: 0;
+}
+.wf-binding-node {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-2);
+}
+.wf-binding-sub {
+  font-size: 10.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

@@ -21,6 +21,8 @@ import type {
   FeatureBinding,
   ScanResult,
   DependencyReport,
+  WorkflowRecord,
+  ParamBinding,
   PsaiErrorShape
 } from '@psai/shared';
 
@@ -202,7 +204,47 @@ export async function clearToken(): Promise<void> {
 
 /* ---------------- 请求 ---------------- */
 
-async function request<T>(method: string, path: string, body?: unknown, opts: { auth?: boolean } = {}): Promise<T> {
+/**
+ * 401 时自动重新配对，然后把这次请求重放一遍。
+ *
+ * 之前 ensurePaired() 只在「从离线变成在线」那一刻调用一次。
+ * 于是 token 一旦失效（Helper 换了数据目录、用户点过「重新配对」把旧 token 吊销、
+ * 重装过 Helper），插件就永远卡在 401 上：/v1/health 是免鉴权的，状态条照样显示
+ * 绿色的「已连接」，可下面每一个卡片都是「未配对或配对已失效」。
+ * 界面说连上了、功能全是坏的，这是最难自查的一种状态。
+ *
+ * 所以改成在请求层自愈：收到 401 就重新配对一次再重放。
+ * pairingInFlight 保证并发的多个请求只会触发一次配对，
+ * retried 保证只重放一次，配对完还是 401 就如实报错，不会打转。
+ */
+let pairingInFlight: Promise<boolean> | null = null;
+
+async function repairPairing(): Promise<boolean> {
+  if (!pairingInFlight) {
+    pairingInFlight = (async () => {
+      await clearToken();
+      const req = await request<{ challenge: string }>('POST', '/v1/pair/request', { client: 'uxp' }, { auth: false });
+      const confirm = await request<{ token: string }>(
+        'POST',
+        '/v1/pair/confirm',
+        { challenge: req.challenge },
+        { auth: false }
+      );
+      await saveToken(confirm.token);
+      return true;
+    })().finally(() => {
+      pairingInFlight = null;
+    });
+  }
+  return pairingInFlight;
+}
+
+async function request<T>(
+  method: string,
+  path: string,
+  body?: unknown,
+  opts: { auth?: boolean; retried?: boolean } = {}
+): Promise<T> {
   const headers: Record<string, string> = {};
   if (opts.auth !== false) {
     const t = await loadToken();
@@ -245,10 +287,13 @@ async function request<T>(method: string, path: string, body?: unknown, opts: { 
 
   const obj = json as { ok?: boolean; error?: PsaiErrorShape };
   if (!res.ok || obj.ok === false) {
-    throw new ApiError(
-      obj.error ?? { code: 'INTERNAL_ERROR', message: `HTTP ${res.status}`, retryable: false },
-      res.status
-    );
+    const shape = obj.error ?? { code: 'INTERNAL_ERROR', message: `HTTP ${res.status}`, retryable: false };
+    // token 失效就地重新配对再重放一次；配对本身走的是免鉴权端点，不会递归
+    if (shape.code === 'HELPER_UNAUTHORIZED' && opts.auth !== false && !opts.retried) {
+      await repairPairing();
+      return request<T>(method, path, body, { ...opts, retried: true });
+    }
+    throw new ApiError(shape, res.status);
   }
   return json as T;
 }
@@ -266,23 +311,18 @@ export async function health(): Promise<{
   return request('GET', '/v1/health', undefined, { auth: false });
 }
 
-/** 自动配对：面板打开时静默完成，用户不需要做任何事。 */
+/**
+ * 自动配对：面板打开时静默完成，用户不需要做任何事。
+ *
+ * 已经有 token 就先拿一个真实请求验一下 —— 那个请求自己会在 401 时
+ * 触发 repairPairing() 并重放，所以这里不用再写一遍失效处理。
+ */
 export async function ensurePaired(): Promise<boolean> {
-  const existing = await loadToken();
-  if (existing) {
-    try {
-      await request('GET', '/v1/settings');
-      return true;
-    } catch (e) {
-      if (!(e instanceof ApiError) || e.shape.code !== 'HELPER_UNAUTHORIZED') throw e;
-      // token 失效，往下重新配对
-      await clearToken();
-    }
+  if (await loadToken()) {
+    await request('GET', '/v1/settings');
+    return true;
   }
-  const req = await request<{ challenge: string }>('POST', '/v1/pair/request', { client: 'uxp' }, { auth: false });
-  const confirm = await request<{ token: string }>('POST', '/v1/pair/confirm', { challenge: req.challenge }, { auth: false });
-  await saveToken(confirm.token);
-  return true;
+  return repairPairing();
 }
 
 /* ---------------- 各资源 ---------------- */
@@ -290,6 +330,12 @@ export async function ensurePaired(): Promise<boolean> {
 export const api = {
   system: () => request<{ dataDir: string; logsDir: string; assetBytes: number; freeBytes: number | null; platform: string; node: string }>('GET', '/v1/system'),
   gpu: () => request<{ gpu: GpuInfo }>('GET', '/v1/gpu').then((r) => r.gpu),
+  /** 按 Provider 汇总的用量，「关于」页展示 */
+  usage: () =>
+    request<{ usage: Array<{ providerId: string; runs: number; gpuMs: number; lastAt: number }> }>(
+      'GET',
+      '/v1/usage'
+    ).then((r) => r.usage),
 
   settings: () => request<{ settings: AppSettings }>('GET', '/v1/settings').then((r) => r.settings),
   patchSettings: (patch: Partial<AppSettings>) =>
@@ -321,7 +367,13 @@ export const api = {
     request<{ binding: FeatureBinding | null }>('POST', `/v1/features/${encodeURIComponent(featureId)}/binding/reset`),
 
   workflows: () => request<{ workflows: WorkflowSummary[] }>('GET', '/v1/workflows').then((r) => r.workflows),
-  workflow: (id: string) => request<{ workflow: unknown }>('GET', `/v1/workflows/${encodeURIComponent(id)}`),
+  workflow: (id: string) =>
+    request<{ workflow: WorkflowRecord }>('GET', `/v1/workflows/${encodeURIComponent(id)}`).then((r) => r.workflow),
+  /** 保存导入工作流的参数绑定。扫描器猜错的地方，用户在设置里改完存回来。 */
+  saveWorkflowBindings: (id: string, bindings: ParamBinding[]) =>
+    request<{ workflow: WorkflowRecord }>('PUT', `/v1/workflows/${encodeURIComponent(id)}/bindings`, {
+      bindings
+    }).then((r) => r.workflow),
   scanWorkflow: (json: unknown) => request<{ scan: ScanResult }>('POST', '/v1/workflows/scan', { json }).then((r) => r.scan),
   importWorkflow: (json: unknown, name: string) =>
     request<{ workflow: WorkflowSummary; scan: ScanResult; versionBumped: boolean }>('POST', '/v1/workflows/import', { json, name }),
@@ -386,8 +438,6 @@ export const api = {
     }
     return json.assets[0]!;
   },
-
-  assetUrl: (assetId: string) => `${BASE}/v1/assets/${encodeURIComponent(assetId)}`,
 
   /** 取资产字节（写回时需要落到临时文件） */
   assetBytes: async (assetId: string): Promise<ArrayBuffer> => {

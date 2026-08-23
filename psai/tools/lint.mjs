@@ -109,6 +109,63 @@ for (const f of [...tsFiles, ...mjsFiles]) {
   }
 }
 
+
+/* ---- 5. UXP flexbox：纵向容器的子项必须禁止压缩 ---- */
+/*
+ * 浏览器里 flex 子项有「自动最小尺寸」（min-height: auto）兜底，内容再多也不会被
+ * 压得比内容还矮。UXP 没有实现这条规则。
+ *
+ * 后果在真机上非常难认：历史页几十条记录会被按比例压扁到刚好塞满一屏，
+ * 每行只剩几个像素高，文字全部溢出、上下重叠成一团；设置页的平台卡片同理。
+ * 浏览器里预览一切正常 —— 这个 bug 只在 Photoshop 里出现。
+ *
+ * 所以每加一个 flex-direction: column 的容器，都必须同时给它的直接子项
+ * 加上 flex-shrink: 0。这条规则就是来盯着这件事的。
+ */
+{
+  const cssPath = resolve(root, 'packages/plugin/styles/app.css');
+  const css = readFileSync(cssPath, 'utf8');
+
+  /** 这些容器**应该**能被压缩，逐个说明理由。 */
+  const SHRINK_ALLOWED = new Map([
+    ['.psai-root', '它就是那一屏，本来就该等于视口高度'],
+    ['.page-host', '唯一该被压缩的：缩到状态条和导航剩下的空间里，然后在内部滚动']
+  ]);
+
+  // 收集所有声明了 flex-direction: column 的选择器
+  const columns = [];
+  for (const m of css.matchAll(/([^{}]+)\{([^}]*)\}/g)) {
+    const sel = m[1].replace(/\/\*[\s\S]*?\*\//g, '').trim().replace(/\s+/g, ' ');
+    if (/flex-direction:\s*column/.test(m[2])) columns.push(sel);
+  }
+
+  // 收集所有已经写了 flex-shrink: 0 的「直接子项」选择器
+  const guarded = new Set();
+  for (const m of css.matchAll(/([^{}]+)\{([^}]*)\}/g)) {
+    if (!/flex-shrink:\s*0/.test(m[2])) continue;
+    for (const part of m[1].split(',')) {
+      const s = part.replace(/\/\*[\s\S]*?\*\//g, '').trim();
+      const hit = /^(\.[A-Za-z0-9_-]+)\s*>\s*\*$/.exec(s);
+      if (hit) guarded.add(hit[1]);
+    }
+  }
+
+  for (const sel of columns) {
+    // 只看单一类选择器；组合选择器由它的基础类覆盖
+    const cls = /(^|\s)(\.[A-Za-z0-9_-]+)$/.exec(sel)?.[2];
+    if (!cls) continue;
+    if (SHRINK_ALLOWED.has(cls)) continue;
+    if (!guarded.has(cls)) {
+      problems.push(
+        `packages/plugin/styles/app.css: ${cls} 是纵向 flex 容器，但没有 \`${cls} > * { flex-shrink: 0 }\` —— ` +
+          `UXP 里它的子项会被压扁、文字重叠（浏览器里看不出来）`
+      );
+    }
+  }
+}
+
+
+/* ---- 统一收尾：所有检查跑完再报告，不能先喊 OK 再喊 FAIL ---- */
 if (problems.length) {
   for (const p of problems) console.error(`FAIL  ${p}`);
   process.exit(1);

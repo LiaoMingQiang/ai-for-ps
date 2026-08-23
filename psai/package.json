@@ -17,7 +17,7 @@
     "typecheck": "npm run typecheck -w @psai/shared && npm run typecheck -w @psai/helper && npm run typecheck -w @psai/plugin",
     "lint": "node tools/lint.mjs",
     "validate": "node tools/validate-manifest.mjs",
-    "check": "npm run typecheck && npm run lint && npm run validate",
+    "check": "npm run typecheck && npm run lint && npm run validate && npm run audit",
     "test": "node tools/run-tests.mjs",
     "test:comfy:real": "node tools/test-comfy-real.mjs",
     "stub": "python tools/comfy_stub.py 18190",
@@ -31,7 +31,8 @@
     "docs:prd": "node tools/sync-prd-features.mjs",
     "verify:rh": "node tools/verify-runninghub.mjs",
     "docs:rh": "node tools/build-runninghub-doc.mjs",
-    "test:cloud:real": "node tools/test-cloud-real.mjs"
+    "test:cloud:real": "node tools/test-cloud-real.mjs",
+    "audit": "node tools/audit-wiring.mjs"
   },
   "devDependencies": {
     "@types/node": "^24.10.0",

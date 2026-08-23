@@ -145,3 +145,45 @@ export interface FeatureBinding {
   model: string | null;
   enabled: boolean;
 }
+
+/**
+ * 用户可以绑到工作流节点上的参数，以及它们的中文名。
+ *
+ * 导入的工作流靠扫描器猜绑定，猜错了用户得能改 —— 改的时候要有一份
+ * 「可以绑什么」的清单。这份清单同时是设置页绑定编辑器的下拉选项，
+ * 所以放在 shared 里，界面和校验用同一份，不会各写各的。
+ *
+ * `image` / `mask` 走的是图像输入通道（提交前会被换成 Provider 认的文件名），
+ * 其余都是普通标量参数。宽高不单列 —— 它们由「生图比例 + 分辨率」算出来，
+ * 通过 sizeWidth / sizeHeight 变换落位。
+ */
+export const BINDABLE_PARAMS: ReadonlyArray<{ id: string; label: string; hint?: string }> = [
+  { id: 'image', label: '输入图', hint: '提交前会被替换成后端认的文件名' },
+  { id: 'reference', label: '参考图 / 第二张图' },
+  { id: 'prompt', label: '提示词' },
+  { id: 'negativePrompt', label: '负向提示词' },
+  { id: 'seed', label: '随机种子' },
+  { id: 'steps', label: '步数' },
+  { id: 'cfg', label: 'CFG' },
+  { id: 'denoise', label: '重绘幅度' },
+  { id: 'sampler', label: '采样器' },
+  { id: 'scheduler', label: '调度器' },
+  { id: 'strength', label: '强度' },
+  { id: 'upscaleFactor', label: '放大倍数' },
+  { id: 'batchSize', label: '批量数' }
+];
+
+/** 扫描器猜出的语义 → 对应的参数 id（猜中了就直接预选上）。 */
+export const SEMANTIC_TO_PARAM: Readonly<Record<string, string>> = {
+  prompt: 'prompt',
+  negativePrompt: 'negativePrompt',
+  seed: 'seed',
+  steps: 'steps',
+  cfg: 'cfg',
+  denoise: 'denoise',
+  sampler: 'sampler',
+  scheduler: 'scheduler',
+  image: 'image',
+  mask: 'image',
+  batchSize: 'batchSize'
+};

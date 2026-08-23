@@ -181,6 +181,28 @@ export async function buildServer(d: ServerDeps): Promise<FastifyInstance> {
     return { ok: true, token: res.token };
   });
 
+  /**
+   * 用量汇总：按 Provider 聚合跑过多少次、本地 GPU 累计多久、最近一次是什么时候。
+   *
+   * 数据来自 usage 表 —— 那张表一直在写，但在这个接口出现之前从来没人读过。
+   * 只写不读的表不会报错，只会安静地长大；要么给它接个消费者，要么就别写。
+   * 这里选择接上：本地跑还是云端跑，用户是靠这组数字决定的。
+   */
+  app.get('/v1/usage', async () => {
+    const rows = d.db
+      .prepare(
+        `SELECT provider_id AS providerId,
+                COUNT(*)    AS runs,
+                COALESCE(SUM(gpu_ms), 0) AS gpuMs,
+                MAX(at)     AS lastAt
+           FROM usage
+          GROUP BY provider_id
+          ORDER BY runs DESC`
+      )
+      .all() as Array<{ providerId: string; runs: number; gpuMs: number; lastAt: number }>;
+    return { ok: true, usage: rows };
+  });
+
   app.get('/v1/system', async () => {
     let freeBytes: number | null = null;
     try {

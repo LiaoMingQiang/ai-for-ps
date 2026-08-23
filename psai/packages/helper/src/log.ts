@@ -13,22 +13,39 @@ const LEVEL_ORDER: Record<LogLevel, number> = { debug: 10, info: 20, warn: 30, e
 /** 单个日志文件上限，超过就轮转。 */
 const MAX_LOG_BYTES = 8 * 1024 * 1024;
 
-/** 看起来像密钥的片段一律替换掉。宁可多脱敏，不可漏一个。 */
+/**
+ * 看起来像密钥的片段一律替换掉。宁可多脱敏，不可漏一个。
+ *
+ * 后两条是实测漏过之后补的：
+ *  - 查询串形式（?token=… / ?apiKey=…）：配对 token 就是这么进 WebSocket URL 的。
+ *    只要有谁把请求行写进日志，一个长期有效的 token 就明文躺在那儿了。
+ *  - 裸十六进制串：RunningHub 的 API Key 是 32 位十六进制、不带任何前缀，
+ *    上面那些 sk- / AIza / ms- 的前缀规则一条都匹配不到。
+ *    代价是资产的 sha256 也会被打码 —— 日志少一点可读性，换密钥不外泄，这买卖值。
+ */
 const SECRET_PATTERNS: RegExp[] = [
   /\b(sk-[A-Za-z0-9_-]{8,})\b/g,
   /\b(AIza[A-Za-z0-9_-]{20,})\b/g,
   /\b(ms-[A-Za-z0-9-]{16,})\b/g,
   /("(?:api[_-]?key|apiKey|token|password|secret)"\s*:\s*")([^"]{4,})(")/gi,
-  /(Bearer\s+)([A-Za-z0-9._~+/-]{12,}=*)/g
+  /(Bearer\s+)([A-Za-z0-9._~+/-]{12,}=*)/g,
+  /([?&](?:api[_-]?key|apiKey|token|access_token|password|secret)=)([^&\s"']{4,})/gi,
+  /\b([0-9a-f]{32,64})\b/gi
 ];
 
 export function redact(text: string): string {
   let out = text;
-  out = out.replace(SECRET_PATTERNS[0]!, (_m, g1: string) => mask(g1));
-  out = out.replace(SECRET_PATTERNS[1]!, (_m, g1: string) => mask(g1));
-  out = out.replace(SECRET_PATTERNS[2]!, (_m, g1: string) => mask(g1));
-  out = out.replace(SECRET_PATTERNS[3]!, (_m, a: string, b: string, c: string) => a + mask(b) + c);
-  out = out.replace(SECRET_PATTERNS[4]!, (_m, a: string, b: string) => a + mask(b));
+  for (const re of SECRET_PATTERNS) {
+    // 统一规则：只有一个捕获组就整组打码；有多组就打中间那组、保留前后缀。
+    // 保留 `?token=` `Bearer ` `"apiKey":"` 这些定位信息，排查时知道是哪一处，
+    // 但密钥本身没了。
+    out = out.replace(re, (...args: unknown[]) => {
+      const groups = args.slice(1, -2) as string[];
+      if (groups.length === 1) return mask(groups[0]!);
+      if (groups.length === 2) return groups[0]! + mask(groups[1]!);
+      return groups[0]! + mask(groups[1]!) + groups.slice(2).join('');
+    });
+  }
   return out;
 }
 

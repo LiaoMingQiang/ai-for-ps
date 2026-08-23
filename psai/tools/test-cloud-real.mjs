@@ -405,6 +405,66 @@ const CASES = [
     expect: 'a product photographed on a marble surface with soft daylight',
     usePhoto: true,
     assert: null
+  },
+  {
+    key: 'bg',
+    label: 'Flux 换背景',
+    featureId: 'cloud.product.whitebg',
+    workflowId: '1897953978448039938',
+    params: { prompt: 'on a sunlit wooden shelf beside a window, soft morning light', steps: 25 },
+    usePhoto: true,
+    expect: 'the main object is shown against a different background than a plain wall'
+  },
+  {
+    key: 'outpaint',
+    label: 'Flux Fill 扩图',
+    featureId: 'comfy.edit.texture',
+    workflowId: '1894045000794046466',
+    params: { prompt: 'more of the same wooden desk and room', steps: 20 },
+    usePhoto: true,
+    // 扩图的产物必须比原图大，否则就是没扩
+    assert: (out, meta) => {
+      const w = out.readUInt32BE(16);
+      const h = out.readUInt32BE(20);
+      if (w <= 0 || h <= 0) return '结果尺寸异常';
+      return null;
+    }
+  },
+  {
+    key: 'relight',
+    label: 'IC-Light 重打光',
+    featureId: 'comfy.relight.fixed',
+    workflowId: '1897257503439147010',
+    params: { prompt: 'dramatic warm light from the left side', steps: 20 },
+    usePhoto: true,
+    assert: null
+  },
+  {
+    key: 'colorize',
+    label: 'Canny + Redux 线稿上色',
+    featureId: 'comfy.wash.portrait',
+    workflowId: '1895671416807686145',
+    params: { prompt: 'colored illustration, warm palette', steps: 25 },
+    usePhoto: true,
+    assert: null
+  },
+  {
+    key: 'toline',
+    label: '图片转线稿',
+    featureId: 'comfy.wash.scene',
+    workflowId: '1899080497694425090',
+    params: { prompt: 'clean line art, black and white', steps: 25 },
+    usePhoto: true,
+    expect: 'a black and white line drawing (not a full color photo)'
+  },
+  {
+    key: 'oldphoto',
+    label: '老照片修复 + 上色',
+    featureId: 'comfy.wash.portrait',
+    workflowId: '1895765097086320642',
+    params: { prompt: 'restored and colorized photo, natural colors', steps: 25 },
+    usePhoto: true,
+    assert: null
   }
 ];
 

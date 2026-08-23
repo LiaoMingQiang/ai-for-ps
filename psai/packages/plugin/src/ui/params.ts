@@ -211,9 +211,15 @@ function renderText(spec: Extract<ParamSpec, { kind: 'text' }>, ctx: ParamContex
 /* ---------------- 预设选择器 ---------------- */
 
 function renderPresetPrompt(spec: Extract<ParamSpec, { kind: 'presetPrompt' }>, ctx: ParamContext): HTMLElement {
-  const current = (ctx.get(spec.id) as { presetId?: string; enabled?: boolean } | undefined) ?? {
-    presetId: spec.defaultPresetId,
-    enabled: spec.defaultEnabled
+  // 取一份**副本**再改。
+  // ctx.get() 返回的是 store 里那个对象本身，而 store 里这份是从 view.defaults
+  // 浅展开来的 —— 直接改它会把功能的「默认值」也一起改掉，
+  // 于是重置或重新读取默认值时，用户看到的"默认"其实是他自己上次调的值。
+  const current = {
+    ...((ctx.get(spec.id) as { presetId?: string; enabled?: boolean } | undefined) ?? {
+      presetId: spec.defaultPresetId,
+      enabled: spec.defaultEnabled
+    })
   };
   const pool = ctx.presets.filter((p) => p.kind === spec.presetKind);
 
@@ -276,7 +282,11 @@ function renderPresetPrompt(spec: Extract<ParamSpec, { kind: 'presetPrompt' }>, 
 /* ---------------- 种子 ---------------- */
 
 function renderSeed(spec: Extract<ParamSpec, { kind: 'seed' }>, ctx: ParamContext): HTMLElement {
-  const current = ((ctx.get(spec.id) as SeedValue | undefined) ?? spec.defaultValue) as SeedValue;
+  // 取一份**副本**再改。
+  // ctx.get() 返回的是 store 里那个对象本身，而 store 里这份是从 view.defaults
+  // 浅展开来的 —— 直接改它会把功能的「默认值」也一起改掉，
+  // 于是重置或重新读取默认值时，用户看到的"默认"其实是他自己上次调的值。
+  const current = { ...(((ctx.get(spec.id) as SeedValue | undefined) ?? spec.defaultValue) as SeedValue) };
 
   const numInput = h('input', {
     class: 'input seed-value',
@@ -451,7 +461,11 @@ function renderModel(spec: Extract<ParamSpec, { kind: 'model' }>, ctx: ParamCont
 /* ---------------- 比例 ---------------- */
 
 function renderAspect(spec: Extract<ParamSpec, { kind: 'aspect' }>, ctx: ParamContext): HTMLElement {
-  const current = ((ctx.get(spec.id) as AspectValue | undefined) ?? spec.defaultValue) as AspectValue;
+  // 取一份**副本**再改。
+  // ctx.get() 返回的是 store 里那个对象本身，而 store 里这份是从 view.defaults
+  // 浅展开来的 —— 直接改它会把功能的「默认值」也一起改掉，
+  // 于是重置或重新读取默认值时，用户看到的"默认"其实是他自己上次调的值。
+  const current = { ...(((ctx.get(spec.id) as AspectValue | undefined) ?? spec.defaultValue) as AspectValue) };
   const grid = h('div', { class: 'aspect-grid' });
   const customBox = h('div', { class: `aspect-custom ${current.id === 'custom' ? '' : 'hidden'}` });
 
