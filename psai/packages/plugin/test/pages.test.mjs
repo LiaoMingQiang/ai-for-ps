@@ -400,3 +400,30 @@ test('云端功能即使没有显式绑定，也能解析出可用的 Provider',
   const notReady = cloud.filter((f) => !f.ready).map((f) => `${f.id}: ${f.reason}`);
   assert.deepEqual(notReady, [], `这些未绑定的云端功能应该可用：${notReady.join(' | ')}`);
 });
+
+test('设置页的模型下拉会显示当前配置的模型，而不是永远「尚未拉取」', async () => {
+  // 以前 ProviderView 根本没有 defaultModel 字段，下拉里也不标选中，
+  // 用户配过什么在界面上完全看不出来，只能凭记忆。
+  await ui.api.setCredentials('comfly', { apiKey: 'sk-FAKEsettings000000000000' });
+  await ui.api.patchProvider('comfly', { enabled: true, defaultModel: 'gpt-image-1' });
+
+  const providers = await ui.api.providers();
+  const comfly = providers.find((p) => p.id === 'comfly');
+  assert.equal(comfly.defaultModel, 'gpt-image-1', 'ProviderView 必须带出当前默认模型');
+
+  const host = dom.document.createElement('div');
+  dom.root.appendChild(host);
+  await ui.renderSettingsPage(host);
+  const tab = host.querySelectorAll('.subtab').find((b) => b.textContent === '推荐平台');
+  tab.dispatchEvent({ type: 'click' });
+  await new Promise((r) => setTimeout(r, 500));
+
+  // 找到 comfly 那张卡里的模型下拉，确认当前值被标成选中
+  const selects = host.querySelectorAll('select');
+  const withModel = selects.find((s) =>
+    s.querySelectorAll('option').some((o) => o.getAttribute('value') === 'gpt-image-1')
+  );
+  assert.ok(withModel, '模型下拉里应该出现已配置的 gpt-image-1');
+  assert.equal(withModel.value, 'gpt-image-1', `下拉的当前值应是已配置的模型，实际 ${withModel.value}`);
+  dom.root.removeChild(host);
+});

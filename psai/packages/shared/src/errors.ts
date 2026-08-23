@@ -30,6 +30,12 @@ export const ERROR_CODES = {
   PROVIDER_QUOTA_EXCEEDED: '额度已用尽',
   PROVIDER_BAD_RESPONSE: '服务返回了无法解析的响应',
   PROVIDER_UNSUPPORTED: '该 Provider 不支持此操作',
+  /**
+   * 平台在线、Key 也对，但这个**模型**用不了：没开通、没有可用渠道、已下线。
+   * 和「服务挂了」是两回事 —— 换个模型就能继续，所以要单独一个码，
+   * 界面才能给出「去参数面板换一个模型」这种能照做的提示。
+   */
+  PROVIDER_MODEL_UNAVAILABLE: '该模型当前不可用（未开通或没有可用渠道）',
   PROVIDER_TIMEOUT: '请求超时',
 
   /* ---- 工作流 ---- */

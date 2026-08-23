@@ -253,6 +253,9 @@ export async function buildServer(d: ServerDeps): Promise<FastifyInstance> {
         description: desc.description,
         recommended: desc.recommended,
         cancelSupport: desc.cancelSupport,
+        // 设置页要显示「当前用的是哪个模型」。以前没这个字段，
+        // 下拉永远停在「尚未拉取模型」，用户看不出自己配过什么。
+        defaultModel: d.settings.providerSettings(s.id).defaultModel,
         credentialFields: desc.credentials.map((c) => ({
           ...c,
           masked: c.secret ? d.credentials.mask(s.id, c.key) : null

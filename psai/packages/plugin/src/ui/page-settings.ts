@@ -624,7 +624,27 @@ function providerCard(p: ProviderView, host: HTMLElement): HTMLElement {
       await api.patchProvider(p.id, { defaultModel: (e.target as HTMLSelectElement).value });
     }
   }) as HTMLSelectElement;
-  modelSelect.appendChild(h('option', { value: '' }, '（尚未拉取模型）'));
+  /**
+   * 把模型列表填进下拉，并把当前配置的那个标成选中。
+   *
+   * 以前这里只塞一个「（尚未拉取模型）」占位，拉取之后也不标选中 ——
+   * 于是用户配过的模型在界面上根本看不出来，只能凭记忆。
+   */
+  const fillModels = (models: readonly string[]): void => {
+    clear(modelSelect);
+    const cur = p.defaultModel ?? '';
+    const placeholder = h('option', { value: '' }, models.length ? '（使用该平台的默认模型）' : '（尚未拉取模型）');
+    if (!cur) placeholder.setAttribute('selected', '');
+    modelSelect.appendChild(placeholder);
+    // 已配置的模型即使不在列表里也要列出来，否则显示成"没配过"就更误导了
+    const all = cur && !models.includes(cur) ? [cur, ...models] : models;
+    for (const m of all) {
+      const opt = h('option', { value: m }, m) as HTMLOptionElement;
+      if (m === cur) opt.setAttribute('selected', '');
+      modelSelect.appendChild(opt);
+    }
+  };
+  fillModels(p.models ?? []);
 
   const result = h('div', { class: `test-result ${p.configured ? '' : 'muted'}` }, p.configured ? (p.reason ?? '已配置') : (p.reason ?? '未配置'));
 
@@ -722,9 +742,7 @@ function providerCard(p: ProviderView, host: HTMLElement): HTMLElement {
           result.textContent = '正在拉取模型…';
           try {
             const models = await api.listModels(p.id);
-            clear(modelSelect);
-            modelSelect.appendChild(h('option', { value: '' }, '（使用默认模型）'));
-            for (const m of models) modelSelect.appendChild(h('option', { value: m }, m));
+            fillModels(models);
             result.className = 'test-result ok';
             result.textContent = `拉到 ${models.length} 个模型`;
           } catch (e) {

@@ -122,6 +122,8 @@ export interface WorkflowSummary {
 
 export interface ProviderView extends ProviderRuntimeStatus {
   label: string;
+  /** 当前配置的默认模型，设置页要把它显示成选中项 */
+  defaultModel: string;
   kind: string;
   consoleUrl: string | null;
   description: string;
