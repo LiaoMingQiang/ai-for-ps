@@ -89,6 +89,12 @@ export interface ProviderAdapter {
    * 不具备该能力的 Provider 不实现此方法，上层据此禁用 UI 上的入口并说明原因。
    */
   textComplete?(input: TextCompleteInput): Promise<string>;
+  /**
+   * 最近一次 textComplete 实际用的模型。
+   * 内置模型是适配器自己挑的，用户在设置里看不到 —— 那就至少在用完之后
+   * 如实告诉他这次是谁改写的提示词，否则「优化」就成了一个黑箱。
+   */
+  lastTextModel?(): string | null;
   dispose?(): void;
 }
 

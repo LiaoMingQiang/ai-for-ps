@@ -15,7 +15,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { isLikelyImageModel, filterImageModels } from '../dist/providers.js';
+import { isLikelyImageModel } from '../dist/providers.js';
 
 test('主流生图模型都认得出来', () => {
   const shouldKeep = [
@@ -59,10 +59,12 @@ test('聊天 / 语音 / 嵌入模型会被滤掉', () => {
 });
 
 test('名字带 image 但走不通 /images/generations 的要排掉', () => {
-  // 这几个真机上试过：模型确实存在，但接口路径不同，点了必然失败
-  assert.equal(isLikelyImageModel('mj_imagine'), false, 'Midjourney 是另一套异步接口');
+  // 这几个真机上试过：模型确实存在，但接口路径不同，点了必然失败。
+  // 注意 mj_* 是 MJ 的动作端点与计费 SKU（upscale / blend 都要先有一个已存在的任务），
+  // 真正能文生图的入口是认可名单里那个裸的 `midjourney`，它走 /mj/submit/imagine。
+  assert.equal(isLikelyImageModel('mj_imagine'), false, 'MJ 动作端点不是"选中就能生图"的东西');
   assert.equal(isLikelyImageModel('mj_blend'), false);
-  assert.equal(isLikelyImageModel('midjourney-v7'), false);
+  assert.equal(isLikelyImageModel('midjourney-v7'), false, '平台上没有这个 id，版本在提示词里');
   assert.equal(isLikelyImageModel('kolors-virtual-try-on-v1'), false, '虚拟试衣是专用接口');
 });
 
@@ -89,20 +91,6 @@ test('gpt-4o-image 这类多模态生图要留下', () => {
   // 名字前缀像聊天模型，但确实能出图 —— 前缀匹配不能一刀切
   assert.equal(isLikelyImageModel('gpt-4o-image'), true);
   assert.equal(isLikelyImageModel('gpt-4o-image-vip'), true);
-});
-
-test('筛完的列表保持原顺序且不重复', () => {
-  const all = ['gpt-4o', 'flux-2-max', 'whisper-1', 'dall-e-3', 'flux-2-max'];
-  const got = filterImageModels(all);
-  assert.deepEqual(got, ['flux-2-max', 'dall-e-3', 'flux-2-max'], '只过滤，不排序也不去重');
-});
-
-test('一个都没匹配上时退回完整列表，不能给出空下拉', () => {
-  // 某个平台的命名我们完全不认识时，宁可全列出来让用户自己挑，
-  // 也不能给一个空下拉 —— 那样这个平台就彻底用不了了。
-  const exotic = ['厂商专用-001', '厂商专用-002'];
-  assert.deepEqual(filterImageModels(exotic), exotic, '全滤光时必须回退');
-  assert.deepEqual(filterImageModels([]), []);
 });
 
 test('大小写和空格不影响判断', () => {

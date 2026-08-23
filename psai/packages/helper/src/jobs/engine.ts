@@ -508,7 +508,10 @@ export class JobEngine {
     } = { instruction: preset.prompt };
     if (userText) input.userText = userText;
     if (images.length) input.images = images.map((i) => ({ buffer: i.buffer, mime: i.mime }));
-    if (binding?.model) input.model = binding.model;
+    // 这里**不**传 binding.model。那是这个功能的「生图模型」，
+    // 传进来就等于拿 gpt-image-2 / flux-2-max 去发 chat 请求 —— 必然失败，
+    // 而且报的错跟提示词毫无关系。反推/优化用适配器内置的语言模型（GPT-5.6 一族），
+    // 用户不需要、也不应该为了用「✨ 优化提示词」先去配一个语言模型。
     return adapter.textComplete(input);
   }
 

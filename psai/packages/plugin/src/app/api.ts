@@ -23,7 +23,8 @@ import type {
   DependencyReport,
   WorkflowRecord,
   ParamBinding,
-  PsaiErrorShape
+  PsaiErrorShape,
+  ModelScope
 } from '@psai/shared';
 
 /**
@@ -122,6 +123,10 @@ export interface WorkflowSummary {
 
 export interface ProviderView extends ProviderRuntimeStatus {
   label: string;
+  /** 实际用上的模型口径；approved 全没命中时会退档，UI 要照实说 */
+  modelsScope: ModelScope;
+  /** 该平台目录里一共多少个模型（筛之前） */
+  modelsTotal: number;
   /** 当前配置的默认模型，设置页要把它显示成选中项 */
   defaultModel: string;
   kind: string;
@@ -346,15 +351,35 @@ export const api = {
   providers: () => request<{ providers: ProviderView[] }>('GET', '/v1/providers').then((r) => r.providers),
   patchProvider: (id: string, patch: { enabled?: boolean; baseUrl?: string; defaultModel?: string }) =>
     request<{ status: ProviderRuntimeStatus }>('PATCH', `/v1/providers/${encodeURIComponent(id)}`, patch),
+  /**
+   * 存密钥。Helper 存完会顺手拉一次模型，所以这里的返回带着 models/total ——
+   * 用户配完 Key 就能直接看到"拉到了哪些生图模型"，不用再点一次「拉取模型」。
+   * modelsError 非空表示密钥存住了但没拉到，要如实说出来，别显示成保存失败。
+   */
   setCredentials: (id: string, fields: Record<string, string>) =>
-    request<{ status: ProviderRuntimeStatus }>('POST', `/v1/providers/${encodeURIComponent(id)}/credentials`, fields),
+    request<{
+      status: ProviderRuntimeStatus;
+      models: string[];
+      total: number;
+      modelsError: string | null;
+    }>('POST', `/v1/providers/${encodeURIComponent(id)}/credentials`, fields),
   clearCredentials: (id: string) => request<{ ok: true }>('DELETE', `/v1/providers/${encodeURIComponent(id)}/credentials`),
   testProvider: (id: string) =>
     request<{ result: { ok: boolean; latencyMs: number | null; detail: string }; status: ProviderRuntimeStatus }>(
       'POST',
       `/v1/providers/${encodeURIComponent(id)}/test`
     ),
-  listModels: (id: string) => request<{ models: string[] }>('GET', `/v1/providers/${encodeURIComponent(id)}/models`).then((r) => r.models),
+  /**
+   * 拉模型。默认口径 approved：只给真机验证过的认可生图模型。
+   * scope='all' 是设置页「拉取全部模型」用的逃生门 —— 想试冷门模型随时能试。
+   * 返回里的 scope 是**实际**用上的口径（approved 一个都没命中会自动退档），
+   * UI 要照实显示，不能拿 requestedScope 冒充。
+   */
+  listModels: (id: string, scope: ModelScope = 'approved') =>
+    request<{ models: string[]; scope: ModelScope; requestedScope: ModelScope; total: number }>(
+      'GET',
+      `/v1/providers/${encodeURIComponent(id)}/models?scope=${scope}`
+    ),
 
   comfyObjectInfo: () =>
     request<{ samplers: string[]; schedulers: string[]; checkpoints: string[]; upscaleModels: string[]; nodeCount: number }>(
@@ -421,7 +446,7 @@ export const api = {
     request<{ preset: unknown }>('PUT', `/v1/prompts/${encodeURIComponent(id)}`, patch),
 
   textComplete: (payload: { presetId: string; userText?: string; assetIds?: string[]; featureId?: string }) =>
-    request<{ text: string; providerId: string }>('POST', '/v1/text/complete', payload),
+    request<{ text: string; providerId: string; model: string | null }>('POST', '/v1/text/complete', payload),
 
   /** 上传一张图，返回资产。二进制走 multipart，不走 JSON。 */
   uploadAsset: async (data: ArrayBuffer | Uint8Array, filename: string, mime = 'image/png') => {

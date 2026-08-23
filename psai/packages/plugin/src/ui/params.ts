@@ -24,6 +24,8 @@ export interface ParamContext {
   set(paramId: string, value: unknown): void;
   /** 运行时可选项（采样器/调度器/模型…），来自 Provider 实时能力 */
   options: Record<string, string[]>;
+  /** 模型下拉的口径说明：筛之前一共多少个、实际用上的是哪一档 */
+  modelsMeta?: { total: number; scope: string } | null;
   /** 提示词优化按钮的回调；返回 null 表示当前后端不支持 */
   onEnhance?: (paramId: string) => Promise<string | null>;
   /** 该功能可用的提示词预设 */
@@ -460,11 +462,18 @@ function renderModel(spec: Extract<ParamSpec, { kind: 'model' }>, ctx: ParamCont
     select.appendChild(opt);
   }
 
-  // 列表被筛过就说清楚，否则「怎么少了这么多模型」会被当成 bug
-  const total = (ctx.options['modelsTotal'] ?? []).length;
+  // 列表被筛过就说清楚，否则「怎么少了这么多模型」会被当成 bug。
+  // 三档口径的说法不一样：approved 是出厂认可的那几族，image 是"像生图的都留下"
+  // （认可名单一个都没命中时会退到这一档），all 是没筛。含糊成一句"筛过了"
+  // 用户就没法判断该不该去拉全量。
+  const meta = ctx.modelsMeta;
+  const total = meta?.total ?? 0;
+  const scope = meta?.scope ?? 'approved';
   const note =
     total > models.length
-      ? `只列出适合生图的 ${models.length} 个（该平台共 ${total} 个）。要用别的，去「设置 → 推荐平台」填完整模型名。`
+      ? scope === 'approved'
+        ? `只列出出厂认可的 ${models.length} 个生图模型（该平台共 ${total} 个），都是真机验证过能出图的。想用别的：设置 → 推荐平台 → 拉取全部模型。`
+        : `认可名单在这个平台一个都没命中，退回列出像生图的 ${models.length} 个（该平台共 ${total} 个），能不能出图要自己试。`
       : '';
   return field(spec, note ? h('div', { class: 'model-pick' }, select, h('div', { class: 'muted hint' }, note)) : select);
 }

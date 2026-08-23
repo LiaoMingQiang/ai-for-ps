@@ -3,7 +3,8 @@
  * 页面结构对所有 17 个功能都一样，差异全部来自功能目录。
  */
 
-import { defaultValues, isTerminal, rhPresetByWorkflowId, filterImageModels } from '@psai/shared';
+import { defaultValues, isTerminal, rhPresetByWorkflowId } from '@psai/shared';
+import type { ModelScope } from '@psai/shared';
 import type { ParamSpec, WritebackMode, JobRecord } from '@psai/shared';
 import { h, clear, setAttr, toggleClass } from '../app/dom.js';
 import { api, ApiError } from '../app/api.js';
@@ -21,6 +22,13 @@ import * as bridge from '../ps/bridge.js';
 const inputHandles = new Map<string, ImageInputHandle>();
 let currentImages: Record<string, PickedImage[]> = {};
 let runtimeOptions: Record<string, string[]> = {};
+/**
+ * 模型下拉旁边那句「只列出 N 个 / 平台共 M 个」的数据。
+ * 跟 runtimeOptions 分开放：那个是 Record<string, string[]>，
+ * 塞一个计数进去只能编成假数组，读的地方还得再解一次 —— 不如单独一份。
+ */
+let modelsMeta: { total: number; scope: ModelScope } | null = null;
+const modelsMetaByProvider: Record<string, { total: number; scope: ModelScope }> = {};
 let presetCache: Record<string, ParamContext['presets']> = {};
 
 /**
@@ -142,6 +150,7 @@ export async function renderGeneratePage(host: HTMLElement, actionHost?: HTMLEle
       updateSubmitState();
     },
     options: runtimeOptions,
+    modelsMeta,
     presets: presetCache[view.id] ?? [],
     onEnhance: async (paramId) => {
       const text = String(paramsOf(view.id)[paramId] ?? '');
@@ -155,7 +164,9 @@ export async function renderGeneratePage(host: HTMLElement, actionHost?: HTMLEle
           userText: text,
           featureId: view.id
         });
-        toast('提示词已优化', `使用 ${res.providerId}`);
+        // 内置模型是我们自己挑的，用户在设置里看不到 —— 那就用完之后如实报出来，
+        // 否则「优化」就成了一个说不清用了什么的黑箱。
+        toast('提示词已优化', res.model ? `${res.providerId} · ${res.model}` : res.providerId);
         return res.text;
       } catch (e) {
         const msg = e instanceof ApiError ? e.display : String(e);
@@ -393,16 +404,19 @@ async function ensureRuntimeOptions(view: FeatureView): Promise<void> {
   } else if (view.providerId) {
     const key = `models:${view.providerId}`;
     if (runtimeOptions[key]) {
-      runtimeOptions = { ...runtimeOptions, models: runtimeOptions[key]!, modelsTotal: runtimeOptions[`${key}:total`] ?? [] };
+      runtimeOptions = { ...runtimeOptions, models: runtimeOptions[key]! };
+      modelsMeta = modelsMetaByProvider[view.providerId] ?? null;
       return;
     }
     try {
-      const all = await api.listModels(view.providerId);
-      // 聚合网关会把平台上所有模型都列出来（Comfly 实测 858 个），
-      // 里面绝大多数是对话/音频/视频模型，选中就是一次必然失败。
-      // 生成页只列适合生图的那些，并如实告诉用户筛掉了多少。
-      const models = filterImageModels(all);
-      runtimeOptions = { ...runtimeOptions, [key]: models, models, [`${key}:total`]: all, modelsTotal: all };
+      // 口径由 Helper 定（默认 approved：只给真机验证过的认可生图模型）。
+      // 聚合网关会把平台上所有模型都列出来 —— Comfly 实测 858 个，
+      // 绝大多数是对话/音频/视频模型，选中就是一次必然失败。
+      // 生成页不做二次筛选：筛选规则只有一份，在 @psai/shared 里。
+      const res = await api.listModels(view.providerId);
+      runtimeOptions = { ...runtimeOptions, [key]: res.models, models: res.models };
+      modelsMeta = { total: res.total, scope: res.scope };
+      modelsMetaByProvider[view.providerId] = modelsMeta;
     } catch {
       runtimeOptions = { ...runtimeOptions, models: [] };
     }

@@ -171,10 +171,15 @@ export async function startHelper(overrides: Partial<HelperConfig> = {}): Promis
     })
     .catch(() => undefined);
 
+  // 已配置的云 Provider 也预热一遍，把模型列表拉回缓存。
+  // 不然重启之后设置页会退回「尚未拉取模型」，看起来像密钥没保存住。
+  const warmed = providers.warmupCloud().catch(() => undefined);
+
   // 恢复未完成的任务（先查远端，不重复提交）。
   // 不阻塞启动，但要留下句柄：关闭时必须等它跑完，否则会对着已关闭的数据库写。
   const recovered = Promise.all([
     probed,
+    warmed,
     jobs.recover().then(
       () => undefined,
       (e: unknown) => {

@@ -678,9 +678,18 @@ function providerCard(p: ProviderView, host: HTMLElement): HTMLElement {
               return;
             }
             try {
-              await api.setCredentials(p.id, { [keyField!.key]: keyInput.value.trim() });
+              // Helper 存完密钥会顺手拉一次模型，这里直接把结果报出来 ——
+              // 「配好接口就该知道有哪些模型可用」是这一步的题中之义，
+              // 不该让用户再想起来去点一次「拉取模型」。
+              const res = await api.setCredentials(p.id, { [keyField!.key]: keyInput.value.trim() });
               keyInput.value = '';
-              toast('已保存', `${p.label} 的 Key 只存在本机 Helper`);
+              if (res.modelsError) {
+                // 密钥是存住了的。这里说成"保存失败"会让用户把 Key 重填一遍，
+                // 而真正的问题在网络或平台那边。
+                toast('Key 已保存，但没拉到模型', res.modelsError, 'warn');
+              } else {
+                toast('已保存', `${p.label} 的 Key 只存在本机 Helper · 已拉到 ${res.models.length} 个认可生图模型（平台共 ${res.total} 个）`);
+              }
               await renderSettingsPage(host.parentElement as HTMLElement);
             } catch (e) {
               toast('保存失败', e instanceof ApiError ? e.display : String(e), 'error');
@@ -731,27 +740,46 @@ function providerCard(p: ProviderView, host: HTMLElement): HTMLElement {
     )
   );
 
+  /**
+   * 拉模型的两个档位。
+   *
+   * 默认那个只给出厂认可的生图模型 —— 平台目录动辄几百个，绝大多数拿去生图
+   * 一律失败，全塞进下拉等于让用户在里面猜。
+   * 「全部」是逃生门：认可名单之外的模型也想试就点它，我们如实标明
+   * 这些没验证过。收窄默认口径不等于锁死选择，两者得同时成立。
+   */
+  const fetchModels = async (scope: 'approved' | 'all', label: string): Promise<void> => {
+    result.className = 'test-result muted';
+    result.textContent = '正在拉取模型…';
+    try {
+      const res = await api.listModels(p.id, scope);
+      fillModels(res.models);
+      result.className = 'test-result ok';
+      result.textContent =
+        res.scope === 'approved'
+          ? `拉到 ${res.models.length} 个认可生图模型（平台共 ${res.total} 个）`
+          : res.scope === 'image'
+            ? `认可名单一个都没命中，退回列出像生图的 ${res.models.length} 个（平台共 ${res.total} 个），能不能出图要自己试`
+            : `${label}：${res.models.length} 个（未经筛选，多数不能生图）`;
+    } catch (e) {
+      result.className = 'test-result err';
+      result.textContent = e instanceof ApiError ? e.display : String(e);
+    }
+  };
+
   actions.appendChild(
     h(
       'button',
-      {
-        class: 'btn-ghost',
-        type: 'button',
-        onclick: async () => {
-          result.className = 'test-result muted';
-          result.textContent = '正在拉取模型…';
-          try {
-            const models = await api.listModels(p.id);
-            fillModels(models);
-            result.className = 'test-result ok';
-            result.textContent = `拉到 ${models.length} 个模型`;
-          } catch (e) {
-            result.className = 'test-result err';
-            result.textContent = e instanceof ApiError ? e.display : String(e);
-          }
-        }
-      },
+      { class: 'btn-ghost', type: 'button', onclick: () => void fetchModels('approved', '认可生图模型') },
       '拉取模型'
+    )
+  );
+
+  actions.appendChild(
+    h(
+      'button',
+      { class: 'btn-ghost', type: 'button', onclick: () => void fetchModels('all', '全部模型') },
+      '拉取全部模型'
     )
   );
 

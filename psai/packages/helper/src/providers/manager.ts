@@ -128,7 +128,12 @@ export class ProviderManager {
         : (a?.notConfiguredReason() ?? '未配置'),
       latencyMs: cached?.latencyMs ?? null,
       lastCheckedAt: cached?.lastCheckedAt ?? null,
-      models: ps.defaultModel ? [ps.defaultModel] : (cached?.models ?? []),
+      // 探测缓存里那份才是"这个平台有哪些模型"。
+      // 以前这里写的是 `ps.defaultModel ? [ps.defaultModel] : cached`，
+      // 于是用户一旦选定默认模型，列表就塌成只剩那一个 —— 设置页的下拉
+      // 从此再也换不了别的，看起来像平台只有一个模型。
+      // 默认模型是另一件事，接口里单独有 defaultModel 字段。
+      models: cached?.models ?? (ps.defaultModel ? [ps.defaultModel] : []),
       capabilities: desc?.capabilities ?? []
     };
   }
@@ -165,6 +170,37 @@ export class ProviderManager {
     };
     this.statusCache.set(id, next);
     return next;
+  }
+
+  /**
+   * 启动时把已配置的云 Provider 探一遍，顺带把模型列表拉回缓存。
+   *
+   * 「接口配好了就该知道有哪些模型」不能只在保存密钥那一刻成立 ——
+   * Helper 重启之后缓存是空的，设置页的模型下拉就退回「尚未拉取模型」，
+   * 用户明明上周就配好了，界面却表现得像什么都没配过，
+   * 还得自己想到去点一次「拉取模型」才能恢复。
+   *
+   * 只探已启用且已配置的：没配的探了必然失败，白白拖慢启动还刷一屏错误日志。
+   * 全程不抛：这是锦上添花的预热，探不到就等用户下次主动拉，
+   * 绝不能因为某个平台连不上就把 Helper 启动搅黄。
+   */
+  async warmupCloud(): Promise<void> {
+    const targets = PROVIDERS.filter((desc) => {
+      if (desc.kind === 'comfyui') return false; // 启动流程里单独探过了
+      if (!desc.capabilities.includes('listModels')) return false;
+      if (!this.settings.providerSettings(desc.id).enabled) return false;
+      return this.adapters.get(desc.id)?.isConfigured() ?? false;
+    });
+    await Promise.all(
+      targets.map(async (desc) => {
+        try {
+          const s = await this.probe(desc.id);
+          this.log.info('云 Provider 预热', { providerId: desc.id, online: s.online, models: s.models.length });
+        } catch (e) {
+          this.log.warn('云 Provider 预热失败', { providerId: desc.id, error: String(e) });
+        }
+      })
+    );
   }
 
   /* ---------------- 功能 → Provider 解析 ---------------- */

@@ -22,9 +22,11 @@ import {
   featureDefaults,
   findFeature,
   PROVIDERS,
-  findProvider
+  findProvider,
+  filterModelsByScope,
+  isModelScope
 } from '@psai/shared';
-import type { ErrorCode, JobListQuery, CreateJobRequest, FeatureBinding, AppSettings } from '@psai/shared';
+import type { ErrorCode, JobListQuery, CreateJobRequest, FeatureBinding, AppSettings, ModelScope } from '@psai/shared';
 import type { HelperConfig } from './config.js';
 import type { Logger } from './log.js';
 import type { Db } from './db.js';
@@ -245,8 +247,14 @@ export async function buildServer(d: ServerDeps): Promise<FastifyInstance> {
     ok: true,
     providers: d.providers.allStatus().map((s) => {
       const desc = findProvider(s.id)!;
+      // 缓存里存的是平台全量目录；给 UI 的默认口径是认可的生图模型。
+      // total 一并带上，设置页才能如实说「筛出 N 个 / 平台共 M 个」。
+      const picked = filterModelsByScope(s.models, 'approved');
       return {
         ...s,
+        models: picked.models,
+        modelsScope: picked.scope,
+        modelsTotal: picked.total,
         label: desc.label,
         kind: desc.kind,
         consoleUrl: desc.consoleUrl,
@@ -293,7 +301,32 @@ export async function buildServer(d: ServerDeps): Promise<FastifyInstance> {
     if (wrote === 0) return fail(reply, new PsaiError('JOB_PARAM_INVALID', '没有提供任何有效的凭据字段'));
     d.settings.upsertProvider({ id, hasCredentials: true, enabled: true });
     d.providers.refresh();
-    return { ok: true, status: d.providers.status(id) };
+
+    /**
+     * 配好 Key 就顺手把模型拉回来。
+     *
+     * 以前保存完 Key 什么也不发生：设置页的模型下拉停在「尚未拉取模型」，
+     * 生成页的模型下拉也是空的，用户得自己想到再去点一次「拉取模型」。
+     * 可"配好了接口就该知道有哪些模型"是这一步的题中之义，不该让用户补一次操作。
+     *
+     * probe 失败**不**让保存失败 —— Key 已经存进去了，网络抖一下不该表现成
+     * 「保存失败」让用户重填一遍。这里如实把 probe 的结果一起带回去，
+     * UI 据此显示「已保存，但没拉到模型：<原因>」。
+     */
+    let models: string[] = [];
+    let total = 0;
+    let modelsError: string | null = null;
+    try {
+      const probed = await d.providers.probe(id);
+      const picked = filterModelsByScope(probed.models, 'approved');
+      models = picked.models;
+      total = picked.total;
+      d.events.broadcast({ type: 'provider:status', providerId: id, online: probed.online, detail: probed.reason ?? '' });
+    } catch (e) {
+      modelsError = toErrorShape(e).message;
+      d.log.warn('保存密钥后自动拉取模型失败', { providerId: id, error: modelsError });
+    }
+    return { ok: true, status: d.providers.status(id), models, total, modelsError };
   });
 
   app.delete('/v1/providers/:id/credentials', async (req) => {
@@ -321,11 +354,25 @@ export async function buildServer(d: ServerDeps): Promise<FastifyInstance> {
     }
   });
 
+  /**
+   * 模型列表。默认只给认可的生图模型，`?scope=all` 才给平台全量目录。
+   *
+   * 默认口径收窄的理由：Comfly 一次回 858 个，绝大多数是聊天/语音/视频模型，
+   * 拿去生图一律失败。把全量目录摆进下拉，等于让用户在 858 个选项里
+   * 猜哪 4 个能用 —— 猜错就是一次「点了没反应」。
+   *
+   * 但收窄不能变成锁死：用户点「拉取全部模型」就走 scope=all，
+   * 想试冷门模型随时能试。返回里带上 scope 与 total，
+   * UI 据此如实说明"这是筛过的"，而不是假装平台就这么几个模型。
+   */
   app.get('/v1/providers/:id/models', async (req, reply) => {
     const { id } = req.params as { id: string };
+    const raw = String((req.query as { scope?: unknown })?.scope ?? 'approved');
+    const want: ModelScope = isModelScope(raw) ? raw : 'approved';
     try {
-      const models = await d.providers.adapter(id).listModels();
-      return { ok: true, models };
+      const all = await d.providers.adapter(id).listModels();
+      const picked = filterModelsByScope(all, want);
+      return { ok: true, models: picked.models, scope: picked.scope, requestedScope: want, total: picked.total };
     } catch (e) {
       return fail(reply, e);
     }
@@ -751,9 +798,10 @@ export async function buildServer(d: ServerDeps): Promise<FastifyInstance> {
           return { buffer: d.assets.read(id), mime: rec.mime };
         });
       }
-      if (binding?.model) input.model = binding.model;
+      // 同 engine.runTextTask：不把功能绑定的**生图**模型传进文本能力，
+      // 优化/反推一律用适配器内置的语言模型（GPT-5.6 一族）。
       const text = await adapter.textComplete(input);
-      return { ok: true, text, providerId };
+      return { ok: true, text, providerId, model: adapter.lastTextModel?.() ?? null };
     } catch (e) {
       return fail(reply, e);
     }

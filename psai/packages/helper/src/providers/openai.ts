@@ -12,7 +12,14 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { PsaiError, toErrorShape } from '@psai/shared';
+import {
+  PsaiError,
+  toErrorShape,
+  imageRouteFor,
+  normalizeMidjourneyPrompt,
+  pickPromptModel,
+  DEFAULT_PROMPT_MODEL
+} from '@psai/shared';
 import type { ProviderCapability, ErrorCode } from '@psai/shared';
 import type {
   ProviderAdapter,
@@ -53,6 +60,21 @@ interface ImagesResponse {
 }
 
 const RESULT_TTL_MS = 30 * 60 * 1000;
+
+/**
+ * MJ 任务的 remoteId 前缀。
+ * 同一个适配器现在既有同步结果（放在内存 map 里，id 是 oai_*），
+ * 又有异步任务（id 是平台给的 taskId）。靠前缀区分，不必额外存一张表。
+ */
+const MJ_PREFIX = 'mj:';
+
+/** MJ 代理 /mj/task/{id}/fetch 的响应。字段名沿用平台的写法。 */
+interface MjTask {
+  status?: 'NOT_START' | 'SUBMITTED' | 'IN_PROGRESS' | 'SUCCESS' | 'FAILURE' | string;
+  progress?: string;
+  failReason?: string;
+  imageUrl?: string;
+}
 
 /**
  * 生图请求的超时下限。
@@ -217,8 +239,10 @@ export function explainHttpError(
 export class OpenAiCompatibleAdapter implements ProviderAdapter {
   readonly id: string;
   private results = new Map<string, { at: number; images: ResultImage[] }>();
-  /** 模型列表缓存：挑视觉模型要用，不必每次反推都去拉一遍。 */
+  /** 模型列表缓存：挑内置提示词模型要用，不必每次反推都去拉一遍。 */
   private modelsCache: { at: number; models: string[] } | null = null;
+  /** 最近一次 textComplete 用的模型，供 UI 如实显示。 */
+  private lastText: string | null = null;
 
   constructor(
     private opts: OpenAiOptions,
@@ -324,10 +348,30 @@ export class OpenAiCompatibleAdapter implements ProviderAdapter {
       );
     }
 
+    /**
+     * 按模型决定走哪条协议。
+     *
+     * 这一步以前不存在 —— 所有模型一律打 /images/generations，于是认可名单里
+     * 有两族根本出不了图，报的还是看不出所以然的错：
+     *   gemini-3-pro-image → 503「不支持此 API 路径 [/v1/images/generations]」
+     *   midjourney         → 400「The model `midjourney` does not exist」
+     * 路由表在 @psai/shared，和「哪些模型可选」是同一份事实源：
+     * 能选中的模型，必然有一条对应的路，不会出现"列出来了但打不通"。
+     */
+    const route = imageRouteFor(model) ?? 'images';
+
+    if (route === 'mj') {
+      // 异步代理接口：这里只拿到 taskId，出图靠上层轮询 poll()
+      return this.mjSubmit({ prompt, ctx });
+    }
+
     const remoteId = `oai_${randomUUID()}`;
-    const out = images.length === 0
-      ? await this.textToImage({ model, prompt, size, ctx })
-      : await this.imageToImage({ model, prompt, size, ctx });
+    const out =
+      route === 'chat'
+        ? await this.chatToImage({ model, prompt, ctx })
+        : images.length === 0
+          ? await this.textToImage({ model, prompt, size, ctx })
+          : await this.imageToImage({ model, prompt, size, ctx });
 
     this.results.set(remoteId, { at: Date.now(), images: out });
     this.gc();
@@ -411,6 +455,136 @@ export class OpenAiCompatibleAdapter implements ProviderAdapter {
     return this.readImages(await this.okJson(res, url), url);
   }
 
+  /* ---------------- chat 路：Gemini 图像族 ---------------- */
+
+  /**
+   * 走 /chat/completions 出图。
+   *
+   * Gemini 的图像模型在这个网关上**只有**这一条路。真机实测：
+   *   POST /v1/images/generations  gemini-3-pro-image → 503「不支持此 API 路径」
+   *   POST /v1/chat/completions    gemini-3-pro-image → 200 · 27s
+   * 200 的那次，图不在什么 data 数组里，而是拼在助手回复的正文里：
+   *   "![image](https://files.closeai.fans/filesystem/output/…/xxx.jpg)"
+   * 所以这里要从**一段自由文本**里把图捞出来，而不是读结构化字段。
+   *
+   * 注意这条路没有 size 参数可传 —— 尺寸由模型名决定（-2k / -4k / -512px），
+   * 面板上的分辨率对它不起作用。硬塞一个它不认的参数只会把请求打成 400，
+   * 不如不塞：出来的图尺寸如实是多少就是多少，写回时按实际像素走。
+   */
+  private async chatToImage(a: { model: string; prompt: string; ctx: SubmitContext }): Promise<ResultImage[]> {
+    const url = `${this.base()}/chat/completions`;
+    const content: unknown[] = [];
+    for (const img of a.ctx.inputs) {
+      content.push({
+        type: 'image_url',
+        image_url: { url: `data:${img.mime};base64,${img.buffer.toString('base64')}` }
+      });
+    }
+    content.push({ type: 'text', text: a.prompt });
+
+    const res = await httpFetch(url, {
+      method: 'POST',
+      headers: this.headers({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ model: a.model, messages: [{ role: 'user', content }] }),
+      timeoutMs: Math.max(this.opts.timeoutMs, IMAGE_TIMEOUT_MS)
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      const { codeForStatus } = await import('./http.js');
+      throw explainHttpError(res.status, text, this.opts.label, codeForStatus(res.status));
+    }
+    const json = await jsonOf<{ choices?: Array<{ message?: { content?: unknown } }> }>(res, url);
+    const said = flattenChatContent(json.choices?.[0]?.message?.content);
+    const refs = extractImageRefs(said);
+    if (refs.length === 0) {
+      // 模型答了话却没给图。把它说的那句带上 —— 通常是拒答理由（内容策略之类），
+      // 那句话本身就是用户该看到的东西，比一句「没有返回任何图像」有用得多。
+      throw new PsaiError(
+        'PROVIDER_BAD_RESPONSE',
+        `${this.opts.label}（${a.model}）没有返回图像${said ? `，它说：${said.slice(0, 300)}` : ''}`
+      );
+    }
+    const out: ResultImage[] = [];
+    for (const ref of refs) {
+      if (ref.startsWith('data:')) {
+        const buffer = Buffer.from(stripDataUri(ref), 'base64');
+        out.push({ buffer, mime: sniffImageMime(ref, buffer) });
+        continue;
+      }
+      const r = await ensureOk(await httpFetch(ref, { timeoutMs: 120_000 }), ref);
+      const buffer = Buffer.from(await r.arrayBuffer());
+      const ct = (r.headers.get('content-type') ?? '').split(';')[0];
+      out.push({ buffer, mime: ct && ct.startsWith('image/') ? ct : sniffImageMime('', buffer) });
+    }
+    return out;
+  }
+
+  /* ---------------- mj 路：Midjourney 异步代理 ---------------- */
+
+  /**
+   * MJ 代理接口的根地址。
+   *
+   * 它**不在** /v1 底下：baseUrl 是 https://ai.comfly.org/v1，
+   * 而提交要打 https://ai.comfly.org/mj/submit/imagine。
+   * 照着 base() 拼会得到 /v1/mj/… ，404 之后看起来像"平台不支持 MJ"，
+   * 其实只是我们把路径拼错了。
+   */
+  private mjRoot(): string {
+    return this.base().replace(/\/v\d+(?:beta)?$/i, '');
+  }
+
+  private mjHeaders(): Record<string, string> {
+    const h = this.headers({ 'Content-Type': 'application/json' });
+    // 这套代理认 mj-api-secret；同时带上 Authorization，两种网关配置都能过
+    if (this.opts.apiKey) h['mj-api-secret'] = this.opts.apiKey;
+    return h;
+  }
+
+  private async mjSubmit(a: { prompt: string; ctx: SubmitContext }): Promise<SubmitResult> {
+    if (a.ctx.inputs.length > 0) {
+      throw new PsaiError(
+        'PROVIDER_UNSUPPORTED',
+        'Midjourney 的代理接口只接文生图，垫图要先把图传到公网并在提示词里给出链接。这一步我们还没做，先换一个支持图生图的模型。'
+      );
+    }
+    // 认可名单要的是 v7 及以上，可版本号在提示词里而不在模型名里
+    const { prompt, error } = normalizeMidjourneyPrompt(a.prompt);
+    if (error) throw new PsaiError('JOB_PARAM_INVALID', error);
+
+    const url = `${this.mjRoot()}/mj/submit/imagine`;
+    const res = await httpFetch(url, {
+      method: 'POST',
+      headers: this.mjHeaders(),
+      body: JSON.stringify({ prompt }),
+      timeoutMs: Math.max(this.opts.timeoutMs, 120_000)
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      const { codeForStatus } = await import('./http.js');
+      throw explainHttpError(res.status, text, `${this.opts.label} · Midjourney`, codeForStatus(res.status));
+    }
+    const json = await jsonOf<{ code?: number; description?: string; result?: string }>(res, url);
+    // code 1 = 提交成功；21 = 已存在（复用同一个任务）；其余都是没提交上去
+    if (!json.result || (json.code !== 1 && json.code !== 21 && json.code !== 22)) {
+      throw new PsaiError(
+        'PROVIDER_BAD_RESPONSE',
+        `${this.opts.label} · Midjourney 提交失败：${json.description ?? JSON.stringify(json).slice(0, 200)}`
+      );
+    }
+    this.log.debug('Midjourney 任务已提交', { jobId: a.ctx.jobId, taskId: json.result, prompt });
+    // 不带 immediateResults —— 上层据此转入轮询
+    return { remoteId: `${MJ_PREFIX}${json.result}` };
+  }
+
+  private async mjFetch(taskId: string): Promise<MjTask> {
+    const url = `${this.mjRoot()}/mj/task/${encodeURIComponent(taskId)}/fetch`;
+    const res = await ensureOk(
+      await httpFetch(url, { headers: this.mjHeaders(), timeoutMs: Math.max(this.opts.timeoutMs, 60_000) }),
+      url
+    );
+    return jsonOf<MjTask>(res, url);
+  }
+
   /**
    * 非 2xx 时把上游的错误**读懂**再抛，而不是把整个 JSON 原样塞进消息里。
    *
@@ -439,7 +613,8 @@ export class OpenAiCompatibleAdapter implements ProviderAdapter {
     for (const p of payloads) {
       const b64 = p.b64_json ?? (p.image && !p.image.startsWith('http') ? p.image : undefined);
       if (b64) {
-        out.push({ buffer: Buffer.from(stripDataUri(b64), 'base64'), mime: 'image/png' });
+        const buffer = Buffer.from(stripDataUri(b64), 'base64');
+        out.push({ buffer, mime: sniffImageMime(b64, buffer) });
         continue;
       }
       const link = p.url ?? (p.image?.startsWith('http') ? p.image : undefined);
@@ -462,8 +637,9 @@ export class OpenAiCompatibleAdapter implements ProviderAdapter {
     if (!this.opts.capabilities.includes('vision') && (input.images?.length ?? 0) > 0) {
       throw new PsaiError('PROVIDER_UNSUPPORTED', `${this.opts.label} 不支持图像理解`);
     }
-    const model = input.model || (await this.visionModel());
+    const model = input.model || (await this.promptModel());
     if (!model) throw new PsaiError('JOB_PARAM_INVALID', `${this.opts.label}: 未选择模型`);
+    this.lastText = model;
 
     const content: unknown[] = [];
     for (const img of input.images ?? []) {
@@ -496,10 +672,24 @@ export class OpenAiCompatibleAdapter implements ProviderAdapter {
   }
 
   /**
-   * 挑一个能看图的模型：显式配的优先，否则在平台实际有的模型里按偏好挑。
-   * 拉列表失败就退回生图默认模型 —— 至少还有机会成功，总比直接报错强。
+   * 反推 / 优化提示词内置用哪个模型。
+   *
+   * 出厂钉死在 GPT-5.6 一族，设置页不给这个旋钮 —— 这是给生图打底的内部工序，
+   * 不该让用户先去配一个语言模型才能用「✨ 优化提示词」。
+   *
+   * 关键是**绝不**退回 opts.defaultModel。那是「生图默认模型」：
+   * 用户把它设成 gpt-image-2 或 flux-2-max，这里拿它去发 chat 请求必然失败，
+   * 而且报的错跟"提示词"毫无关系，用户根本猜不到是这一步坏了。
+   * 洗图/去噪默认开着反推，于是整条路径看起来就是「闭源模型没有任何结果」。
+   *
+   * 真机实测三个 5.6 变体文本与视觉都正常（terra 2.2s / luna 2.8s / sol 7.0s），
+   * 所以带图的反推和纯文本的优化用同一个模型就够，不必再分两套。
    */
-  private async visionModel(): Promise<string> {
+  lastTextModel(): string | null {
+    return this.lastText;
+  }
+
+  private async promptModel(): Promise<string> {
     const fresh = this.modelsCache && Date.now() - this.modelsCache.at < 10 * 60 * 1000;
     if (!fresh) {
       try {
@@ -508,26 +698,76 @@ export class OpenAiCompatibleAdapter implements ProviderAdapter {
         this.modelsCache = null;
       }
     }
-    const picked = this.modelsCache ? pickVisionModel(this.modelsCache.models) : null;
-    if (picked) return picked;
-    return this.opts.defaultModel;
+    if (!this.modelsCache) return DEFAULT_PROMPT_MODEL;
+    // 先按内置偏好挑 GPT-5.6 一族，再退到看得懂图的通用视觉模型
+    return pickPromptModel(this.modelsCache.models) ?? pickVisionModel(this.modelsCache.models) ?? DEFAULT_PROMPT_MODEL;
   }
 
   /* ---------------- 状态 ---------------- */
 
   async poll(remoteId: string): Promise<PollResult> {
+    if (remoteId.startsWith(MJ_PREFIX)) return this.mjPoll(remoteId.slice(MJ_PREFIX.length));
     const hit = this.results.get(remoteId);
     if (hit) return { state: 'done', progress: { ...emptyProgress('已完成'), value: 1 } };
     return { state: 'unknown' };
   }
 
+  /**
+   * MJ 任务状态。真机上跑过一轮完整的：
+   *   IN_PROGRESS 8% → 21% → 35% → 47% → 58% → 66% → 77% → SUCCESS 100%（约 54s）
+   * progress 是 "77%" 这样的字符串，要转成 0..1 才能喂给进度条。
+   */
+  private async mjPoll(taskId: string): Promise<PollResult> {
+    const t = await this.mjFetch(taskId);
+    const pct = /(\d+(?:\.\d+)?)\s*%/.exec(t.progress ?? '');
+    const value = pct ? Math.min(1, Math.max(0, Number(pct[1]) / 100)) : null;
+    switch (t.status) {
+      case 'SUCCESS':
+        return { state: 'done', progress: { ...emptyProgress('已完成'), value: 1 } };
+      case 'FAILURE':
+        return {
+          state: 'failed',
+          error: toErrorShape(
+            new PsaiError(
+              'PROVIDER_UPSTREAM_ERROR',
+              `Midjourney 任务失败：${t.failReason || '平台没有说明原因，可以稍后重试或换一个模型'}`
+            )
+          )
+        };
+      case 'NOT_START':
+      case 'SUBMITTED':
+        return { state: 'queued', progress: { ...emptyProgress('Midjourney 排队中'), value } };
+      default:
+        return { state: 'running', progress: { ...emptyProgress('Midjourney 生成中'), value } };
+    }
+  }
+
   async fetchResults(remoteId: string): Promise<ResultImage[]> {
+    if (remoteId.startsWith(MJ_PREFIX)) {
+      const t = await this.mjFetch(remoteId.slice(MJ_PREFIX.length));
+      if (!t.imageUrl) throw new PsaiError('PROVIDER_BAD_RESPONSE', 'Midjourney 任务已完成但没有给出图片地址');
+      // 这个地址在网关自己域名下（/mj/image/<taskId>），照样要带鉴权头
+      const res = await ensureOk(
+        await httpFetch(t.imageUrl, { headers: this.mjHeaders(), timeoutMs: 180_000 }),
+        t.imageUrl
+      );
+      const buffer = Buffer.from(await res.arrayBuffer());
+      const ct = (res.headers.get('content-type') ?? '').split(';')[0];
+      return [{ buffer, mime: ct && ct.startsWith('image/') ? ct : sniffImageMime('', buffer) }];
+    }
     const hit = this.results.get(remoteId);
     if (!hit) throw new PsaiError('JOB_LOST', '同步型云接口的结果已过期，请重新提交');
     return hit.images;
   }
 
-  async cancel(): Promise<CancelResult> {
+  async cancel(remoteId: string): Promise<CancelResult> {
+    if (remoteId.startsWith(MJ_PREFIX)) {
+      // MJ 代理没有撤销接口。本地停止等待可以，但那边照跑照扣，必须说清楚。
+      return {
+        ok: false,
+        reason: 'Midjourney 的代理接口没有取消能力；本地会停止等待，但任务仍在平台上继续，费用照常产生。'
+      };
+    }
     return {
       ok: false,
       reason: `${this.opts.label} 是同步接口，请求发出后无法取消；本地会停止等待，但费用可能已经产生。`
@@ -540,7 +780,71 @@ export class OpenAiCompatibleAdapter implements ProviderAdapter {
   }
 }
 
+/**
+ * chat 回复的 content 可能是字符串，也可能是 [{type:'text',text:…}, …]。
+ * 两种都见过，这里统一压成一段文本再去里面找图。
+ */
+export function flattenChatContent(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content
+    .map((part) => {
+      if (typeof part === 'string') return part;
+      const p = part as { text?: unknown; image_url?: { url?: unknown } };
+      if (typeof p.text === 'string') return p.text;
+      if (typeof p.image_url?.url === 'string') return p.image_url.url;
+      return '';
+    })
+    .filter(Boolean)
+    .join('\n');
+}
+
+/**
+ * 从一段自由文本里把图片地址捞出来。
+ *
+ * Gemini 图像族回的是 markdown：`![image](https://files.closeai.fans/…/xxx.jpg)`。
+ * 但不能只认 markdown —— 换个模型/换个网关就可能回裸链接或 data URI，
+ * 那时候「没找到图」会被归到「模型没出图」，排查方向直接跑偏。
+ * 三种写法都认，按出现顺序去重返回。
+ */
+export function extractImageRefs(text: string): string[] {
+  const out: string[] = [];
+  const push = (s: string | undefined): void => {
+    const v = s?.trim();
+    if (v && !out.includes(v)) out.push(v);
+  };
+  // 1. markdown 图片
+  for (const m of text.matchAll(/!\[[^\]]*\]\(\s*([^)\s]+)/g)) push(m[1]);
+  // 2. data URI
+  for (const m of text.matchAll(/data:image\/[a-z0-9.+-]+;base64,[A-Za-z0-9+/=]+/gi)) push(m[0]);
+  // 3. 裸链接（结尾是图片扩展名的才算，否则会把正文里随便一个网址当成图）
+  for (const m of text.matchAll(/https?:\/\/[^\s)<>"']+\.(?:png|jpe?g|webp|gif)(?:\?[^\s)<>"']*)?/gi)) push(m[0]);
+  return out;
+}
+
 function stripDataUri(s: string): string {
   const i = s.indexOf('base64,');
   return i >= 0 ? s.slice(i + 7) : s;
+}
+
+/**
+ * 认出这坨字节到底是什么图。
+ *
+ * 起因是 nano-banana-pro：它的 b64_json 回的是一整条 data URI，
+ * 而且内容是 **JPEG** —— `data:image/jpeg;base64,/9j/…`。
+ * 我们以前无条件标成 image/png，于是一张 JPEG 被存成 .png：
+ * 资产库缩略图、写回 Photoshop 的图层、导出的文件名全都对不上真实格式。
+ *
+ * 先信 data URI 自己声明的类型，没有就看magic bytes，两个都认不出才退回 png。
+ */
+export function sniffImageMime(b64: string, buf: Buffer): string {
+  const declared = /^data:(image\/[a-z0-9.+-]+);base64,/i.exec(b64.trim());
+  if (declared?.[1]) return declared[1].toLowerCase();
+  if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'image/jpeg';
+  if (buf.length >= 8 && buf.subarray(0, 8).toString('hex') === '89504e470d0a1a0a') return 'image/png';
+  if (buf.length >= 12 && buf.subarray(0, 4).toString('latin1') === 'RIFF' && buf.subarray(8, 12).toString('latin1') === 'WEBP') {
+    return 'image/webp';
+  }
+  if (buf.length >= 6 && buf.subarray(0, 6).toString('latin1').startsWith('GIF8')) return 'image/gif';
+  return 'image/png';
 }
