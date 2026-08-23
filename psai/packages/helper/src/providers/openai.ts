@@ -13,7 +13,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { PsaiError, toErrorShape } from '@psai/shared';
-import type { ProviderCapability } from '@psai/shared';
+import type { ProviderCapability, ErrorCode } from '@psai/shared';
 import type {
   ProviderAdapter,
   SubmitContext,
@@ -53,6 +53,19 @@ interface ImagesResponse {
 }
 
 const RESULT_TTL_MS = 30 * 60 * 1000;
+
+/**
+ * 生图请求的超时下限。
+ *
+ * 这一族是同步接口：提交完就一直挂着连接等图，慢是常态。
+ * 实测同一个 gpt-image-1.5、同样的提示词，三次分别是 101s / 174s / 162s ——
+ * 原来的 180s 上限贴着实测值，稍微抖一下就会在快出图的时候把连接掐掉，
+ * 用户白等三分钟还只看到一句「超时」，和「闭源模型没有任何结果」是同一种体感。
+ *
+ * 留到 5 分钟：真卡住了照样会超时，但正常的慢不会被误杀。
+ * 任务引擎本来就异步跑，等久一点不占用户的操作，面板上也一直有进度。
+ */
+const IMAGE_TIMEOUT_MS = 300_000;
 
 
 /**
@@ -147,6 +160,58 @@ export function pickVisionModel(models: readonly string[]): string | null {
     if (hit) return hit;
   }
   return null;
+}
+
+/**
+ * 把上游的错误响应翻译成一句用户能照着做的话。
+ *
+ * 三种情况都见过真机：
+ *   1. 有正经 message  —— 直接用，比如「所有分组对于模型 X 不支持此 API 路径」
+ *   2. message 是空白  —— 实测 gpt-image-1.5-2025-12-16 回的是 {"message":" "}。
+ *      把这坨 JSON 原样摆给用户毫无价值，里面本来就没有信息，
+ *      面板上会显示成「Comfly HTTP 503：」后面一片空白，看着像我们把错误吞了。
+ *   3. 压根不是 JSON   —— 截断原文，至少留个线索。
+ *
+ * 另外「无可用渠道 / 模型不存在 / 未开通 / 不支持此 API 路径」这一类要单独拎出来：
+ * 平台在线、Key 也对，纯粹是这个模型用不了，换一个立刻能继续 ——
+ * 和「平台挂了」是完全不同的两件事，报同一个码会把排查方向带偏。
+ */
+export function explainHttpError(
+  status: number,
+  body: string,
+  label: string,
+  fallbackCode: ErrorCode
+): PsaiError {
+  let upstream = '';
+  let parsed = false;
+  try {
+    const j = JSON.parse(body) as { error?: { message?: string }; message?: string };
+    parsed = true;
+    upstream = (j.error?.message ?? j.message ?? '').trim();
+  } catch {
+    /* 上游没给 JSON，下面用原文截断 */
+  }
+
+  const detail =
+    upstream ||
+    (parsed
+      ? '平台没有说明原因，通常是这个模型的上游线路临时不可用，可以换一个模型或稍后重试'
+      : body.trim().slice(0, 300) || '平台没有返回任何内容');
+
+  const modelGone =
+    /无可用渠道|无可用的渠道|模型不存在|不支持该模型|未开通|不支持此 ?API ?路径|不支持此接口|no available channel|model_not_found|does not exist|not available|unsupported.*endpoint/i.test(
+      detail
+    );
+
+  // PsaiError 的第二个参数是 details、第三个才是消息覆盖。
+  // 这里都只给 details，消息用错误码自带的那句 —— 那句本身就说清楚了是什么问题。
+  if (modelGone) {
+    return new PsaiError(
+      'PROVIDER_MODEL_UNAVAILABLE',
+      `${label}：${detail}。到「参数设置 → 模型」换一个再试，下拉里的列表是从该平台实时拉取的。`
+    );
+  }
+  return new PsaiError(fallbackCode, `${label} HTTP ${status}：${detail}`);
 }
 
 export class OpenAiCompatibleAdapter implements ProviderAdapter {
@@ -287,7 +352,7 @@ export class OpenAiCompatibleAdapter implements ProviderAdapter {
       method: 'POST',
       headers: this.headers({ 'Content-Type': 'application/json' }),
       body: JSON.stringify(body),
-      timeoutMs: Math.max(this.opts.timeoutMs, 180_000)
+      timeoutMs: Math.max(this.opts.timeoutMs, IMAGE_TIMEOUT_MS)
     });
     return this.readImages(await this.okJson(res, url), url);
   }
@@ -316,7 +381,7 @@ export class OpenAiCompatibleAdapter implements ProviderAdapter {
       method: 'POST',
       headers: this.headers({ 'Content-Type': contentType }),
       body,
-      timeoutMs: Math.max(this.opts.timeoutMs, 180_000)
+      timeoutMs: Math.max(this.opts.timeoutMs, IMAGE_TIMEOUT_MS)
     });
 
     if (res.status === 404 || res.status === 405) {
@@ -341,7 +406,7 @@ export class OpenAiCompatibleAdapter implements ProviderAdapter {
       method: 'POST',
       headers: this.headers({ 'Content-Type': 'application/json' }),
       body: JSON.stringify(body),
-      timeoutMs: Math.max(this.opts.timeoutMs, 180_000)
+      timeoutMs: Math.max(this.opts.timeoutMs, IMAGE_TIMEOUT_MS)
     });
     return this.readImages(await this.okJson(res, url), url);
   }
@@ -361,32 +426,8 @@ export class OpenAiCompatibleAdapter implements ProviderAdapter {
   private async okJson(res: Response, url: string): Promise<ImagesResponse> {
     if (!res.ok) {
       const text = await res.text().catch(() => '');
-      let upstream = '';
-      try {
-        const j = JSON.parse(text) as { error?: { message?: string }; message?: string };
-        upstream = j.error?.message ?? j.message ?? '';
-      } catch {
-        /* 上游没给 JSON，下面用原文截断 */
-      }
-      const detail = upstream || text.slice(0, 300);
-
-      // 「无可用渠道 / 模型不存在 / 未开通」这一类：平台在线、Key 也对，就是这个模型用不了。
-      // 换一个模型立刻能继续，所以要和「服务挂了」区分开。
-      const modelGone =
-        /无可用渠道|无可用的渠道|模型不存在|不支持该模型|未开通|no available channel|model_not_found|does not exist|not available/i.test(
-          detail
-        );
-      // PsaiError 的第二个参数是 details、第三个才是消息覆盖。
-      // 这里都只给 details，消息用错误码自带的那句 —— 那句本身就说清楚了是什么问题。
-      if (modelGone) {
-        throw new PsaiError(
-          'PROVIDER_MODEL_UNAVAILABLE',
-          `${this.opts.label}：${detail}。到「参数设置 → 模型」换一个再试，下拉里的列表是从该平台实时拉取的。`
-        );
-      }
-
       const { codeForStatus } = await import('./http.js');
-      throw new PsaiError(codeForStatus(res.status), `${this.opts.label} HTTP ${res.status}：${detail}`);
+      throw explainHttpError(res.status, text, this.opts.label, codeForStatus(res.status));
     }
     return jsonOf<ImagesResponse>(res, url);
   }

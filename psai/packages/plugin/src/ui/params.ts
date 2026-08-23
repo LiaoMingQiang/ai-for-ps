@@ -449,13 +449,24 @@ function renderModel(spec: Extract<ParamSpec, { kind: 'model' }>, ctx: ParamCont
     onchange: (e: Event) => ctx.set(spec.id, (e.target as HTMLSelectElement).value)
   }) as HTMLSelectElement;
 
-  select.appendChild(h('option', { value: '' }, models.length ? '（使用默认模型）' : '（尚未拉取模型列表）'));
-  for (const m of models) {
+  const placeholder = h('option', { value: '' }, models.length ? '（使用默认模型）' : '（尚未拉取模型列表）') as HTMLOptionElement;
+  if (!current) placeholder.setAttribute('selected', '');
+  select.appendChild(placeholder);
+  // 当前值不在筛选后的列表里也要列出来，否则用户会以为自己没选过
+  const all = current && !models.includes(current) ? [current, ...models] : models;
+  for (const m of all) {
     const opt = h('option', { value: m }, m) as HTMLOptionElement;
     if (m === current) opt.setAttribute('selected', '');
     select.appendChild(opt);
   }
-  return field(spec, select);
+
+  // 列表被筛过就说清楚，否则「怎么少了这么多模型」会被当成 bug
+  const total = (ctx.options['modelsTotal'] ?? []).length;
+  const note =
+    total > models.length
+      ? `只列出适合生图的 ${models.length} 个（该平台共 ${total} 个）。要用别的，去「设置 → 推荐平台」填完整模型名。`
+      : '';
+  return field(spec, note ? h('div', { class: 'model-pick' }, select, h('div', { class: 'muted hint' }, note)) : select);
 }
 
 /* ---------------- 比例 ---------------- */

@@ -678,6 +678,30 @@ test('失败的任务可以重试', async () => {
   assert.equal(done.error, null, '重试成功后应清掉错误');
 });
 
+test('重试后的耗时不会是负数', async () => {
+  // 真机上见过「耗时 -299170ms」。
+  // 原因：transition() 写的是 finished_at = COALESCE(finished_at, ?)，只认第一次；
+  // 重试把 started_at 刷成新时间，finished_at 却还停在上一次失败的时刻，
+  // 面板拿 finished - started 一减就是负的。
+  stub.failNext();
+  const job = await createJob();
+  const failed = await waitForState(job.id, (j) => j.state === 'failed', 20000);
+  assert.ok(failed.finishedAt, '第一次失败应记下结束时间');
+
+  await new Promise((r) => setTimeout(r, 30));
+  await api('POST', `/v1/jobs/${job.id}/retry`);
+
+  const done = await waitForState(job.id, (j) => j.results.length > 0, 20000);
+  assert.ok(done.startedAt, '重试后应有开始时间');
+  assert.ok(done.finishedAt, '重试完成后应有结束时间');
+  const elapsed = done.finishedAt - done.startedAt;
+  assert.ok(elapsed >= 0, `耗时不能为负，实际 ${elapsed}ms（started=${done.startedAt} finished=${done.finishedAt}）`);
+  assert.ok(
+    done.finishedAt > failed.finishedAt,
+    '结束时间应刷新到这一次，而不是留着上一次失败的时刻'
+  );
+});
+
 test('已完成的任务不能再取消', async () => {
   const job = await createJob();
   await waitForState(job.id, (j) => j.state === 'writeback_pending');

@@ -220,3 +220,85 @@ export interface ProviderRuntimeStatus {
   models: string[];
   capabilities: ProviderCapability[];
 }
+
+/**
+ * 判断一个模型 id 看起来是不是「能用 /images/generations 出图」的模型。
+ *
+ * 为什么需要这个：聚合网关的 /models 会把平台上**所有**模型都列出来 ——
+ * 实测 Comfly 返回 858 个，里面绝大多数是对话、音频、视频、重排模型。
+ * 生成页的模型下拉直接把这 858 个全塞进去，用户没有任何依据去挑，
+ * 挑中一个不支持这个接口的就是一次失败：
+ *   gemini-3-pro-image-2k → 503「所有分组对于模型 … 不支持此 API 路径」
+ * 这不是用户的错，是我们把一份没法用的清单摆在了他面前。
+ *
+ * 这里只做**启发式**过滤，不假装准确：
+ *  - 命中的不保证一定能用（该账号可能没开通某个模型的渠道）
+ *  - 没命中的也未必真不行（新模型的命名我们可能还不认识）
+ * 所以界面上要如实说明「只列出了 N 个 / 共 M 个」，
+ * 真要用冷门模型，去「设置 → 推荐平台」里填完整名字，那里给的是全量列表。
+ */
+/**
+ * 生图模型的正面特征。
+ *
+ * 第一条 /image/ 是主力：这一族的命名几乎都把 image 写进名字里 ——
+ * gpt-image-*、gemini-3-pro-image-*、grok-4.2-image、kling-image-*、
+ * sora_image、z-image-turbo、qwen-image-edit… 实测 858 个模型里
+ * 有 56 个带 image，除 Midjourney 那几个外全都能走 /images/generations。
+ *
+ * 后面几条补的是**名字里没有 image 的**生图模型。
+ * 一开始我只写了前缀白名单，结果 gemini / grok / kling / sora 整族被误杀 ——
+ * 用户在下拉里根本看不到能用的模型，比不过滤还糟。
+ */
+const IMAGE_MODEL_PATTERNS: RegExp[] = [
+  /image/i,
+  /^flux/i,
+  /^dall-e/i,
+  /seedream/i,
+  /nano-banana/i,
+  /^imagen/i,
+  /^wanx/i,
+  /^stable-diffusion/i,
+  /^sd3/i,
+  /^irag/i,
+  /^kolors/i,
+  /^cogview/i,
+  /^recraft/i,
+  /^ideogram/i,
+  /^playground-v/i
+];
+
+/**
+ * 明确排除的：名字里有 image，但走的不是 /images/generations 这条路。
+ *
+ * Midjourney 那一族（mj_fast_* / mj_relax_*）是代理任务接口，
+ * 提交完要另外轮询，协议和同步生图完全不同；
+ * kolors-virtual-try-on 是虚拟试穿专用接口，收的参数也不一样。
+ * 摆在生图下拉里只会让人选中、点生成、然后失败。
+ */
+const NOT_IMAGE_API: RegExp[] = [
+  /^mj_/i,
+  /^midjourney/i,
+  /virtual-try-on/i,
+  // 视频模型。wanx 系列里 i2v / t2v / kf2v / vace 全是出视频的，
+  // 被 /^wanx/ 一并捞了进来 —— 出的不是图，写不回 Photoshop 图层。
+  /-(i2v|t2v|v2v|kf2v)/i,
+  /-(i2v|t2v|v2v|kf2v)-/i,
+  /vace/i
+];
+
+export function isLikelyImageModel(id: string): boolean {
+  const s = id.trim();
+  if (NOT_IMAGE_API.some((re) => re.test(s))) return false;
+  return IMAGE_MODEL_PATTERNS.some((re) => re.test(s));
+}
+
+
+/**
+ * 从全量模型列表里挑出适合生图的。
+ * 一个都挑不出来时返回原列表 —— 宁可让用户面对一份长清单，
+ * 也不能把下拉变成空的，那样连手动试的机会都没有了。
+ */
+export function filterImageModels(models: readonly string[]): string[] {
+  const hit = models.filter(isLikelyImageModel);
+  return hit.length > 0 ? hit : [...models];
+}

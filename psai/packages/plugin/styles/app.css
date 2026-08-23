@@ -1909,3 +1909,17 @@ summary:focus-visible {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* 模型下拉下面那行「只列出适合生图的 N 个」说明 */
+.model-pick {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.model-pick > * {
+  flex-shrink: 0;
+}
+.model-pick .hint {
+  font-size: 10.5px;
+  line-height: 1.45;
+}

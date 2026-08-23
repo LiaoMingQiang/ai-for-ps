@@ -3,7 +3,7 @@
  * 页面结构对所有 17 个功能都一样，差异全部来自功能目录。
  */
 
-import { defaultValues, isTerminal, rhPresetByWorkflowId } from '@psai/shared';
+import { defaultValues, isTerminal, rhPresetByWorkflowId, filterImageModels } from '@psai/shared';
 import type { ParamSpec, WritebackMode, JobRecord } from '@psai/shared';
 import { h, clear, setAttr, toggleClass } from '../app/dom.js';
 import { api, ApiError } from '../app/api.js';
@@ -393,12 +393,16 @@ async function ensureRuntimeOptions(view: FeatureView): Promise<void> {
   } else if (view.providerId) {
     const key = `models:${view.providerId}`;
     if (runtimeOptions[key]) {
-      runtimeOptions = { ...runtimeOptions, models: runtimeOptions[key]! };
+      runtimeOptions = { ...runtimeOptions, models: runtimeOptions[key]!, modelsTotal: runtimeOptions[`${key}:total`] ?? [] };
       return;
     }
     try {
-      const models = await api.listModels(view.providerId);
-      runtimeOptions = { ...runtimeOptions, [key]: models, models };
+      const all = await api.listModels(view.providerId);
+      // 聚合网关会把平台上所有模型都列出来（Comfly 实测 858 个），
+      // 里面绝大多数是对话/音频/视频模型，选中就是一次必然失败。
+      // 生成页只列适合生图的那些，并如实告诉用户筛掉了多少。
+      const models = filterImageModels(all);
+      runtimeOptions = { ...runtimeOptions, [key]: models, models, [`${key}:total`]: all, modelsTotal: all };
     } catch {
       runtimeOptions = { ...runtimeOptions, models: [] };
     }

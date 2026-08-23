@@ -36,6 +36,12 @@ export const ERROR_CODES = {
    * 界面才能给出「去参数面板换一个模型」这种能照做的提示。
    */
   PROVIDER_MODEL_UNAVAILABLE: '该模型当前不可用（未开通或没有可用渠道）',
+  /**
+   * 平台自己 5xx 了。这和「响应解析不了」是两回事 ——
+   * 响应完全能解析，只是内容是「我这边出错了」。
+   * 报成 PROVIDER_BAD_RESPONSE 会让人以为是我们解析有问题，往错的方向查。
+   */
+  PROVIDER_UPSTREAM_ERROR: '平台侧出错，稍后重试或换个模型',
   PROVIDER_TIMEOUT: '请求超时',
 
   /* ---- 工作流 ---- */
@@ -77,6 +83,7 @@ export type ErrorCode = keyof typeof ERROR_CODES;
 /** 可自动重试的错误（作业引擎据此决定是否进入 retry 队列）。 */
 export const RETRYABLE_CODES: ReadonlySet<ErrorCode> = new Set<ErrorCode>([
   'PROVIDER_UNREACHABLE',
+  'PROVIDER_UPSTREAM_ERROR',
   'PROVIDER_RATE_LIMIT',
   'PROVIDER_TIMEOUT',
   'PROVIDER_BAD_RESPONSE',

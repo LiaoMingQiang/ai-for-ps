@@ -557,8 +557,14 @@ export class JobEngine {
     if (job.state !== 'failed' && job.state !== 'lost') {
       throw new PsaiError('JOB_PARAM_INVALID', `只有失败或丢失的任务可以重试（当前 ${job.state}）`);
     }
+    // finished_at / gpu_ms 必须一起清掉。
+    // transition() 写的是 finished_at = COALESCE(finished_at, ?)，只认第一次；
+    // 重试时 started_at 会被刷成新的时间，而 finished_at 还停在上一次失败的时刻，
+    // 于是「耗时」算出来是负数 —— 真机上见过 -299170ms。
     this.db
-      .prepare('UPDATE jobs SET error_json = NULL, remote_id = NULL, updated_at = ? WHERE id = ?')
+      .prepare(
+        'UPDATE jobs SET error_json = NULL, remote_id = NULL, finished_at = NULL, gpu_ms = NULL, updated_at = ? WHERE id = ?'
+      )
       .run(Date.now(), jobId);
     if (job.state === 'lost') {
       // lost 是终态，用一条新任务承接，保留血缘

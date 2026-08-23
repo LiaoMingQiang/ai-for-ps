@@ -58,7 +58,8 @@ export function codeForStatus(status: number): ErrorCode {
   if (status === 404) return 'PROVIDER_BAD_RESPONSE';
   if (status === 429) return 'PROVIDER_RATE_LIMIT';
   if (status === 400 || status === 422) return 'JOB_PARAM_INVALID';
-  if (status >= 500) return 'PROVIDER_BAD_RESPONSE';
+  // 5xx 是平台自己出错，不是我们解析不了它的响应 —— 分开报，排查方向才不会歪
+  if (status >= 500) return 'PROVIDER_UPSTREAM_ERROR';
   return 'PROVIDER_BAD_RESPONSE';
 }
 
