@@ -40,6 +40,8 @@ const BASE_CANDIDATES = [
 ];
 
 let BASE = BASE_CANDIDATES[0]!;
+/** 被 useHelperAt() 钉死的地址；非空时 resolveBase 只探它。 */
+let pinnedBase: string | null = null;
 
 /** 每个候选地址最近一次的探测结果，离线页面直接把它显示出来。 */
 export interface ProbeResult {
@@ -64,7 +66,10 @@ export function currentBase(): string {
  */
 export async function resolveBase(): Promise<{ ok: boolean; probes: ProbeResult[] }> {
   const probes: ProbeResult[] = [];
-  for (const url of BASE_CANDIDATES) {
+  // 调用方钉死过地址就只探那一个。以前这里无条件遍历候选表，
+  // 把 useHelperAt() 指定的地址冲掉了 —— 指定完还是连回默认端口，
+  // 而且失败信息里写的是默认端口，看起来像"指定没生效"以外的别的毛病。
+  for (const url of pinnedBase ? [pinnedBase] : BASE_CANDIDATES) {
     try {
       const res = await fetch(`${url}/v1/health`);
       const text = await res.text();
@@ -196,6 +201,7 @@ async function saveToken(value: string): Promise<void> {
  */
 export function useHelperAt(baseUrl: string, existingToken?: string): void {
   BASE = baseUrl.replace(/\/+$/, '');
+  pinnedBase = BASE;
   lastProbes = [{ url: BASE, ok: true, detail: '由调用方指定' }];
   if (existingToken) token = existingToken;
 }

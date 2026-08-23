@@ -19,11 +19,19 @@ import assert from 'node:assert/strict';
 
 import { snapSize, pickVisionModel } from '../dist/providers/openai.js';
 
-test('gpt-image 系列的尺寸会被吸附到它认的档位', () => {
-  // 面板的分辨率滑杆能算出任意尺寸，模型只认这三种
+test('gpt-image 1 代会被吸附到它认的档位', () => {
+  // 面板的分辨率滑杆能算出任意尺寸，1 代只认这三种
   assert.equal(snapSize('gpt-image-1', 1280, 1280), '1024x1024');
   assert.equal(snapSize('gpt-image-1.5', 2048, 2048), '1024x1024');
-  assert.equal(snapSize('gpt-image-2', 512, 512), '1024x1024');
+});
+
+test('gpt-image-2 认任意尺寸，不能再被吸附', () => {
+  // 真机实测：size=3000x1777 → 3008x1792、size=2048x2048 → 2048x2048。
+  // 以前这里按 /^gpt-image/ 一刀切，把 2 代也按死在 1536 以内 ——
+  // 用户拿 4000px 原图去洗，回来最多 1536px，还找不到是谁砍的。
+  assert.equal(snapSize('gpt-image-2', 512, 512), '512x512');
+  assert.equal(snapSize('gpt-image-2', 3000, 1777), '3000x1777');
+  assert.equal(snapSize('gpt-image-2-all', 2048, 2048), '2048x2048');
 });
 
 test('吸附时按长宽比挑，竖图不会被换成横图', () => {

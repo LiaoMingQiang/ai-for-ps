@@ -1,3 +1,5 @@
+import { MIN_OUTPUT_LONG_EDGE } from './params.js';
+
 /**
  * Provider 注册表。
  *
@@ -495,4 +497,153 @@ export function pickPromptModel(models: readonly string[]): string | null {
     if (hit) return hit;
   }
   return null;
+}
+
+/* ============================ 出图尺寸落地 ============================ */
+
+/**
+ * 每个模型族**实际**能把尺寸做到什么程度。
+ *
+ * 全部来自真机实测（Comfly 真账号），不是照着文档抄的 —— 文档和网关的实际行为
+ * 在这件事上差得很远：
+ *
+ *   gpt-image-2        size=3000x1777 → 3008x1792（按 64 对齐）  认
+ *   gpt-image-2        size=2048x2048 → 2048x2048               认
+ *   nano-banana-pro    size=3000x1777 → 1376x768                **不认**，只跟比例
+ *   nano-banana-pro-2k size=3000x1777 → 2752x1536
+ *   nano-banana-pro-4k size=3000x1777 → 5504x3072
+ *   gemini-3-pro-image    (chat，没有 size 参数) → 1024x1024
+ *   gemini-3-pro-image-2k (chat，没有 size 参数) → 2048x2048
+ *   midjourney            (代理接口，只认 --ar) → 2048x2048
+ *
+ * 结论是：只有 gpt-image-2 这一族能真正"要多大给多大"。其余的分辨率是
+ * **写在模型名里**的，想要 2K 就得把请求发给 `-2k` 那个 id。
+ */
+export interface ModelSizeProfile {
+  /** 认 size 参数给的确切像素 */
+  exact: boolean;
+  /**
+   * 分辨率档位，按长边升序。基础档的 suffix 是空串。
+   * 空数组 = 这个模型没有档位可切，出多大是多大。
+   */
+  tiers: ReadonlyArray<{ suffix: string; longEdge: number }>;
+}
+
+const SIZE_PROFILES: ReadonlyArray<{ match: RegExp; profile: ModelSizeProfile }> = [
+  // 唯一一族真正认尺寸的
+  { match: /^gpt-image-(?:[2-9]|\d{2,})/i, profile: { exact: true, tiers: [] } },
+  {
+    match: /^nano-banana-pro/i,
+    profile: {
+      exact: false,
+      tiers: [
+        { suffix: '', longEdge: 1376 },
+        { suffix: '-2k', longEdge: 2752 },
+        { suffix: '-4k', longEdge: 5504 }
+      ]
+    }
+  },
+  {
+    match: /^gemini-.*image/i,
+    profile: {
+      exact: false,
+      tiers: [
+        { suffix: '', longEdge: 1024 },
+        { suffix: '-2k', longEdge: 2048 },
+        { suffix: '-4k', longEdge: 4096 }
+      ]
+    }
+  },
+  // MJ 的尺寸完全由平台定，--ar 只管比例
+  { match: /^midjourney$/i, profile: { exact: false, tiers: [] } },
+  // 老一代 gpt-image / dall-e 只认固定几档，交给 snapSize 处理，这里按"不精确"对待
+  { match: /^gpt-image-1/i, profile: { exact: false, tiers: [] } },
+  { match: /^dall-e/i, profile: { exact: false, tiers: [] } }
+];
+
+export function sizeProfileOf(model: string): ModelSizeProfile {
+  const hit = SIZE_PROFILES.find((p) => p.match.test(model.trim()));
+  // 不认识的模型按"认尺寸"对待：大多数平台确实认，
+  // 而且猜错的代价是尺寸不对，比替它砍掉一半分辨率小得多。
+  return hit?.profile ?? { exact: true, tiers: [] };
+}
+
+/** 去掉模型名末尾的分辨率后缀，拿到可以重新拼接的基名。 */
+export function stripSizeTier(model: string): string {
+  return model.trim().replace(/-(?:2k|4k)$/i, '');
+}
+
+export interface ImageSizePlan {
+  /** 实际要发给平台的模型 id（可能为了够到 2K 而升了档） */
+  model: string;
+  /** 要发的 size 参数；null 表示这个模型不认，别发 */
+  size: string | null;
+  /** 这次尺寸是怎么定下来的，写进日志、也给 UI 显示 */
+  note: string;
+}
+
+/**
+ * 把「我想要多大」翻译成「这个平台上该怎么发」。
+ *
+ * 规则（对应用户提的第 2 条）：
+ *  - 非放大类功能，出图尺寸就该等于原图尺寸；
+ *  - 平台做不到精确，那至少要 2K，不能默默给一张比原图还小的图。
+ *
+ * 第二条不是靠"要个大 size"实现的 —— nano-banana-pro 实测无论 size 写多大
+ * 都只给 1376×768。真正的开关是模型名：换成 `-2k` 才有 2K。
+ * 所以这里会**改写模型 id**，并且只在该平台确实有这个 id 时才改：
+ * 升到一个不存在的名字，换来的是 503「无可用渠道」，比尺寸小更糟。
+ */
+export function planImageSize(
+  model: string,
+  target: { width: number; height: number },
+  availableModels: readonly string[] = []
+): ImageSizePlan {
+  const profile = sizeProfileOf(model);
+  const wanted = `${target.width}x${target.height}`;
+  const longEdge = Math.max(target.width, target.height);
+
+  if (profile.exact) {
+    return { model, size: wanted, note: `按目标尺寸 ${wanted} 请求（该模型认尺寸参数）` };
+  }
+
+  if (profile.tiers.length === 0) {
+    // 没有档位可切：尺寸由平台定死。size 还是照发 —— 有的平台拿它当比例参考
+    // （nano-banana-pro 实测就是这样），发了不亏，不发反而丢掉比例信息。
+    return {
+      model,
+      size: wanted,
+      note: `${model} 的输出分辨率由平台决定，size 仅作比例参考`
+    };
+  }
+
+  // 目标：贴近原图，但长边不低于 2K
+  const eligible = profile.tiers.filter((t) => t.longEdge >= MIN_OUTPUT_LONG_EDGE);
+  const pool = eligible.length > 0 ? eligible : [profile.tiers[profile.tiers.length - 1]!];
+  let best = pool[0]!;
+  for (const t of pool) {
+    if (Math.abs(t.longEdge - longEdge) < Math.abs(best.longEdge - longEdge)) best = t;
+  }
+
+  const base = stripSizeTier(model);
+  const candidate = `${base}${best.suffix}`;
+  if (candidate.toLowerCase() === model.trim().toLowerCase()) {
+    return { model, size: wanted, note: `已经是 ${best.longEdge}px 档位` };
+  }
+  // 只在平台确实有这个 id 时才换。列表拿不到时（availableModels 为空）不冒险。
+  if (availableModels.length > 0 && !availableModels.some((m) => m.trim().toLowerCase() === candidate.toLowerCase())) {
+    return {
+      model,
+      size: wanted,
+      note: `想升到 ${candidate} 够 2K，但该平台没有这个模型，保持 ${model}`
+    };
+  }
+  if (availableModels.length === 0) {
+    return { model, size: wanted, note: `拿不到模型列表，不敢改写模型名，保持 ${model}` };
+  }
+  return {
+    model: candidate,
+    size: wanted,
+    note: `${model} 出不到 ${MIN_OUTPUT_LONG_EDGE}px，改用 ${candidate}（约 ${best.longEdge}px 长边）`
+  };
 }

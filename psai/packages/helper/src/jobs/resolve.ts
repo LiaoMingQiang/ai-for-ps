@@ -9,7 +9,9 @@
 import {
   describeCamera,
   resolveSeed,
-  resolveSize,
+  resolveOutputSize,
+  RESOLUTION_DEFAULT,
+  RESOLUTION_SOURCE,
   clamp,
   clampInt,
   RESOLUTION_MIN,
@@ -74,7 +76,10 @@ export function resolveJobParams(
       }
       case 'resolution': {
         const n = typeof v === 'number' ? v : spec.defaultValue;
-        values[spec.id] = clampInt(n, RESOLUTION_MIN, RESOLUTION_MAX);
+        // RESOLUTION_SOURCE(0) 是「跟随原图」的哨兵值，不是一个小得离谱的分辨率。
+        // 无脑 clamp 会把它夹成 RESOLUTION_MIN(512)，于是「跟随原图」静默变成
+        // 「把长边压到 512」—— 比原来压到 1024 还糟，而且完全看不出是谁干的。
+        values[spec.id] = n === RESOLUTION_SOURCE ? RESOLUTION_SOURCE : clampInt(n, RESOLUTION_MIN, RESOLUTION_MAX);
         break;
       }
       case 'select':
@@ -118,27 +123,25 @@ export function resolveJobParams(
   }
 
   // 2. 宽高
-  //    有「生图比例」参数 → 比例 + 分辨率推导（文生图那一类）
-  //    没有比例参数但有输入图 → 保持输入图的长宽比，把长边缩到分辨率（图生图那一类）
-  //    两者都没有 → 分辨率当正方形
+  //    统一交给 resolveOutputSize：显式选的比例/分辨率 > 跟随原图 > 分辨率当正方形。
+  //
+  //    这里以前是「有比例就按比例、没比例就把原图长边压到分辨率滑杆的值」。
+  //    压缩那一支是默认路径，而滑杆默认 1024 —— 于是一张 4000×3000 的图
+  //    洗完回来只有 1024×768。用户没要求缩小，贴回 Photoshop 却糊了一圈，
+  //    而且原图分辨率再也拿不回来。现在有输入图就默认照抄原图尺寸。
   const resolutionSpec = specById.get('resolution');
-  const baseEdge = resolutionSpec ? Number(values['resolution'] ?? 1024) : 1024;
-  const aspect = values['aspect'] as AspectValue | undefined;
-  if (aspect) {
-    const size = resolveSize(aspect, baseEdge, 8);
-    width = size.width;
-    height = size.height;
-  } else if (opts.inputSize && opts.inputSize.width > 0 && opts.inputSize.height > 0) {
-    const { width: iw, height: ih } = opts.inputSize;
-    const size = resolveSize({ id: 'custom', customW: iw, customH: ih }, baseEdge, 8);
-    width = size.width;
-    height = size.height;
-  } else {
-    width = baseEdge;
-    height = baseEdge;
-  }
+  const size = resolveOutputSize({
+    aspect: values['aspect'] as AspectValue | undefined,
+    resolution: resolutionSpec ? Number(values['resolution'] ?? RESOLUTION_DEFAULT) : undefined,
+    inputSize: opts.inputSize
+  });
+  width = size.width;
+  height = size.height;
   values['__width'] = width;
   values['__height'] = height;
+  // 下游（闭源平台）要知道这个尺寸是不是「原图尺寸」：
+  // 是的话，平台给不了精确尺寸时才该退到 2K 兜底，而不是随便找个档位。
+  values['__followSourceSize'] = size.followedSource;
 
   // 3. 提示词组装
   const positives: string[] = [];

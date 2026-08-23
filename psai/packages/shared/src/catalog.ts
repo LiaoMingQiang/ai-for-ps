@@ -23,6 +23,8 @@ import {
   RESOLUTION_MAX,
   RESOLUTION_MIN,
   RESOLUTION_STEP,
+  RESOLUTION_SOURCE,
+  ASPECT_SOURCE_ID,
   SAMPLERS_RECOMMENDED,
   SCHEDULERS_RECOMMENDED,
   CAMERA_DEFAULT,
@@ -240,6 +242,13 @@ function pCfg(defaultValue = 7): ParamSpec {
   return { kind: 'slider', id: 'cfg', label: 'CFG', min: 1, max: 20, step: 0.1, defaultValue, precision: 1, advanced: true };
 }
 
+/**
+ * 分辨率滑杆。
+ *
+ * 有输入图的功能一律传 RESOLUTION_SOURCE（0 = 跟随原图）当默认值：
+ * 用户没要求改尺寸的时候，出图就该和原图一样大。
+ * 滑杆照常在，想改随时能改 —— 只是默认不再偷偷把 4000px 压到 1024px。
+ */
 function pResolution(defaultValue = RESOLUTION_DEFAULT): ParamSpec {
   return {
     kind: 'resolution',
@@ -362,7 +371,7 @@ const F_WASH_PORTRAIT: FeatureSpec = {
     pSampler('dpmpp_2m'),
     pScheduler('karras'),
     pSteps(24),
-    pResolution()
+    pResolution(RESOLUTION_SOURCE)
   ],
   defaultWorkflowId: 'wf.wash.portrait',
   requiredNodeTypes: [
@@ -400,7 +409,7 @@ const F_WASH_SCENE: FeatureSpec = {
     pSampler('dpmpp_2m'),
     pScheduler('karras'),
     pSteps(24),
-    pResolution()
+    pResolution(RESOLUTION_SOURCE)
   ],
   defaultWorkflowId: 'wf.wash.scene',
   requiredNodeTypes: [
@@ -436,7 +445,7 @@ const F_RELIGHT_FIXED: FeatureSpec = {
     pScheduler('karras'),
     pSteps(24),
     pCfg(2.5),
-    pResolution(768)
+    pResolution(RESOLUTION_SOURCE)
   ],
   defaultWorkflowId: 'wf.relight.fixed',
   requiredNodeTypes: [
@@ -475,7 +484,7 @@ const F_RELIGHT_ADAPTIVE: FeatureSpec = {
     pScheduler('karras'),
     pSteps(24),
     pCfg(2.5),
-    pResolution(768)
+    pResolution(RESOLUTION_SOURCE)
   ],
   defaultWorkflowId: 'wf.relight.adaptive',
   requiredNodeTypes: [
@@ -511,7 +520,7 @@ const F_EDIT_TEXTURE: FeatureSpec = {
     pSampler('dpmpp_2m'),
     pScheduler('karras'),
     pSteps(20),
-    pResolution()
+    pResolution(RESOLUTION_SOURCE)
   ],
   defaultWorkflowId: 'wf.edit.texture',
   requiredNodeTypes: [
@@ -598,7 +607,7 @@ function retouchFeature(id: string, label: string, subject: string, workflowId: 
       pScheduler('karras'),
       pSteps(22),
       pCfg(),
-      pResolution()
+      pResolution(RESOLUTION_SOURCE)
     ],
     defaultWorkflowId: workflowId,
     requiredNodeTypes: [
@@ -638,7 +647,7 @@ const F_VIEWPOINT_ORBIT: FeatureSpec = {
     pScheduler('karras'),
     pSteps(26),
     pCfg(),
-    pResolution(768)
+    pResolution(RESOLUTION_SOURCE)
   ],
   defaultWorkflowId: 'wf.viewpoint.orbit',
   requiredNodeTypes: [
@@ -713,8 +722,8 @@ const F_CLOUD_WASH: FeatureSpec = {
     pEnhance(),
     pSeed(),
     pDenoise(0.25),
-    pAspect('1:1'),
-    pResolution(1280)
+    pAspect(ASPECT_SOURCE_ID),
+    pResolution(RESOLUTION_SOURCE)
   ],
   defaultWorkflowId: null,
   requiredNodeTypes: [],
@@ -763,8 +772,8 @@ const F_CLOUD_I2I: FeatureSpec = {
     pNegativePrompt(''),
     pSeed(),
     pDenoise(0.5),
-    pAspect('1:1'),
-    pResolution(1280)
+    pAspect(ASPECT_SOURCE_ID),
+    pResolution(RESOLUTION_SOURCE)
   ],
   defaultWorkflowId: null,
   requiredNodeTypes: [],
@@ -811,8 +820,8 @@ const F_CLOUD_PRODUCT_MULTIVIEW: FeatureSpec = {
     pPrompt({ label: '场景描述', placeholder: '输出场景图时描述环境...', rows: 3 }),
     pEnhance(),
     pSeed(),
-    pAspect('1:1'),
-    pResolution(1280)
+    pAspect(ASPECT_SOURCE_ID),
+    pResolution(RESOLUTION_SOURCE)
   ],
   defaultWorkflowId: null,
   requiredNodeTypes: [],
@@ -837,8 +846,8 @@ const F_CLOUD_PRODUCT_WHITEBG: FeatureSpec = {
     pPrompt({ placeholder: '可补充要保留/去掉的细节...', rows: 3 }),
     pEnhance(),
     pSeed(),
-    pAspect('1:1'),
-    pResolution(1280)
+    pAspect(ASPECT_SOURCE_ID),
+    pResolution(RESOLUTION_SOURCE)
   ],
   defaultWorkflowId: null,
   requiredNodeTypes: [],

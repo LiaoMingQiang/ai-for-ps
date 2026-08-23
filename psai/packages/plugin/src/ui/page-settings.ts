@@ -880,19 +880,6 @@ async function renderDefaults(host: HTMLElement, settings: AppSettings): Promise
         }
       }),
       '本地 ComfyUI 建议保持 1，同一张卡上并行只会更慢'
-    ),
-    fieldRow(
-      '输入图最长边上限',
-      h('input', {
-        class: 'input',
-        type: 'text',
-        value: String(g.inputMaxEdge),
-        onchange: async (e: Event) => {
-          const n = Number((e.target as HTMLInputElement).value.replace(/[^0-9]/g, '')) || 0;
-          await patch({ generation: { ...g, inputMaxEdge: n } });
-        }
-      }),
-      '0 表示不缩放'
     )
   ];
 

@@ -85,6 +85,29 @@ export const ASPECT_RATIOS: readonly AspectRatio[] = [
   { id: 'custom', label: '自定义', w: 0, h: 0 }
 ];
 
+/**
+ * 「跟随原图」——有输入图的功能，出图尺寸默认就等于原图尺寸。
+ *
+ * 这不是一个普通的比例档位，所以它不在 ASPECT_RATIOS 里（那份表是给
+ * 「按比例推导宽高」用的，w/h 是常量；跟随原图的宽高要等运行时拿到图才知道）。
+ * 单独拎出来，是为了让「按比例算」和「照抄原图」在类型上就分得开，
+ * 而不是塞一个 w:0,h:0 的假档位进去再到处特判。
+ */
+export const ASPECT_SOURCE_ID = 'source';
+export const ASPECT_SOURCE_LABEL = '跟随原图';
+
+/** 分辨率滑杆上的哨兵值：0 = 用原图尺寸，不缩放。 */
+export const RESOLUTION_SOURCE = 0;
+
+/**
+ * 保不住原尺寸时的兜底下限：长边至少 2K。
+ *
+ * 出现在两种情况：平台压根不认 size 参数（nano-banana-pro 实测无论要多大
+ * 都只给 1376×768），或者只认固定几档。这时候与其默默给一张比原图小一半的图，
+ * 不如至少保证 2K —— 拿回 Photoshop 还能用，缩小永远比放大安全。
+ */
+export const MIN_OUTPUT_LONG_EDGE = 2048;
+
 export interface AspectValue {
   id: string;
   /** id === 'custom' 时使用 */
@@ -116,6 +139,53 @@ export function resolveSize(
     width: roundTo(Math.max(multiple, w * scale), multiple),
     height: roundTo(Math.max(multiple, h * scale), multiple)
   };
+}
+
+/**
+ * 决定这次出图的目标尺寸。
+ *
+ * 优先级是有意这样排的：
+ *   1. 用户显式选了比例/分辨率 —— 他说了算，我们不替他改
+ *   2. 有输入图 —— 默认照抄原图尺寸
+ *   3. 都没有 —— 分辨率当正方形
+ *
+ * 第 2 条是这次改掉的老行为。以前无论原图多大，都会被
+ * `resolveSize(..., baseEdge)` 把长边压到分辨率滑杆的值（默认 1024）——
+ * 一张 4000×3000 的产品图洗完回来只有 1024×768，贴回 Photoshop 就是一团糊。
+ * 用户没有要求缩小，是我们自作主张缩的，而且缩完还不可逆。
+ */
+export function resolveOutputSize(
+  opts: {
+    aspect?: AspectValue | undefined;
+    /** 分辨率滑杆的值；RESOLUTION_SOURCE(0) 表示跟随原图 */
+    resolution?: number | undefined;
+    /** 输入图的原始宽高，没有输入图时不传 */
+    inputSize?: { width: number; height: number } | undefined;
+  },
+  multiple = 8
+): { width: number; height: number; followedSource: boolean } {
+  const input = opts.inputSize && opts.inputSize.width > 0 && opts.inputSize.height > 0 ? opts.inputSize : null;
+  const base = opts.resolution && opts.resolution > 0 ? opts.resolution : RESOLUTION_DEFAULT;
+  // 只认两个显式信号，不拿「没有比例控件」当默认跟随 ——
+  // 那样用户在 ComfyUI 功能上把分辨率滑杆挪到 1536，我们还是照抄原图，
+  // 他会以为滑杆坏了。有输入图的功能，出厂默认就把这两个值设成「跟随原图」。
+  const wantsSource = opts.aspect?.id === ASPECT_SOURCE_ID || opts.resolution === RESOLUTION_SOURCE;
+
+  // 跟随原图：原样照抄，连 multiple 对齐都不做 —— 对齐会让 4001 变成 4000，
+  // 写回 Photoshop 时就对不齐一个像素。真需要对齐的是工作流/平台，让它们自己去 snap。
+  if (wantsSource && input) {
+    return { width: input.width, height: input.height, followedSource: true };
+  }
+  if (opts.aspect && opts.aspect.id !== ASPECT_SOURCE_ID) {
+    const size = resolveSize(opts.aspect, base, multiple);
+    return { ...size, followedSource: false };
+  }
+  if (input) {
+    // 用户把分辨率从「原图」挪开了，但没有比例控件：保持原图长宽比，长边缩到他选的值
+    const size = resolveSize({ id: 'custom', customW: input.width, customH: input.height }, base, multiple);
+    return { ...size, followedSource: false };
+  }
+  return { width: base, height: base, followedSource: false };
 }
 
 /* ============================ 分辨率 ============================ */

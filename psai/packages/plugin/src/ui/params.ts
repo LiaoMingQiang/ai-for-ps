@@ -7,6 +7,10 @@
 
 import {
   ASPECT_RATIOS,
+  ASPECT_SOURCE_ID,
+  ASPECT_SOURCE_LABEL,
+  RESOLUTION_SOURCE,
+  RESOLUTION_DEFAULT as RESOLUTION_DEFAULT_UI,
   SEED_MODES,
   SEED_MODE_LABELS,
   SEED_MAX,
@@ -26,6 +30,8 @@ export interface ParamContext {
   options: Record<string, string[]>;
   /** 模型下拉的口径说明：筛之前一共多少个、实际用上的是哪一档 */
   modelsMeta?: { total: number; scope: string } | null;
+  /** 这个功能有没有输入图 —— 没有输入图就没有「原图尺寸」可跟随 */
+  hasImageInput?: boolean;
   /** 提示词优化按钮的回调；返回 null 表示当前后端不支持 */
   onEnhance?: (paramId: string) => Promise<string | null>;
   /** 该功能可用的提示词预设 */
@@ -87,7 +93,7 @@ function renderParam(spec: ParamSpec, ctx: ParamContext): HTMLElement | null {
     case 'slider':
       return renderSlider(spec, ctx);
     case 'resolution':
-      return renderSlider(spec, ctx, 'px');
+      return renderResolution(spec, ctx);
     case 'select':
       return renderSelect(spec, ctx);
     case 'segmented':
@@ -334,12 +340,60 @@ function renderSeed(spec: Extract<ParamSpec, { kind: 'seed' }>, ctx: ParamContex
 
 /* ---------------- 滑杆 ---------------- */
 
+/**
+ * 分辨率控件：「原图尺寸」和「自定义」两态。
+ *
+ * 有输入图的功能出厂默认停在「原图尺寸」（值 = RESOLUTION_SOURCE = 0）。
+ * 以前这里只有一根滑杆，默认 1024，于是 4000px 的原图一律被压到 1024px，
+ * 而界面上没有任何地方说过"我要缩小它"。
+ *
+ * 不把 0 直接塞进滑杆，是因为滑杆的 min 是 512：值 0 会被 range 控件夹到 512 显示，
+ * 存的是 0、看到的是 512，这种"显示和实际不一致"比缩图本身更难查。
+ */
+function renderResolution(spec: Extract<ParamSpec, { kind: 'resolution' }>, ctx: ParamContext): HTMLElement {
+  const raw = Number(ctx.get(spec.id) ?? spec.defaultValue);
+  const followSource = raw === RESOLUTION_SOURCE;
+  const wrap = h('div', { class: 'res-control' });
+
+  // 没有输入图就没有原图可跟随，这时候只画滑杆，免得给一个点了没反应的选项
+  if (ctx.hasImageInput) {
+    const seg = h('div', { class: 'segmented res-mode' });
+    const mk = (label: string, on: boolean, onclick: () => void): HTMLElement =>
+      h('button', { class: `seg ${on ? 'active' : ''}`, type: 'button', onclick }, label);
+    seg.appendChild(mk('原图尺寸', followSource, () => ctx.set(spec.id, RESOLUTION_SOURCE)));
+    seg.appendChild(
+      mk('自定义', !followSource, () => ctx.set(spec.id, raw > 0 ? raw : RESOLUTION_DEFAULT_UI))
+    );
+    wrap.appendChild(seg);
+  }
+
+  if (!followSource || !ctx.hasImageInput) {
+    const shown = raw > 0 ? raw : RESOLUTION_DEFAULT_UI;
+    wrap.appendChild(sliderBody(spec, ctx, shown, 'px'));
+  } else {
+    wrap.appendChild(
+      h('div', { class: 'muted hint' }, '出图尺寸 = 原图尺寸。平台给不了精确尺寸时，至少保证 2K。')
+    );
+  }
+  return field(spec, wrap);
+}
+
 function renderSlider(
   spec: Extract<ParamSpec, { kind: 'slider' | 'resolution' }>,
   ctx: ParamContext,
   unit = ''
 ): HTMLElement {
   const value = Number(ctx.get(spec.id) ?? spec.defaultValue);
+  return field(spec, sliderBody(spec, ctx, value, unit));
+}
+
+/** 滑杆本体（不含 label 行）—— 分辨率控件要把它嵌进自己的两态布局里。 */
+function sliderBody(
+  spec: Extract<ParamSpec, { kind: 'slider' | 'resolution' }>,
+  ctx: ParamContext,
+  value: number,
+  unit = ''
+): HTMLElement {
   const precision = 'precision' in spec ? spec.precision : 0;
 
   const out = h('input', { class: 'input slider-value', type: 'text' }) as HTMLInputElement;
@@ -370,8 +424,7 @@ function renderSlider(
     ctx.onSizeHint?.();
   });
 
-  const box = h('div', { class: 'slider-row' }, range, h('div', { class: 'slider-out' }, out, unit ? h('span', { class: 'unit' }, unit) : null));
-  return field(spec, box);
+  return h('div', { class: 'slider-row' }, range, h('div', { class: 'slider-out' }, out, unit ? h('span', { class: 'unit' }, unit) : null));
 }
 
 /* ---------------- 下拉 / 分段 / 开关 ---------------- */
@@ -492,12 +545,24 @@ function renderAspect(spec: Extract<ParamSpec, { kind: 'aspect' }>, ctx: ParamCo
   const hintFor = (id: string): string => {
     const base = Number(ctx.get('resolution') ?? 1024);
     if (id === 'custom') return '自定义';
-    const { width, height } = resolveSize({ id }, base);
+    if (id === ASPECT_SOURCE_ID) return '与原图一致';
+    const { width, height } = resolveSize({ id }, base > 0 ? base : RESOLUTION_DEFAULT_UI);
     return `${width}×${height}`;
   };
 
+  /**
+   * 有输入图时，「跟随原图」排在第一个，也是出厂默认。
+   *
+   * 以前这一排只有固定比例，默认 1:1 —— 用户传一张 3:2 的产品图，
+   * 不动任何设置点生成，出来的是被裁成正方形的图。
+   * 他没选过 1:1，是我们替他选的。
+   */
+  const choices = ctx.hasImageInput
+    ? [{ id: ASPECT_SOURCE_ID, label: ASPECT_SOURCE_LABEL }, ...ASPECT_RATIOS]
+    : ASPECT_RATIOS;
+
   const buttons: HTMLElement[] = [];
-  for (const a of ASPECT_RATIOS) {
+  for (const a of choices) {
     const btn = h(
       'button',
       {

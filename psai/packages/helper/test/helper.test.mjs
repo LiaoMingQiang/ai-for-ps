@@ -540,13 +540,38 @@ test('完整走通：创建 → 生成 → 结果就绪 → 等待写回', async
   assert.ok(done.gpuMs >= 0, '本地任务应记录 GPU 时长');
 });
 
+test('大图原样上传，不缩放不重编码', async () => {
+  // 用户提的第 1 条：原图必须按原始尺寸提交，不许我们背着他降采样。
+  //
+  // 这里守的是一条**否定**规则 —— 没有任何代码缩图，所以正常情况下它一定通过。
+  // 留着它是因为「加一个 maxEdge 顺手压一下」是个太自然的念头：
+  // 设置里一度真有过一个 inputMaxEdge，画了输入框、存进了库，只是从没被读过。
+  // 谁要是哪天把它接上，这条测试会立刻响。
+  const big = await uploadPng([200, 120, 40], 2048);
+  assert.equal(big.width, 2048, '上传后宽度必须还是原始宽度');
+  assert.equal(big.height, 2048, '上传后高度必须还是原始宽度');
+
+  // 字节也要一模一样：重编码会改变哈希，内容寻址和去重都靠它
+  const raw = makePng(2048, 2048, [200, 120, 40]);
+  const back = await fetch(url(`/v1/assets/${big.id}`), { headers: { Authorization: `Bearer ${token}` } });
+  if (back.ok) {
+    const got = Buffer.from(await back.arrayBuffer());
+    assert.equal(got.length, raw.length, '字节数变了说明被重新编码过');
+    assert.ok(got.equals(raw), '上传的图必须原样存下来');
+  }
+});
+
 test('解析后的参数被完整记录，可用于复现', async () => {
   const job = await createJob();
   const done = await waitForState(job.id, (j) => j.results.length > 0);
   const rp = done.resolvedParams;
   assert.equal(rp.seed, 12345, '固定种子应原样落库');
-  assert.equal(rp.__width, 1024);
-  assert.equal(rp.__height, 1024);
+  // 出图尺寸默认跟随原图：输入是 128×128，出的就该是 128×128。
+  // 以前这里是 1024×1024 —— 无论原图多大都按分辨率滑杆的默认值重算，
+  // 一张 4000px 的图洗完只剩 1024px，而用户从没要求缩小。
+  assert.equal(rp.__width, 128, '应跟随原图宽度');
+  assert.equal(rp.__height, 128, '应跟随原图高度');
+  assert.equal(rp.__followSourceSize, true, '要标记这次是跟随原图，下游才知道该不该套 2K 兜底');
   assert.equal(rp.prompt, '一只猫');
   assert.ok(Array.isArray(rp.__promptBreakdown));
 });

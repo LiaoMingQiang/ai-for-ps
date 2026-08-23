@@ -43,9 +43,20 @@ export interface GenerationDefaults {
   maxConcurrency: number;
   /** 结果自动写回，还是停在"等待写回"让用户点确认 */
   autoWriteback: boolean;
-  /** 提交前把输入图缩放到的最长边上限，0 = 不缩放 */
-  inputMaxEdge: number;
 }
+
+/**
+ * 这里曾经有一个 `inputMaxEdge`（"提交前把输入图缩放到的最长边上限"）。
+ *
+ * 它是个**空旋钮**：设置页认真地画了输入框、存进了库，但从提交到上传
+ * 没有任何一行代码读过它。用户把它调成 1024 想省点带宽，实际什么也没发生；
+ * 反过来，担心画质的人看到"上限 2048"会以为自己的 4000px 原图被压过 —— 也没有。
+ * 两种理解都是错的，而错的方向相反，这比没有这个旋钮糟糕得多。
+ *
+ * 现在的行为是明确的：输入图**原样**上传，不缩放、不重编码，
+ * 只有工作流自己声明要缩放时才缩放。所以这个旋钮直接删掉，
+ * 而不是补一个实现 —— 默认降采样本来就不该是这个产品的行为。
+ */
 
 export interface UiPreferences {
   /** 上次停留的功能 id */
@@ -88,8 +99,7 @@ export function defaultSettings(): AppSettings {
       writebackMode: 'smartObject',
       layerNameTemplate: 'AI · {feature} · {date}',
       maxConcurrency: 1,
-      autoWriteback: true,
-      inputMaxEdge: 2048
+      autoWriteback: true
     },
     ui: { lastFeatureId: 'comfy.wash.portrait', language: 'zh-CN', advancedExpanded: false },
     promptOverrides: {},

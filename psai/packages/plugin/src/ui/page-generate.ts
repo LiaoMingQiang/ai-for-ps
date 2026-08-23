@@ -151,6 +151,7 @@ export async function renderGeneratePage(host: HTMLElement, actionHost?: HTMLEle
     },
     options: runtimeOptions,
     modelsMeta,
+    hasImageInput: imageSpecs.length > 0,
     presets: presetCache[view.id] ?? [],
     onEnhance: async (paramId) => {
       const text = String(paramsOf(view.id)[paramId] ?? '');

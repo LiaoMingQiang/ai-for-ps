@@ -1923,3 +1923,166 @@ summary:focus-visible {
   font-size: 10.5px;
   line-height: 1.45;
 }
+
+/* ============================================================
+ * 产品化打磨层
+ *
+ * 这一段集中处理三类问题，都是「不至于报错、但一眼看上去就不像成品」的：
+ *   1. UXP 下块级堆叠不生效，导致元素挤在一行甚至叠在一起
+ *   2. 同一行里的控件高度对不齐，按钮忽高忽低
+ *   3. 内容出现/消失时高度跳变，界面在用户眼皮底下抖一下
+ * ============================================================ */
+
+/* ---------------- 1. UXP 安全的纵向容器 ---------------- */
+
+/*
+ * UXP 的 CSS 是子集，**不能**指望 div / h2 / p 的块级默认堆叠。
+ * 这个文件开头就写了「布局以 flexbox 为主」，但有几个容器漏了显式声明，
+ * 在浏览器里靠块级默认排得好好的，进了 Photoshop 就全挤到一行去 ——
+ * 面包屑、标题、那句功能说明叠在一起，字压着字。
+ *
+ * 凡是「多个子元素要从上往下排」的容器，一律显式写出来，不留给默认行为。
+ */
+.page-head,
+.hist-meta,
+.wf-binding-field,
+.result-footer,
+.res-control,
+.offline-diag-row,
+.model-pick {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.page-head {
+  gap: 3px;
+}
+.res-control {
+  gap: 6px;
+}
+
+/* ---------------- 2. 控件高度对齐 ---------------- */
+
+/*
+ * 同一行里放 input / select / button 时，三者的内边距和字号各写各的，
+ * 算出来的高度差 1–3px —— 单看没问题，并排就是参差不齐的一行。
+ * 统一钉死一个控件高度，行内元素才对得齐。
+ */
+:root {
+  --control-h: 28px;
+  --control-h-sm: 24px;
+}
+
+.input,
+.select,
+.btn-primary,
+.btn-ghost {
+  min-height: var(--control-h);
+}
+
+/* textarea 是多行的，不该被单行高度按住 */
+.textarea {
+  min-height: 54px;
+}
+
+/* 滑杆右边那个数字框比主控件小一号，跟着小号高度走 */
+.slider-value {
+  min-height: var(--control-h-sm);
+}
+
+.btn-src,
+.seg,
+.chip {
+  min-height: var(--control-h-sm);
+}
+
+/*
+ * 一行按钮：统一间距，并且允许换行时也保持对齐。
+ * 之前 .row.gap 只有 6px 间距，按钮多了会挤成一坨，换行后上下行还贴在一起。
+ */
+.row.gap {
+  gap: 6px 6px;
+  align-items: center;
+}
+
+/* ---------------- 3. 布局稳定性 ---------------- */
+
+/*
+ * 这些元素平时是空的，有内容时才撑开 —— 于是每次出现都把下面的东西顶一下。
+ * 用户正要点的按钮会在手指落下前挪走位置。给一个最小高度占住位子。
+ */
+.test-result {
+  min-height: 17px;
+}
+.submit-reason {
+  min-height: 15px;
+}
+.param-hint {
+  min-height: 14px;
+}
+
+/* ---------------- 4. 交互反馈 ---------------- */
+
+/*
+ * 焦点态。之前只有 .input:focus 改了边框色，按钮完全没有焦点样式 ——
+ * 键盘走查时不知道焦点在哪，读屏和无障碍也无从下手。
+ */
+.btn-primary:focus-visible,
+.btn-ghost:focus-visible,
+.btn-src:focus-visible,
+.seg:focus-visible,
+.chip:focus-visible,
+.featnav-btn:focus-visible,
+.topnav-btn:focus-visible,
+.status-item:focus-visible,
+.switch:focus-visible,
+.input:focus-visible,
+.select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* 禁用态统一：之前只有 .btn-src 有，别处按钮禁用了看起来还是可点的 */
+.btn-primary[disabled],
+.btn-ghost[disabled],
+.seg[disabled],
+.chip[disabled],
+.featnav-btn[disabled] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* 按下去要有反馈，否则在慢一点的机器上会让人怀疑没点中 */
+.btn-primary:active:not([disabled]),
+.btn-ghost:active:not([disabled]),
+.btn-src:active:not([disabled]) {
+  transform: translateY(1px);
+}
+
+/* ---------------- 5. 层级与留白 ---------------- */
+
+/*
+ * 面包屑压得离标题太近，标题和说明之间又没有呼吸感，
+ * 三行挤成一块灰色的字堆，看不出哪个是这一页的名字。
+ */
+.crumb {
+  margin-bottom: 1px;
+}
+.page-title {
+  margin: 0;
+  line-height: 1.3;
+}
+.page-desc {
+  margin: 0;
+  line-height: 1.5;
+}
+
+/* 模型下拉底下那句「只列出 N 个」是解释性文字，不该和选项一样重 */
+.model-pick {
+  gap: 4px;
+}
+.model-pick .hint {
+  font-size: 11px;
+  line-height: 1.45;
+}

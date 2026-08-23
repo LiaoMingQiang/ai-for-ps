@@ -14,7 +14,8 @@ import {
   onHelperEvent,
   ApiError,
   resolveBase,
-  probeResults
+  probeResults,
+  useHelperAt
 } from './api.js';
 import { getState, setState, subscribe, upsertJob, toast, dismissToast, resetStore } from './store.js';
 import * as bridge from '../ps/bridge.js';
@@ -57,6 +58,22 @@ function scheduleHealth(): void {
 export async function bootPlugin(): Promise<void> {
   if (booted) return;
   booted = true;
+
+  /**
+   * 浏览器预览时用 `?helper=http://127.0.0.1:34217` 指定要连哪个 Helper。
+   *
+   * 只在**不是** UXP 的环境下生效 —— 在 Photoshop 里 location.search 是空的，
+   * 而且面板也不该允许被 URL 参数指到别的后端去。
+   * 存在的理由：改样式时要起一个临时 Helper 来看真实数据，
+   * 而用户平时那个 Helper 正跑着任务，不能为了看一眼界面就把它顶掉。
+   */
+  try {
+    const qs = new URLSearchParams(globalThis.location?.search ?? '');
+    const override = qs.get('helper');
+    if (override && /^https?:\/\//.test(override)) useHelperAt(override);
+  } catch {
+    /* UXP 里没有 location，忽略 */
+  }
 
   const ps = bridge.initBridge();
   setState({ inPhotoshop: ps.ok, psReason: ps.reason });
@@ -310,7 +327,41 @@ export async function mountMainPanel(root: HTMLElement): Promise<void> {
 
   const goSettings = (): void => setState({ page: 'settings' });
 
+  /**
+   * 状态条 + 一级导航的重绘。
+   *
+   * 它订阅了 jobs，而 jobs 在生成过程中每秒会变好几次（每条进度事件都会 upsert 一次）。
+   * 可状态条从 jobs 里只取一个数字——「几个进行中」。于是过去的行为是：
+   * 为了让一个数字从 3 变成 4，把整条状态条和一级导航拆掉重建，一秒好几遍。
+   * 在 UXP 里这就是肉眼可见的闪烁和掉帧。
+   *
+   * 先算一个"这条状态条会显示成什么样"的签名，一样就直接返回。
+   * 真正变了的时候照常重建 —— 省掉的全是本来就画不出区别的那些次。
+   */
+  let chromeSig = '';
   const paintChrome = (): void => {
+    const s = getState();
+    const active = s.jobs.filter((j) => !['succeeded', 'failed', 'cancelled', 'lost'].includes(j.state)).length;
+    const sig = [
+      s.page,
+      s.health.online,
+      s.health.version,
+      s.health.comfyui?.configured,
+      s.health.comfyui?.online,
+      s.gpu?.available,
+      s.gpu?.vramUsedMb,
+      s.gpu?.vramTotalMb,
+      active,
+      s.doc?.documentName,
+      s.doc?.width,
+      s.doc?.height,
+      s.doc?.activeLayerName,
+      s.doc?.hasSelection,
+      s.inPhotoshop,
+      s.psReason
+    ].join('|');
+    if (sig === chromeSig) return;
+    chromeSig = sig;
     clear(statusHost);
     statusHost.appendChild(renderStatusBar(goSettings));
     clear(navHost);
@@ -374,13 +425,30 @@ export async function mountMainPanel(root: HTMLElement): Promise<void> {
     lastOnline = online;
     void paintPage();
   });
-  const unsubJobs = subscribe(['jobs', 'activeJobId'], () => {
-    if (getState().page !== 'generate') return;
-    // 只重画结果区。整页重建会把正在输入的提示词、刚选好的图和立方体角度全冲掉，
-    // 而生成过程中这个订阅一秒会触发好几次。
-    // 万一生成页还没登记回调（刚切过来、还在渲染），才退回整页重绘。
-    if (!refreshGenerateResults()) void paintPage();
-  });
+  /**
+   * 结果区重绘：把一阵事件合并成一次。
+   *
+   * 生成时 job:update 是成串来的 —— 进度、状态迁移、结果落库可能挤在同一个
+   * 几十毫秒里。每来一条就重画一次结果区，画出来的中间态用户根本看不见，
+   * 但每一次都是真的拆 DOM、重建 <img>。
+   * 合并到下一帧再画：用户看到的还是最新状态，重绘次数掉一个数量级。
+   */
+  let repaintQueued = false;
+  const queueResultsRepaint = (): void => {
+    if (repaintQueued) return;
+    repaintQueued = true;
+    const run = (): void => {
+      repaintQueued = false;
+      if (getState().page !== 'generate') return;
+      // 只重画结果区。整页重建会把正在输入的提示词、刚选好的图和立方体角度全冲掉。
+      // 万一生成页还没登记回调（刚切过来、还在渲染），才退回整页重绘。
+      if (!refreshGenerateResults()) void paintPage();
+    };
+    // UXP 有 requestAnimationFrame，但不保证；退回 setTimeout(0) 同样能合并同一批事件
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(run);
+    else setTimeout(run, 0);
+  };
+  const unsubJobs = subscribe(['jobs', 'activeJobId'], queueResultsRepaint);
   const unsubToast = subscribe(['toasts'], paintToasts);
 
   mounts.add({

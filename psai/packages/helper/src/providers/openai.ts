@@ -18,6 +18,7 @@ import {
   imageRouteFor,
   normalizeMidjourneyPrompt,
   pickPromptModel,
+  planImageSize,
   DEFAULT_PROMPT_MODEL
 } from '@psai/shared';
 import type { ProviderCapability, ErrorCode } from '@psai/shared';
@@ -121,8 +122,11 @@ function acceptsResponseFormat(model: string): boolean {
  * 我们不该替不了解的平台做限制。
  */
 const FIXED_SIZES: Array<{ match: RegExp; sizes: Array<[number, number]> }> = [
-  // OpenAI 新一代
-  { match: /^gpt-image/i, sizes: [[1024, 1024], [1024, 1536], [1536, 1024]] },
+  // 只有 1 代是固定档位。gpt-image-2 实测认任意尺寸：
+  //   size=3000x1777 → 3008x1792（按 64 对齐）、size=2048x2048 → 2048x2048
+  // 以前这里写的是 /^gpt-image/，把 2 代一起按死在 1536 以内 ——
+  // 用户拿 4000px 原图去洗，回来最多 1536px，还找不到是谁砍的。
+  { match: /^gpt-image-1/i, sizes: [[1024, 1024], [1024, 1536], [1536, 1024]] },
   { match: /^dall-e-3/i, sizes: [[1024, 1024], [1024, 1792], [1792, 1024]] },
   { match: /^dall-e-2/i, sizes: [[256, 256], [512, 512], [1024, 1024]] }
 ];
@@ -327,14 +331,26 @@ export class OpenAiCompatibleAdapter implements ProviderAdapter {
 
     const width = Number(ctx.params['__width'] ?? 1024);
     const height = Number(ctx.params['__height'] ?? 1024);
-    // 吸附到该模型认的尺寸，否则面板上的分辨率滑杆会直接把请求撞成 HTTP 400
-    const size = snapSize(model, width, height);
-    if (size !== `${width}x${height}`) {
-      this.log.debug('生图尺寸已吸附到该模型支持的档位', {
+
+    /**
+     * 先把「想要多大」翻译成「这个平台该怎么发」。
+     *
+     * 关键在于：够不够 2K 不是靠 size 参数争取来的。nano-banana-pro 实测
+     * 无论 size 写多大都只给 1376×768，真正的开关是模型名 —— `-2k` 那个 id 才有 2K。
+     * 所以 planImageSize 可能会**改写模型名**，而且只在该平台确实有那个 id 时才改。
+     */
+    const plan = planImageSize(model, { width, height }, await this.ensureModels());
+    const planned = plan.model;
+    // 老一代固定档位模型再吸附一次，否则分辨率滑杆会直接把请求撞成 HTTP 400
+    const size = snapSize(planned, width, height);
+    if (planned !== model || size !== `${width}x${height}`) {
+      this.log.debug('生图尺寸方案', {
         jobId: ctx.jobId,
         model,
+        used: planned,
         requested: `${width}x${height}`,
-        used: size
+        size,
+        note: plan.note
       });
     }
     const prompt = (ctx.prompt ?? '').trim();
@@ -358,7 +374,7 @@ export class OpenAiCompatibleAdapter implements ProviderAdapter {
      * 路由表在 @psai/shared，和「哪些模型可选」是同一份事实源：
      * 能选中的模型，必然有一条对应的路，不会出现"列出来了但打不通"。
      */
-    const route = imageRouteFor(model) ?? 'images';
+    const route = imageRouteFor(planned) ?? 'images';
 
     if (route === 'mj') {
       // 异步代理接口：这里只拿到 taskId，出图靠上层轮询 poll()
@@ -368,10 +384,10 @@ export class OpenAiCompatibleAdapter implements ProviderAdapter {
     const remoteId = `oai_${randomUUID()}`;
     const out =
       route === 'chat'
-        ? await this.chatToImage({ model, prompt, ctx })
+        ? await this.chatToImage({ model: planned, prompt, ctx })
         : images.length === 0
-          ? await this.textToImage({ model, prompt, size, ctx })
-          : await this.imageToImage({ model, prompt, size, ctx });
+          ? await this.textToImage({ model: planned, prompt, size, ctx })
+          : await this.imageToImage({ model: planned, prompt, size, ctx });
 
     this.results.set(remoteId, { at: Date.now(), images: out });
     this.gc();
@@ -689,7 +705,17 @@ export class OpenAiCompatibleAdapter implements ProviderAdapter {
     return this.lastText;
   }
 
-  private async promptModel(): Promise<string> {
+  /**
+   * 拿这个平台的模型列表（10 分钟缓存）。
+   *
+   * 两个地方要用：挑内置提示词模型，以及**定尺寸**。
+   * 后者以前拿不到这份列表 —— 缓存只有 textComplete 走过才会填上，
+   * 而纯生图任务根本不碰 textComplete。于是 planImageSize 每次都收到空数组，
+   * 走「拿不到模型列表，不敢改写模型名」那一支，2K 兜底从来没生效过：
+   * 真机上 nano-banana-pro 拿 1536×1024 的原图，出的是 1264×848。
+   * 规则写了、测试也过了，就是没人给它该有的输入。
+   */
+  private async ensureModels(): Promise<readonly string[]> {
     const fresh = this.modelsCache && Date.now() - this.modelsCache.at < 10 * 60 * 1000;
     if (!fresh) {
       try {
@@ -698,6 +724,11 @@ export class OpenAiCompatibleAdapter implements ProviderAdapter {
         this.modelsCache = null;
       }
     }
+    return this.modelsCache?.models ?? [];
+  }
+
+  private async promptModel(): Promise<string> {
+    await this.ensureModels();
     if (!this.modelsCache) return DEFAULT_PROMPT_MODEL;
     // 先按内置偏好挑 GPT-5.6 一族，再退到看得懂图的通用视觉模型
     return pickPromptModel(this.modelsCache.models) ?? pickVisionModel(this.modelsCache.models) ?? DEFAULT_PROMPT_MODEL;
