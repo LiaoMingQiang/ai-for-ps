@@ -1,0 +1,336 @@
+; AI for PS 安装器
+;
+; 这是模板。打包时由 tools/make-release.mjs 把 @VERSION@ 这类占位符替换掉，
+; 产出 release/AI-for-PS-Setup.nsi 再交给 makensis 编译。
+; 写成独立的 .nsi 文件而不是 JS 里的字符串：NSIS 脚本满是反斜杠路径和 ${} 语法，
+; 塞进模板字符串里两种转义会互相打架，最后没人看得懂哪个反斜杠是真的。
+;
+; 设计约束：
+;  - **不要管理员权限**。装的是当前用户的 Photoshop 插件和一个后台小服务，
+;    全落在 %LOCALAPPDATA% / %APPDATA% 下。弹 UAC 只会吓退用户，也确实没必要。
+;  - **不依赖任何开发工具**。目标机器上没有 Node、没有 UXP Developer Tool、
+;    可能连 Creative Cloud 桌面端都没有。Helper 是 SEA 单文件 exe；
+;    插件直接写进 Photoshop 的插件目录并登记 —— 两条路都不经过开发工具。
+;  - **程序和数据分开**。程序在 $INSTDIR，用户几个月的任务历史和生成结果在
+;    %LOCALAPPDATA%\AIforPS。卸载只删前者，后者留着并明确告诉用户在哪。
+
+Unicode true
+
+!include "MUI2.nsh"
+!include "LogicLib.nsh"
+!include "FileFunc.nsh"
+
+!define PRODUCT       "AI for PS"
+!define VERSION       "@VERSION@"
+!define PLUGIN_ID     "@PLUGIN_ID@"
+!define PLUGIN_NAME   "@PLUGIN_NAME@"
+!define PUBLISHER     "AI for PS"
+!define HELPER_EXE    "AI-for-PS-Helper.exe"
+!define UNINST_KEY    "Software\Microsoft\Windows\CurrentVersion\Uninstall\AIforPS"
+!define RUN_KEY       "Software\Microsoft\Windows\CurrentVersion\Run"
+!define DATA_DIR      "$LOCALAPPDATA\AIforPS"
+
+Name "${PRODUCT} ${VERSION}"
+OutFile "AI-for-PS-Setup-@VERSION@.exe"
+BrandingText "${PRODUCT} ${VERSION}"
+
+InstallDir "$LOCALAPPDATA\Programs\AIforPS"
+; 升级时沿用上一次的安装目录，别让用户装出两份来
+InstallDirRegKey HKCU "${UNINST_KEY}" "InstallLocation"
+
+RequestExecutionLevel user
+SetCompressor /SOLID lzma
+ShowInstDetails show
+ShowUnInstDetails show
+
+VIProductVersion "@FILE_VERSION@"
+VIAddVersionKey /LANG=0 "ProductName"     "${PRODUCT}"
+VIAddVersionKey /LANG=0 "ProductVersion"  "${VERSION}"
+VIAddVersionKey /LANG=0 "FileVersion"     "${VERSION}"
+VIAddVersionKey /LANG=0 "CompanyName"     "${PUBLISHER}"
+VIAddVersionKey /LANG=0 "LegalCopyright"  "${PUBLISHER}"
+VIAddVersionKey /LANG=0 "FileDescription" "${PRODUCT} 安装程序"
+
+Var LogHandle
+
+!define MUI_ABORTWARNING
+
+!insertmacro MUI_PAGE_DIRECTORY
+!insertmacro MUI_PAGE_INSTFILES
+
+!define MUI_FINISHPAGE_TEXT "安装完成。$\r$\n$\r$\n打开 Photoshop，在「增效工具」菜单里就能看到 ${PLUGIN_NAME}。$\r$\n如果 Photoshop 刚才是开着的，请重启它。"
+!define MUI_FINISHPAGE_SHOWREADME "$INSTDIR\install.log"
+!define MUI_FINISHPAGE_SHOWREADME_TEXT "查看安装日志"
+!define MUI_FINISHPAGE_SHOWREADME_NOTCHECKED
+!insertmacro MUI_PAGE_FINISH
+
+!insertmacro MUI_UNPAGE_CONFIRM
+!insertmacro MUI_UNPAGE_INSTFILES
+
+!insertmacro MUI_LANGUAGE "SimpChinese"
+!insertmacro MUI_LANGUAGE "English"
+
+; ---------------- 日志 ----------------
+; NSIS 自带的 LogSet 要特殊编译的版本才有，官方发行版用不了。
+; 所以自己写一份：每一步都落到 install.log。用户装失败时能把这个文件发过来，
+; 而不是只能描述"装不上"。
+
+; 日志一律写 UTF-16LE（开头带 BOM）。
+;
+; NSIS 的 FileWrite 在 Unicode 安装器里仍然按系统 ANSI 代码页落盘 ——
+; 简体中文机器上写出来是 GBK，换台英文/日文系统的机器打开就是乱码，
+; 而安装日志的全部价值就在于"用户能把它发给我们看"。
+; FileWriteUTF16LE + BOM 是 NSIS 里唯一跨语言环境都读得对的写法。
+Function LogIt
+  DetailPrint "$R9"
+  ${If} $LogHandle <> 0
+    FileWriteUTF16LE $LogHandle "$R9$\r$\n"
+  ${EndIf}
+FunctionEnd
+
+!macro _Log TEXT
+  StrCpy $R9 "${TEXT}"
+  Call LogIt
+!macroend
+!define Log '!insertmacro _Log'
+
+Function un.LogIt
+  DetailPrint "$R9"
+  ${If} $LogHandle <> 0
+    FileWriteUTF16LE $LogHandle "$R9$\r$\n"
+  ${EndIf}
+FunctionEnd
+
+!macro _unLog TEXT
+  StrCpy $R9 "${TEXT}"
+  Call un.LogIt
+!macroend
+!define unLog '!insertmacro _unLog'
+
+; ---------------- 安装前检查 ----------------
+
+Function .onInit
+  ; 静默安装（IT 批量部署、升级脚本）一律不弹窗，直接装。
+  IfSilent done
+  ; Photoshop 开着的时候，插件目录里的文件正被它占用，删不掉也换不掉。
+  ; 硬装的结果是文件换了一半 —— 那比装不上糟糕得多，而且用户看不出来。
+  FindWindow $0 "Photoshop"
+  StrCmp $0 0 done
+  MessageBox MB_OKCANCEL|MB_ICONEXCLAMATION "检测到 Photoshop 正在运行。$\r$\n$\r$\n安装需要替换插件文件，请先完全退出 Photoshop 再继续。$\r$\n$\r$\n已退出请点「确定」，点「取消」放弃安装。" IDOK done
+  Abort
+  done:
+FunctionEnd
+
+; ---------------- 安装 ----------------
+
+Section "AI for PS" SecMain
+  SectionIn RO
+
+  CreateDirectory "$INSTDIR"
+  FileOpen $LogHandle "$INSTDIR\install.log" w
+  FileWriteWord $LogHandle 65279
+  ${Log} "==== ${PRODUCT} ${VERSION} 安装开始 ===="
+  ${GetTime} "" "L" $0 $1 $2 $3 $4 $5 $6
+  ${Log} "时间 $2-$1-$0 $4:$5:$6"
+  ${Log} "安装目录 $INSTDIR"
+
+  ; 0. 干净升级：装过旧版本就先把它卸掉。
+  ;    不卸的话，旧版本装过而新版本不再有的文件会一直留在安装目录里
+  ;    （早期版本装过 run-helper.bat / AI-for-PS.ccx / checksums.txt 这些），
+  ;    用户看到一堆说不清来历的文件，卸载时也带不走。
+  ;    带 _?= 就地跑，否则它会拷到临时目录去删一个空气。
+  ReadRegStr $0 HKCU "${UNINST_KEY}" "InstallLocation"
+  StrCmp $0 "" no_previous
+  IfFileExists "$0\Uninstall.exe" 0 no_previous
+  ${Log} "[0/6] 检测到旧版本，先卸载：$0"
+  nsExec::ExecToStack '"$0\Uninstall.exe" /S _?=$0'
+  Pop $1
+  Pop $2
+  ${Log} "  旧版本卸载退出码 $1"
+  Sleep 800
+  no_previous:
+
+  ; 1. 停掉可能还在跑的旧 Helper。
+  ;    它占着自己的 exe，不停掉的话覆盖会失败，而 NSIS 默认静默跳过 ——
+  ;    结果是"装成功了但跑的还是旧版本"，这种升级失败完全看不出来。
+  ${Log} "[1/6] 停止正在运行的 Helper"
+  nsExec::ExecToStack 'taskkill /F /IM "${HELPER_EXE}"'
+  Pop $0
+  Pop $1
+  ${If} $0 == 0
+    ${Log} "  已停止旧 Helper"
+  ${Else}
+    ${Log} "  没有正在运行的 Helper（全新安装时属正常）"
+  ${EndIf}
+  Sleep 600
+
+  ; 2. Helper 与内置工作流
+  ${Log} "[2/6] 安装 Helper 与内置工作流"
+  SetOutPath "$INSTDIR"
+  File "helper\${HELPER_EXE}"
+  SetOutPath "$INSTDIR\workflows"
+  File /r "helper\workflows\*.*"
+  SetOutPath "$INSTDIR"
+  ${Log} "  Helper 与工作流已就位"
+  ; 早期版本往安装目录里放过这些，新版本不再需要。
+  ; 留着的话用户以为是残留垃圾，而且我们的卸载器也不认识它们。
+  Delete "$INSTDIR\run-helper.bat"
+  Delete "$INSTDIR\AI-for-PS.ccx"
+  Delete "$INSTDIR\checksums.txt"
+  Delete "$INSTDIR\ACCEPTANCE.md"
+  Delete "$INSTDIR\README.md"
+  Delete "$INSTDIR\CHANGELOG.md"
+
+  ; 3. 插件包。放的是**未打包的目录**，UXP 直接就能加载，
+  ;    不需要 .ccx，也就不需要 Creative Cloud 桌面端参与。
+  ${Log} "[3/6] 释放 Photoshop 插件包"
+  SetOutPath "$INSTDIR\plugin"
+  File /r "plugin\*.*"
+  SetOutPath "$INSTDIR"
+  ${Log} "  插件包已就位"
+
+  ; 4. 登记到 Photoshop。
+  ;    交给 Helper 自己做 —— 要改的是 %APPDATA%\Adobe\UXP\PluginsInfo\v1\PS.json，
+  ;    那份 JSON 同时列着用户装的所有 UXP 插件（包括别人花钱买的）。
+  ;    NSIS 没有 JSON 解析能力，用文本替换去改它迟早会把别人的插件弄坏。
+  ${Log} "[4/6] 登记插件到 Photoshop"
+  nsExec::ExecToStack '"$INSTDIR\${HELPER_EXE}" --install-plugin "$INSTDIR\plugin"'
+  Pop $0
+  Pop $1
+  ${Log} "  $1"
+  ${If} $0 != 0
+    ${Log} "  失败：退出码 $0"
+    FileClose $LogHandle
+    StrCpy $LogHandle 0
+    MessageBox MB_OK|MB_ICONSTOP "插件登记失败。$\r$\n$\r$\n$1$\r$\n$\r$\n详细日志：$INSTDIR\install.log"
+    Abort "插件登记失败"
+  ${EndIf}
+  ${Log} "  插件已登记，Photoshop 下次启动即可看到"
+
+  ; 5. 数据目录与开机自启。
+  ;    Helper 启动时自己也会建这些目录，这里先建一遍是为了万一 Helper 起不来，
+  ;    用户至少有个确定的地方能找到日志。
+  ${Log} "[5/6] 准备数据目录与开机自启"
+  CreateDirectory "${DATA_DIR}"
+  CreateDirectory "${DATA_DIR}\logs"
+  CreateDirectory "${DATA_DIR}\assets"
+  CreateDirectory "${DATA_DIR}\backup"
+  WriteRegStr HKCU "${RUN_KEY}" "AIforPSHelper" '"$INSTDIR\${HELPER_EXE}"'
+  ${Log} "  数据目录 ${DATA_DIR}"
+  ${Log} "  已设置开机自启"
+
+  ; 6. 卸载信息与开始菜单
+  ${Log} "[6/6] 写入卸载信息"
+  WriteUninstaller "$INSTDIR\Uninstall.exe"
+  WriteRegStr   HKCU "${UNINST_KEY}" "DisplayName"           "${PRODUCT}"
+  WriteRegStr   HKCU "${UNINST_KEY}" "DisplayVersion"        "${VERSION}"
+  WriteRegStr   HKCU "${UNINST_KEY}" "Publisher"             "${PUBLISHER}"
+  WriteRegStr   HKCU "${UNINST_KEY}" "DisplayIcon"           '"$INSTDIR\${HELPER_EXE}"'
+  WriteRegStr   HKCU "${UNINST_KEY}" "UninstallString"       '"$INSTDIR\Uninstall.exe"'
+  ; QuietUninstallString 一定要带 _?= 。
+  ; NSIS 的卸载器默认会把自己拷到 $TEMP 再重新跑（这样才能删掉自己），
+  ; 而重新跑起来的那份里 $INSTDIR 指的是临时目录 —— 于是 /S 静默卸载
+  ; 会「成功」地把临时目录删一遍，真正的安装目录一个文件都没动。
+  ; 退出码还是 0。实测过：不带 _?= 时插件、注册表、快捷方式全都留在原地。
+  ; 带上 _?= 就地执行，$INSTDIR 才是真的安装目录。
+  WriteRegStr   HKCU "${UNINST_KEY}" "QuietUninstallString"  '"$INSTDIR\Uninstall.exe" /S _?=$INSTDIR'
+  WriteRegStr   HKCU "${UNINST_KEY}" "InstallLocation"       "$INSTDIR"
+  WriteRegDWORD HKCU "${UNINST_KEY}" "NoModify" 1
+  WriteRegDWORD HKCU "${UNINST_KEY}" "NoRepair" 1
+  ${GetSize} "$INSTDIR" "/S=0K" $0 $1 $2
+  IntFmt $0 "0x%08X" $0
+  WriteRegDWORD HKCU "${UNINST_KEY}" "EstimatedSize" "$0"
+
+  CreateDirectory "$SMPROGRAMS\${PRODUCT}"
+  CreateShortcut "$SMPROGRAMS\${PRODUCT}\启动 Helper.lnk" "$INSTDIR\${HELPER_EXE}"
+  CreateShortcut "$SMPROGRAMS\${PRODUCT}\安装日志.lnk" "$INSTDIR\install.log"
+  CreateShortcut "$SMPROGRAMS\${PRODUCT}\卸载 ${PRODUCT}.lnk" "$INSTDIR\Uninstall.exe"
+
+  ; 装完立刻起一次，用户不用重启机器。
+  ; 用 ExecShell 而不是 Exec：Exec 起的子进程和安装器进程绑在一起，
+  ; 静默安装结束时会被一并收走，结果就是"装完了但 Helper 没在跑"。
+  ${Log} "启动 Helper"
+  ExecShell "open" "$INSTDIR\${HELPER_EXE}" SW_SHOWMINNOACTIVE
+
+  ${Log} "==== 安装完成 ===="
+  FileClose $LogHandle
+  StrCpy $LogHandle 0
+SectionEnd
+
+; ---------------- 卸载 ----------------
+
+Function un.onInit
+  IfSilent un_done
+  FindWindow $0 "Photoshop"
+  StrCmp $0 0 un_done
+  MessageBox MB_OKCANCEL|MB_ICONEXCLAMATION "检测到 Photoshop 正在运行。$\r$\n$\r$\n卸载需要删除插件文件，建议先退出 Photoshop。$\r$\n$\r$\n点「确定」继续（可能有文件删不掉），点「取消」放弃。" IDOK un_done
+  Abort
+  un_done:
+FunctionEnd
+
+Section "Uninstall"
+  CreateDirectory "${DATA_DIR}\logs"
+  FileOpen $LogHandle "${DATA_DIR}\logs\uninstall.log" w
+  FileWriteWord $LogHandle 65279
+  ${unLog} "==== ${PRODUCT} ${VERSION} 卸载开始 ===="
+
+  ; 顺序很重要：先用 Helper 把插件注销掉，再删 Helper 本身。
+  ; 反过来的话，能注销插件的工具已经不在了，Photoshop 的注册表里
+  ; 会永远留着一条指向空目录的记录，PS 每次启动都报一个看不懂的错。
+  ${unLog} "[1/4] 从 Photoshop 注销插件"
+  nsExec::ExecToStack '"$INSTDIR\${HELPER_EXE}" --uninstall-plugin "${PLUGIN_ID}"'
+  Pop $0
+  Pop $1
+  ${unLog} "  $1"
+
+  ${unLog} "[2/4] 停止 Helper"
+  nsExec::ExecToStack 'taskkill /F /IM "${HELPER_EXE}"'
+  Pop $0
+  Pop $1
+  Sleep 600
+
+  ${unLog} "[3/4] 清理注册表与快捷方式"
+  DeleteRegValue HKCU "${RUN_KEY}" "AIforPSHelper"
+  DeleteRegKey HKCU "${UNINST_KEY}"
+  Delete "$SMPROGRAMS\${PRODUCT}\启动 Helper.lnk"
+  Delete "$SMPROGRAMS\${PRODUCT}\安装日志.lnk"
+  Delete "$SMPROGRAMS\${PRODUCT}\卸载 ${PRODUCT}.lnk"
+  RMDir "$SMPROGRAMS\${PRODUCT}"
+
+  ${unLog} "[4/4] 删除程序文件"
+  Delete "$INSTDIR\${HELPER_EXE}"
+  Delete "$INSTDIR\install.log"
+  RMDir /r "$INSTDIR\workflows"
+  RMDir /r "$INSTDIR\plugin"
+  Delete "$INSTDIR\Uninstall.exe"
+  RMDir "$INSTDIR"
+
+  ; 走 _?= 就地卸载时（控制面板的静默卸载就是这么调的），卸载器本身
+  ; 正在 $INSTDIR 里运行，Windows 不允许删除正在运行的 exe ——
+  ; 上面那两行会静默失败，留下一个孤零零的 Uninstall.exe 和一个空目录，
+  ; 用户会以为没卸干净。
+  ; 所以再补一手：让一个脱离的 cmd 等我们退出之后再删。
+  ; ExecShell 不等待子进程，子进程也不会随我们一起被收走。
+  ; 先把工作目录挪走。
+  ; _?= 模式下卸载器的当前目录就是 $INSTDIR，而 ExecShell 起的 cmd 会继承它 ——
+  ; Windows 不允许删除任何进程的当前目录，于是 rmdir 每次都失败，
+  ; 留下一个空文件夹。实测就是栽在这里：exe 删掉了，目录删不掉。
+  SetOutPath "$TEMP"
+  IfFileExists "$INSTDIR\Uninstall.exe" 0 tail_done
+  ExecShell "open" "$SYSDIR\cmd.exe" '/c ping -n 3 127.0.0.1 >nul & del /f /q "$INSTDIR\Uninstall.exe" & rmdir "$INSTDIR" & ping -n 3 127.0.0.1 >nul & rmdir "$INSTDIR"' SW_HIDE
+  ; 万一那个 cmd 也没成（杀软拦截之类），/REBOOTOK 兜底：下次开机一定清掉。
+  Delete /REBOOTOK "$INSTDIR\Uninstall.exe"
+  RMDir /REBOOTOK "$INSTDIR"
+  tail_done:
+
+  ; 用户数据一律保留，并且明确说出它在哪。
+  ; 卸载插件顺手删掉几个月的生成结果是不可挽回的 ——
+  ; 想删的人自己能删，删错的人找不回来。
+  ${unLog} "任务历史与生成结果保留在 ${DATA_DIR}"
+  ${unLog} "==== 卸载完成 ===="
+  FileClose $LogHandle
+  StrCpy $LogHandle 0
+
+  IfSilent +2
+  MessageBox MB_OK|MB_ICONINFORMATION "${PRODUCT} 已卸载。$\r$\n$\r$\n你的任务历史与生成结果保留在：$\r$\n${DATA_DIR}$\r$\n$\r$\n如需彻底清除，请手动删除该目录。"
+SectionEnd

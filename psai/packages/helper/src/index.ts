@@ -6,9 +6,25 @@
  * 任何一步失败都要把原因写进日志并以非零码退出，不留一个"看起来在跑"的半死进程。
  */
 
+/**
+ * 关掉 node:sqlite 的 ExperimentalWarning。
+ *
+ * 它每次启动都往 stderr 打两行。平时无所谓，但安装器会把 Helper 子进程的输出
+ * 原样写进 install.log —— 用户装完打开日志，第一眼看到的是 "Warning"，
+ * 会以为哪里装坏了，然后来问一个根本不存在的问题。
+ *
+ * 我们清楚自己在用这个实验特性，Node 版本也钉死了，这行提示对用户没有任何价值。
+ * 只滤掉 ExperimentalWarning，别的警告照常打出来 —— 那些是真要看的。
+ */
+process.removeAllListeners('warning');
+process.on('warning', (w) => {
+  if (w.name !== 'ExperimentalWarning') console.warn(w.stack ?? String(w));
+});
+
 import { createServer } from 'node:http';
 import { existsSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
-import { resolve, dirname } from 'node:path';
+import { resolve, dirname, join } from 'node:path';
+import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { PSAI_VERSION } from '@psai/shared';
 import { loadConfig } from './config.js';
@@ -241,7 +257,108 @@ function shouldAutoStart(): boolean {
   return entry === resolve(here, 'index.js') || entry === resolve(here, 'index.ts');
 }
 
-if (shouldAutoStart()) {
+/**
+ * 安装器要用的子命令。
+ *
+ * 打包出来的 AI-for-PS-Helper.exe 平时的职责是「跑服务」，但安装/卸载时
+ * 还要干一件 NSIS 干不了的事：把插件登记进 Photoshop 的 PluginsInfo/v1/PS.json。
+ * 那是一份同时列着用户所有 UXP 插件的 JSON，只能用真正的 JSON 解析去合并。
+ *
+ * 复用同一个 exe 而不是再发一个小工具：安装包里少一个文件、少一份版本要对齐，
+ * 而且用户机器上本来就不需要装 Node —— 这个 exe 自己就是运行时。
+ *
+ * 必须排在 shouldAutoStart() 前面：跑子命令的时候绝不能顺手把服务也起起来，
+ * 否则安装过程中会多出一个没人管的后台进程，端口还被占着。
+ */
+async function runCli(argv: string[]): Promise<boolean> {
+  const cmd = argv[0];
+  if (!cmd || !cmd.startsWith('--')) return false;
+
+  const { installPlugin, uninstallPlugin, uxpRoot } = await import('./uxp-install.js');
+  const { appendFileSync, mkdirSync } = await import('node:fs');
+
+  /**
+   * 两条输出通道，分工是有原因的。
+   *
+   * stdout **只写 ASCII**：NSIS 用 nsExec 抓子进程输出，抓到的字节按系统 ANSI
+   * 代码页解码。Node 在 Windows 上往管道写的是 UTF-8，于是中文一路变成乱码，
+   * 最后原样落进 install.log —— 用户打开日志看到一堆问号，出了问题也没法把
+   * 有用的信息发给我们。所以给 NSIS 看的行一律是 `PLUGIN-INSTALL-OK <id> <ver>`
+   * 这种机器可读的 ASCII。
+   *
+   * 详细中文说明写进自己的 UTF-8 日志文件，编码由我们自己说了算，不经过 NSIS。
+   */
+  const logDir = join(process.env['LOCALAPPDATA'] ?? homedir(), 'AIforPS', 'logs');
+  const logFile = join(logDir, 'plugin-install.log');
+  try {
+    mkdirSync(logDir, { recursive: true });
+  } catch {
+    /* 建不了目录就只走 stdout，不能因为日志写不下去就装不了插件 */
+  }
+  const detail = (line: string): void => {
+    try {
+      appendFileSync(logFile, `${new Date().toISOString()} ${line}\n`, 'utf8');
+    } catch {
+      /* noop */
+    }
+  };
+  /** 给 NSIS 看的：ASCII，一行一个结论 */
+  const status = (line: string): void => {
+    console.log(line);
+    detail(line);
+  };
+
+  detail(`==== ${cmd} ${argv.slice(1).join(' ')} ====`);
+
+  switch (cmd) {
+    case '--version':
+      console.log(PSAI_VERSION);
+      return true;
+
+    case '--uxp-root':
+      console.log(uxpRoot());
+      return true;
+
+    case '--install-plugin': {
+      const dir = argv[1];
+      if (!dir) throw new Error('usage: --install-plugin <plugin-dir>');
+      const r = installPlugin({ sourceDir: dir, log: detail });
+      status(`PLUGIN-INSTALL-OK ${r.pluginId} ${r.version}`);
+      status(`  path=${r.installedPath}`);
+      status(`  removedOldDirs=${r.removedDirs.length} keptOtherPlugins=${r.keptOtherEntries}`);
+      status(`  detail-log=${logFile}`);
+      return true;
+    }
+
+    case '--uninstall-plugin': {
+      const id = argv[1];
+      if (!id) throw new Error('usage: --uninstall-plugin <plugin-id>');
+      const r = uninstallPlugin({ pluginId: id, log: detail });
+      status(`PLUGIN-UNINSTALL-OK ${r.pluginId}`);
+      status(`  removedDirs=${r.removedDirs.length} removedEntries=${r.removedEntries} keptOtherPlugins=${r.keptOtherEntries}`);
+      status(`  detail-log=${logFile}`);
+      return true;
+    }
+
+    default:
+      throw new Error(`unknown option: ${cmd}`);
+  }
+}
+
+const cliArgs = process.argv.slice(2);
+if (cliArgs.some((a) => a.startsWith('--'))) {
+  runCli(cliArgs)
+    .then((handled) => {
+      if (!handled) process.exit(2);
+    })
+    .catch((e) => {
+      // 安装器靠退出码判断成败，靠 stderr 给用户看原因。
+      // 这里绝不能吞异常：装失败却报成功，用户会在 Photoshop 里
+      // 对着一个根本没装上的插件找半天。
+      console.error(`ERROR ${e instanceof Error ? e.message : String(e)}`);
+      process.exit(1);
+    });
+} else if (shouldAutoStart()) {
   startHelper().catch((e) => {
     console.error('Helper 启动失败:', e instanceof Error ? e.message : String(e));
     process.exit(1);

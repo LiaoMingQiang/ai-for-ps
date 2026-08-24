@@ -106,13 +106,44 @@ const manifest = JSON.parse(readFileSync(join(PLUGIN, 'manifest.json'), 'utf8'))
 if (manifest.version !== PSAI_VERSION) fail(`manifest 版本 ${manifest.version} 与产品版本 ${PSAI_VERSION} 不一致`);
 else ok(`版本一致 ${PSAI_VERSION}`);
 
+/* ---------------- 3.5 插件目录（安装器用） ---------------- */
+
+// 安装器装的是**未打包的目录**，不是 .ccx。
+// .ccx 要靠 Creative Cloud 桌面端来装，而目标用户机器上不一定有它 ——
+// 用户的要求是"下载 exe、双击、装完就能用"，中间不能再冒出第二个安装流程。
+// UXP 本来就支持直接从 Plugins\External\<id>_<ver>\ 加载目录形式的插件，
+// 这也是本机上那个正常工作的插件的存在形式（真机确认过）。
+step('插件目录（安装器用）');
+const pluginStage = join(RELEASE, 'plugin');
+rmSync(pluginStage, { recursive: true, force: true });
+mkdirSync(pluginStage, { recursive: true });
+cpSync(stage, pluginStage, { recursive: true });
+if (existsSync(join(pluginStage, 'manifest.json'))) ok(`${pluginStage}`);
+else fail('插件目录里没有 manifest.json');
+
+const pluginManifest = JSON.parse(readFileSync(join(pluginStage, 'manifest.json'), 'utf8'));
+if (!pluginManifest.id) fail('插件 manifest 缺少 id');
+else ok(`插件 id ${pluginManifest.id}`);
+
 /* ---------------- 4. NSIS 安装器 ---------------- */
 
 step('NSIS 安装器');
 const nsiPath = join(RELEASE, 'AI-for-PS-Setup.nsi');
+// VIProductVersion 必须是四段数字，NSIS 会校验
+const fileVersion = [...PSAI_VERSION.split('-')[0].split('.'), '0', '0', '0'].slice(0, 4).join('.');
+const tmpl = readFileSync(resolve(here, 'installer.nsi.tmpl'), 'utf8');
+const nsi = tmpl
+  .replaceAll('@VERSION@', PSAI_VERSION)
+  .replaceAll('@FILE_VERSION@', fileVersion)
+  .replaceAll('@PLUGIN_ID@', pluginManifest.id)
+  .replaceAll('@PLUGIN_NAME@', pluginManifest.name ?? 'AI for PS');
+if (nsi.includes('@')) {
+  const left = [...nsi.matchAll(/@[A-Z_]+@/g)].map((m) => m[0]);
+  if (left.length) fail(`NSI 模板里还有没替换掉的占位符：${[...new Set(left)].join(', ')}`);
+}
 // NSIS 的 Unicode true 要求脚本本身是带 BOM 的 UTF-8，
 // 否则里面的中文会让 makensis 报 Bad text encoding
-writeFileSync(nsiPath, '﻿' + buildNsi(), 'utf8');
+writeFileSync(nsiPath, '﻿' + nsi, 'utf8');
 ok(`已生成 ${nsiPath}`);
 
 const makensis = ['C:\\Program Files (x86)\\NSIS\\makensis.exe', 'C:\\Program Files\\NSIS\\makensis.exe', 'makensis'].find(
@@ -123,7 +154,7 @@ let setupPath = null;
 if (makensis) {
   try {
     execFileSync(makensis, [nsiPath], { stdio: 'inherit', cwd: RELEASE });
-    setupPath = join(RELEASE, 'AI-for-PS-Setup.exe');
+    setupPath = join(RELEASE, `AI-for-PS-Setup-${PSAI_VERSION}.exe`);
     if (existsSync(setupPath)) ok(`${setupPath} (${(statSync(setupPath).size / 1048576).toFixed(1)} MB)`);
     else {
       fail('makensis 跑完但没有产出 Setup.exe');
@@ -139,7 +170,7 @@ if (makensis) {
 /* ---------------- 5. 随包文档 ---------------- */
 
 step('随包文档');
-for (const doc of ['README.md', 'docs/ACCEPTANCE.md', 'docs/WORKFLOWS.md']) {
+for (const doc of ['README.md', 'docs/INSTALL.md', 'docs/ACCEPTANCE.md', 'docs/WORKFLOWS.md']) {
   const src = resolve(ROOT, doc);
   if (existsSync(src)) {
     cpSync(src, join(RELEASE, doc.split('/').pop()));
@@ -186,102 +217,47 @@ if (problems.length) {
 
 /* ---------------- 模板 ---------------- */
 
-function buildNsi() {
-  return `; AI for PS 安装器
-; 由 tools/make-release.mjs 生成
-
-Unicode true
-!include "MUI2.nsh"
-
-Name "AI for PS Helper"
-OutFile "AI-for-PS-Setup.exe"
-; 程序装在 Programs 下，数据留在 %LOCALAPPDATA%\\AIforPS —— 两者必须分开，
-; 否则卸载时一不小心就把用户几个月的任务历史和生成结果一起删了
-InstallDir "$LOCALAPPDATA\\Programs\\AIforPS"
-RequestExecutionLevel user
-ShowInstDetails show
-
-!define MUI_ABORTWARNING
-!insertmacro MUI_PAGE_DIRECTORY
-!insertmacro MUI_PAGE_INSTFILES
-!insertmacro MUI_UNPAGE_CONFIRM
-!insertmacro MUI_UNPAGE_INSTFILES
-!insertmacro MUI_LANGUAGE "SimpChinese"
-!insertmacro MUI_LANGUAGE "English"
-
-Section "Helper" SecHelper
-  SetOutPath "$INSTDIR"
-  File "helper\\AI-for-PS-Helper.exe"
-  File "helper\\run-helper.bat"
-
-  SetOutPath "$INSTDIR\\workflows"
-  File /r "helper\\workflows\\*.*"
-
-  SetOutPath "$INSTDIR"
-  File "AI-for-PS.ccx"
-  File /nonfatal "README.md"
-  File /nonfatal "ACCEPTANCE.md"
-  File /nonfatal "CHANGELOG.md"
-  File "checksums.txt"
-
-  ; 开机自启：Helper 必须一直在，插件才连得上
-  WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Run" "AIforPSHelper" '"$INSTDIR\\AI-for-PS-Helper.exe"'
-
-  ; 卸载信息
-  WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\AIforPS" "DisplayName" "AI for PS Helper"
-  WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\AIforPS" "DisplayVersion" "${PSAI_VERSION}"
-  WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\AIforPS" "UninstallString" '"$INSTDIR\\Uninstall.exe"'
-  WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\AIforPS" "InstallLocation" "$INSTDIR"
-  WriteUninstaller "$INSTDIR\\Uninstall.exe"
-
-  ; 装完立刻起一次，用户不用重启。
-  ; 用 ExecShell 而不是 Exec：Exec 起的子进程和安装器进程绑在一起，
-  ; 静默安装结束时会被一并收走，结果就是"装完了但 Helper 没在跑"。
-  ExecShell "open" "$INSTDIR\\AI-for-PS-Helper.exe" SW_SHOWMINNOACTIVE
-SectionEnd
-
-Section "Uninstall"
-  ; 先把还在跑的 Helper 关掉，否则文件删不掉
-  nsExec::Exec 'taskkill /F /IM AI-for-PS-Helper.exe'
-  Sleep 800
-
-  DeleteRegValue HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Run" "AIforPSHelper"
-  DeleteRegKey HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\AIforPS"
-
-  Delete "$INSTDIR\\AI-for-PS-Helper.exe"
-  Delete "$INSTDIR\\run-helper.bat"
-  Delete "$INSTDIR\\AI-for-PS.ccx"
-  Delete "$INSTDIR\\README.md"
-  Delete "$INSTDIR\\ACCEPTANCE.md"
-  Delete "$INSTDIR\\CHANGELOG.md"
-  Delete "$INSTDIR\\checksums.txt"
-  Delete "$INSTDIR\\Uninstall.exe"
-  RMDir /r "$INSTDIR\\workflows"
-  RMDir "$INSTDIR"
-
-  ; 任务历史与结果资产默认保留，用户可以自己删
-  DetailPrint "任务历史与生成结果保留在 $LOCALAPPDATA\\AIforPS，如需清除请手动删除该目录。"
-SectionEnd
-`;
-}
 
 function buildChangelog() {
   return `# 变更记录
 
 ## ${PSAI_VERSION}
 
-首个版本。
+### 安装方式
+双击 \`AI-for-PS-Setup-${PSAI_VERSION}.exe\`，按向导装完，打开 Photoshop 即可使用。
+不需要 UXP Developer Tool，不需要 Creative Cloud 桌面端，不需要手工拷文件，
+也不需要管理员权限（全部装在当前用户目录下）。
+
+安装器会做这些事：
+- 释放 Helper 单文件 exe（内置 Node 运行时，目标机器无需安装 Node）与内置工作流
+- 把插件装进 \`%APPDATA%\\Adobe\\UXP\\Plugins\\External\\\` 并登记到 Photoshop 的插件注册表
+- 建好数据目录、配好开机自启、写入控制面板的卸载入口
+- 检测到旧版本时先干净卸载再装新的
+- 全程写 \`install.log\`（UTF-16LE，任何语言的系统都读得对）
+
+卸载走控制面板即可。任务历史与生成结果**不会**被删除，留在
+\`%LOCALAPPDATA%\\AIforPS\`，需要彻底清除请手动删该目录。
 
 ### 已验证
 - ComfyUI 分支 11 个固定功能全部对真实 ComfyUI 跑通并出图
+- 闭源模型用真实账号（Comfly）验证：gpt-image-2 / Nano-Banana Pro /
+  Gemini 图像族 / Midjourney 四族均真机出图，三条协议各自跑通
+- 提示词优化内置 GPT-5.6，无需在设置里配置任何语言模型
+- 出图尺寸默认跟随原图；平台给不了精确尺寸时自动升到 2K 档位
+- 安装 / 升级 / 卸载在本机完整跑通：装后 35 项校验全过，卸载后 18 项全过，
+  且用户已有的其他 UXP 插件在这三步里始终未被改动
 - 无损放大同输入两次结果逐字节一致
 - 重启恢复先查远端，绝不重复提交
 - 写回失败与 AI 失败严格分离，结果永久保留可重试
 - API Key 只存本机（Windows DPAPI），明文不落盘、不出响应
 
 ### 已知限制
-- 闭源模型与 RunningHub 只做了协议实现与桩测试，未用真实账号验证
-- .ccx 未经 Adobe 签名，需用 UXP Developer Tool 以开发模式加载
+- **安装包与 Helper 未做代码签名**。Windows SmartScreen 会提示"未知发布者"，
+  用户需要点「更多信息 → 仍要运行」。要消除这个提示得买代码签名证书。
+- 未在全新的干净 Windows 虚拟机上验证过。本机验证覆盖了全新安装、升级覆盖、
+  静默安装、静默卸载和残留检查，但"从没装过 Photoshop 插件的机器"这一种
+  情况只有单元测试覆盖（临时目录模拟无注册表场景），没有真机跑过。
+- 安装时若 Photoshop 正开着，插件要等 Photoshop 重启后才出现（安装器会提示）。
 - 开发机未装 ESRGAN 类放大模型，放大走 ImageScaleBy 重采样
 - 仅支持 Windows（DPAPI 与 NSIS 安装器）
 `;
