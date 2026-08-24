@@ -12,6 +12,8 @@ export type ProviderKind =
   | 'comfyui'
   /** RunningHub 云端 ComfyUI 任务 API */
   | 'runninghub'
+  /** LiblibAI 开放平台（云端 ComfyUI 工作流 + 托管生图模型） */
+  | 'liblib'
   /** OpenAI 兼容协议（火山方舟 / 阿里百炼 / 魔搭 / comfly / 自定义） */
   | 'openai-compatible'
   /** Google Gemini generateContent */
@@ -105,6 +107,35 @@ export const PROVIDERS: readonly ProviderDescriptor[] = [
     defaultModel: null,
     description: '把 ComfyUI 工作流放到云端跑，不占用本机显卡。',
     recommended: true,
+    cancelSupport: 'none'
+  },
+  {
+    id: 'liblib',
+    label: 'LiblibAI 云端',
+    kind: 'liblib',
+    consoleUrl: 'https://www.liblib.art/apis',
+    defaultBaseUrl: 'https://openapi.liblibai.cloud',
+    baseUrlEditable: true,
+    // 和 RunningHub 一样是「工作流型」平台，但它还额外提供托管生图模型
+    // （webui/text2img、img2img 那一族），所以两种能力都要声明。
+    capabilities: ['workflow', 'textToImage', 'imageToImage', 'progress', 'listModels'],
+    /**
+     * 两段式密钥。
+     *
+     * LiblibAI 用 AccessKey + SecretKey 做 HMAC-SHA1 签名，SecretKey 从不上行 ——
+     * 每次请求现算一个签名带在 query 上。所以两个都必须存在本机：
+     * 少了 SecretKey 就签不出名字，等于没配。
+     * 这也是通用 Provider 卡片必须支持**多个**凭据字段的原因，
+     * 以前它只渲染第一个 secret 字段，LiblibAI 会被卡在这里。
+     */
+    credentials: [
+      { key: 'accessKey', label: 'Access Key', secret: true, placeholder: 'LiblibAI AccessKey', required: true },
+      { key: 'secretKey', label: 'Secret Key', secret: true, placeholder: 'LiblibAI SecretKey', required: true }
+    ],
+    defaultModel: '',
+    description: '哩布哩布 AI 开放平台：云端 ComfyUI 工作流与托管生图模型，不占用本机显卡。',
+    recommended: true,
+    // 实测其开放接口没有取消能力，和 RunningHub 一样如实告知
     cancelSupport: 'none'
   },
   {

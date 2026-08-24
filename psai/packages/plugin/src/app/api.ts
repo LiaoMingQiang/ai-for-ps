@@ -134,6 +134,8 @@ export interface ProviderView extends ProviderRuntimeStatus {
   modelsTotal: number;
   /** 当前配置的默认模型，设置页要把它显示成选中项 */
   defaultModel: string;
+  /** 当前配置的默认云端工作流 id —— 工作流型平台（RunningHub / LiblibAI）用它 */
+  defaultWorkflowId: string;
   kind: string;
   consoleUrl: string | null;
   description: string;
@@ -355,7 +357,7 @@ export const api = {
     request<{ settings: AppSettings }>('PATCH', '/v1/settings', patch).then((r) => r.settings),
 
   providers: () => request<{ providers: ProviderView[] }>('GET', '/v1/providers').then((r) => r.providers),
-  patchProvider: (id: string, patch: { enabled?: boolean; baseUrl?: string; defaultModel?: string }) =>
+  patchProvider: (id: string, patch: { enabled?: boolean; baseUrl?: string; defaultModel?: string; defaultWorkflowId?: string }) =>
     request<{ status: ProviderRuntimeStatus }>('PATCH', `/v1/providers/${encodeURIComponent(id)}`, patch),
   /**
    * 存密钥。Helper 存完会顺手拉一次模型，所以这里的返回带着 models/total ——

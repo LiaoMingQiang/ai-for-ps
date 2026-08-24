@@ -219,83 +219,42 @@ async function renderLocal(host: HTMLElement, settings: AppSettings): Promise<vo
 
 /* ---------------- 云端 ---------------- */
 
-async function renderCloud(host: HTMLElement, settings: AppSettings): Promise<void> {
+/**
+ * 「云端」分组：所有工作流型云平台，用的是**和别处一样的** Provider 卡片。
+ *
+ * 这里以前是一张手写死的 RunningHub 卡片 —— 自己的 Key 输入框、自己的验证按钮、
+ * 自己的工作流 ID 字段，和「推荐平台」里那套通用卡片完全是两套代码。
+ * 于是 RunningHub 和别的平台在产品上就长得不一样：改一处要改两遍，
+ * 而第二个工作流平台（LiblibAI）进来时只能再手写第三套。
+ *
+ * 现在按能力筛出工作流型平台，交给同一个 providerCard 渲染。
+ * RunningHub 和 LiblibAI 从此是两个可互换的云端算力提供方，
+ * 而不是两套互不相干的集成。
+ */
+async function renderCloud(host: HTMLElement, _settings: AppSettings): Promise<void> {
   const providers = await api.providers();
-  const rh = providers.find((p) => p.id === 'runninghub');
+  const cloudWorkflow = providers.filter((p) => p.capabilities.includes('workflow') && p.kind !== 'comfyui');
 
-  const keyInput = h('input', {
-    class: 'input',
-    type: 'password',
-    placeholder: rh?.credentialFields[0]?.masked ?? 'RunningHub API Key'
-  }) as HTMLInputElement;
-
-  const wfInput = h('input', {
-    class: 'input',
-    type: 'text',
-    value: settings.cloud.runninghubWorkflowId,
-    placeholder: '云端工作流 ID',
-    onchange: async (e: Event) => {
-      await patch({ cloud: { runninghubWorkflowId: (e.target as HTMLInputElement).value.trim() } });
-    }
-  });
-
-  const result = h('div', { class: 'test-result muted' }, rh?.configured ? '已配置' : (rh?.reason ?? '未配置'));
-
-  const saveBtn = h(
-    'button',
-    {
-      class: 'btn-primary',
-      type: 'button',
-      onclick: async () => {
-        if (!keyInput.value.trim()) {
-          toast('请先填写 API Key', '', 'warn');
-          return;
-        }
-        try {
-          await api.setCredentials('runninghub', { apiKey: keyInput.value.trim() });
-          keyInput.value = '';
-          toast('API Key 已保存', '只保存在本机 Helper（DPAPI 加密）');
-          await renderSettingsPage(host.parentElement as HTMLElement);
-        } catch (e) {
-          toast('保存失败', e instanceof ApiError ? e.display : String(e), 'error');
-        }
-      }
-    },
-    '保存 Key'
-  );
-
-  const verifyBtn = h(
-    'button',
-    {
-      class: 'btn-ghost',
-      type: 'button',
-      onclick: async () => {
-        result.className = 'test-result muted';
-        result.textContent = '正在验证…';
-        try {
-          const res = await api.testProvider('runninghub');
-          result.className = `test-result ${res.result.ok ? 'ok' : 'err'}`;
-          result.textContent = res.result.detail;
-        } catch (e) {
-          result.className = 'test-result err';
-          result.textContent = e instanceof ApiError ? e.display : String(e);
-        }
-      }
-    },
-    '验证'
-  );
+  if (cloudWorkflow.length === 0) {
+    host.appendChild(card('云端算力', h('p', { class: 'muted' }, '没有可用的云端工作流平台。')));
+    return;
+  }
 
   host.appendChild(
     card(
-      'RunningHub 云端',
-      h('p', { class: 'muted' }, '把 ComfyUI 工作流放到云端跑，不占用本机显卡。'),
-      fieldRow('API Key', keyInput, rh?.credentialFields[0]?.masked ? `当前：${rh.credentialFields[0].masked}` : undefined),
-      fieldRow('默认工作流 ID', wfInput, '可被单个功能的绑定覆盖'),
-      h('div', { class: 'row gap' }, saveBtn, verifyBtn),
-      result,
-      h('div', { class: 'notice' }, 'RunningHub 没有提供取消接口。任务提交后无法中止，取消只会让本地丢弃结果，费用仍会产生。')
+      '云端算力',
+      h('p', { class: 'muted' }, '把 ComfyUI 工作流放到云端跑，不占用本机显卡。工作流 ID 从各平台网站上你自己的应用页面复制。'),
+      ...cloudWorkflow.map((p) => providerCard(p, host))
     )
   );
+
+  // 取消能力是产品语义，不是实现细节 —— 会产生费用，必须在配置的地方就说清楚
+  const noCancel = cloudWorkflow.filter((p) => p.cancelSupport === 'none').map((p) => p.label);
+  if (noCancel.length > 0) {
+    host.appendChild(
+      h('div', { class: 'notice' }, `${noCancel.join(' / ')} 没有提供取消接口。任务提交后无法中止，取消只会让本地丢弃结果，费用仍会产生。`)
+    );
+  }
 }
 
 /* ---------------- 固定功能绑定 ---------------- */
@@ -327,7 +286,21 @@ async function renderBindings(host: HTMLElement): Promise<void> {
       }
     }) as HTMLSelectElement;
 
-    const candidates = f.branch === 'comfyui' ? providers.filter((p) => p.id === 'comfyui' || p.id === 'runninghub') : providers.filter((p) => p.kind !== 'comfyui' && p.kind !== 'runninghub');
+    /**
+     * 这个功能能挂在哪些 Provider 上 —— 按**能力**筛，不按 id。
+     *
+     * 以前写死成 `p.id === 'comfyui' || p.id === 'runninghub'`，
+     * 于是每加一个云端平台就要回来改这一行；漏改的话新平台配好了也选不着，
+     * 用户会以为是没配对。
+     *
+     * 现在：工作流类功能要 'workflow' 能力，闭源模型类功能要出图能力。
+     * LiblibAI 两种能力都有，所以两边都能选到 —— 这正是它和 RunningHub
+     * 的差别所在，靠能力表达出来，不用在 UI 里特判。
+     */
+    const candidates =
+      f.branch === 'comfyui'
+        ? providers.filter((p) => p.capabilities.includes('workflow'))
+        : providers.filter((p) => p.capabilities.includes('textToImage') || p.capabilities.includes('imageToImage'));
     for (const p of candidates) {
       const opt = h('option', { value: p.id }, p.label + (p.configured ? '' : '（未配置）')) as HTMLOptionElement;
       if (p.id === f.providerId) opt.setAttribute('selected', '');
@@ -603,10 +576,42 @@ async function renderPlatforms(host: HTMLElement): Promise<void> {
 }
 
 function providerCard(p: ProviderView, host: HTMLElement): HTMLElement {
-  const keyField = p.credentialFields.find((f) => f.secret);
-  const keyInput = keyField
-    ? (h('input', { class: 'input', type: 'password', placeholder: keyField.masked ?? keyField.placeholder }) as HTMLInputElement)
-    : null;
+  /**
+   * 凭据字段：**全部**渲染，不是只渲染第一个。
+   *
+   * 以前这里是 `credentialFields.find(f => f.secret)` —— 只取第一个密文字段。
+   * 单密钥的平台没问题，但 LiblibAI 要 AccessKey + SecretKey 两段，
+   * 少了 SecretKey 就签不出名字。只渲染一个的话，用户填完保存、验证失败，
+   * 而界面上根本没有第二个输入框可填 —— 他会以为是 Key 给错了。
+   * 注册表里本来就是数组，把它当数组用。
+   */
+  const credInputs = p.credentialFields.map((f) => ({
+    field: f,
+    input: h('input', {
+      class: 'input',
+      type: f.secret ? 'password' : 'text',
+      placeholder: f.masked ?? f.placeholder
+    }) as HTMLInputElement
+  }));
+  const hasCreds = credInputs.length > 0;
+
+  /**
+   * 默认工作流 ID。
+   *
+   * 和「默认模型」是一对：以模型为单位的平台用后者，以工作流为单位的平台用前者。
+   * 以前 RunningHub 的这个字段单独长在设置页的「云端」分组里，是一张手写的卡片；
+   * 现在它就是 Provider 卡片上的一行，RunningHub 和 LiblibAI 走同一套。
+   */
+  const workflowInput = h('input', {
+    class: 'input',
+    type: 'text',
+    value: p.defaultWorkflowId ?? '',
+    placeholder: '云端工作流 / 应用 ID',
+    onchange: async (e: Event) => {
+      await api.patchProvider(p.id, { defaultWorkflowId: (e.target as HTMLInputElement).value.trim() });
+      toast('已保存', `${p.label} 默认工作流`);
+    }
+  }) as HTMLInputElement;
 
   const urlInput = h('input', {
     class: 'input',
@@ -665,7 +670,7 @@ function providerCard(p: ProviderView, host: HTMLElement): HTMLElement {
 
   const actions = h('div', { class: 'row gap' });
 
-  if (keyInput) {
+  if (hasCreds) {
     actions.appendChild(
       h(
         'button',
@@ -673,16 +678,30 @@ function providerCard(p: ProviderView, host: HTMLElement): HTMLElement {
           class: 'btn-primary',
           type: 'button',
           onclick: async () => {
-            if (!keyInput.value.trim()) {
-              toast('请先填写 API Key', '', 'warn');
+            // 必填项一个都不能少。LiblibAI 这种两段式密钥，只填一半保存下去
+            // 会得到一个"已配置但永远验证失败"的状态 —— 最难自查的一种。
+            const missing = credInputs.filter((c) => c.field.required && !c.input.value.trim() && !c.field.masked);
+            if (missing.length > 0) {
+              toast('还有必填项没填', missing.map((m) => m.field.label).join('、'), 'warn');
+              return;
+            }
+            const payload: Record<string, string> = {};
+            for (const c of credInputs) {
+              const v = c.input.value.trim();
+              // 空着的字段不提交：用户只想改其中一个时，另一个保持原样，
+              // 而不是被一个空串覆盖掉。
+              if (v) payload[c.field.key] = v;
+            }
+            if (Object.keys(payload).length === 0) {
+              toast('没有要保存的内容', '所有字段都是空的', 'warn');
               return;
             }
             try {
               // Helper 存完密钥会顺手拉一次模型，这里直接把结果报出来 ——
               // 「配好接口就该知道有哪些模型可用」是这一步的题中之义，
               // 不该让用户再想起来去点一次「拉取模型」。
-              const res = await api.setCredentials(p.id, { [keyField!.key]: keyInput.value.trim() });
-              keyInput.value = '';
+              const res = await api.setCredentials(p.id, payload);
+              for (const c of credInputs) c.input.value = '';
               if (res.modelsError) {
                 // 密钥是存住了的。这里说成"保存失败"会让用户把 Key 重填一遍，
                 // 而真正的问题在网络或平台那边。
@@ -699,7 +718,7 @@ function providerCard(p: ProviderView, host: HTMLElement): HTMLElement {
         '保存 Key'
       )
     );
-    if (keyField?.masked) {
+    if (credInputs.some((c) => c.field.masked)) {
       actions.appendChild(
         h(
           'button',
@@ -807,7 +826,16 @@ function providerCard(p: ProviderView, host: HTMLElement): HTMLElement {
       enableToggle
     ),
     fieldRow('接口地址', urlInput),
-    keyInput ? fieldRow('API Key', keyInput, keyField?.masked ? `当前：${keyField.masked}` : '只保存在本机 Helper') : null,
+    // 有几个凭据字段就画几行。单密钥平台看起来和以前一模一样，
+    // 两段式密钥的平台（LiblibAI）终于有地方填第二段了。
+    ...credInputs.map((c) =>
+      fieldRow(c.field.label, c.input, c.field.masked ? `当前：${c.field.masked}` : '只保存在本机 Helper')
+    ),
+    // 工作流型平台（RunningHub / LiblibAI）多一行「默认工作流」。
+    // 按**能力**判断而不是按 id —— 这样再来一个工作流平台不用改这里。
+    p.capabilities.includes('workflow') && p.kind !== 'comfyui'
+      ? fieldRow('默认工作流 ID', workflowInput, '从平台网站上你自己的应用页面复制；可被单个功能的绑定覆盖')
+      : null,
     fieldRow('默认模型', modelSelect),
     actions,
     result,

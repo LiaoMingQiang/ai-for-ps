@@ -31,6 +31,18 @@ export interface ProviderSettings {
   enabled: boolean;
   baseUrl: string;
   defaultModel: string;
+  /**
+   * 该 Provider 的默认云端工作流 id。
+   *
+   * 和 defaultModel 是一对：以模型为单位的平台（Comfly 那一族）用前者，
+   * 以工作流为单位的平台（RunningHub 这一族）用后者，两者都挂在 Provider 上。
+   *
+   * 以前这个值叫 `cloud.runninghubWorkflowId`，写死在设置的「云端」分组里 ——
+   * 一个 Provider 专属的字段占着全局设置的位置，第二个工作流型平台进来时
+   * 只能再加一个 `xxxWorkflowId`，加一个平台改一次数据结构。
+   * 挂到 Provider 上之后，加平台不用动 schema。
+   */
+  defaultWorkflowId: string;
   /** 密钥不在这里；只记录"是否已设置"，真值在 DPAPI */
   hasCredentials: boolean;
 }

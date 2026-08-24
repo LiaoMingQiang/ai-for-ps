@@ -12,6 +12,7 @@ import { ComfyUiAdapter } from './comfyui.js';
 import { OpenAiCompatibleAdapter } from './openai.js';
 import { GeminiAdapter } from './gemini.js';
 import { RunningHubAdapter } from './runninghub.js';
+import { LiblibAdapter } from './liblib.js';
 import type { SettingsStore } from '../settings.js';
 import type { CredentialStore } from '../credentials.js';
 import type { Logger } from '../log.js';
@@ -50,11 +51,27 @@ export class ProviderManager {
           const opts = {
             baseUrl: ps.baseUrl || desc.defaultBaseUrl,
             apiKey,
-            defaultWorkflowId: s.cloud.runninghubWorkflowId,
+            // 工作流 id 现在挂在 Provider 自己身上（和 defaultModel 对称），
+            // 不再从全局的 cloud.runninghubWorkflowId 取 —— 那个字段只剩迁移用途。
+            defaultWorkflowId: ps.defaultWorkflowId || s.cloud.runninghubWorkflowId,
             timeoutMs
           };
           if (existing instanceof RunningHubAdapter) existing.updateOptions(opts);
           else this.adapters.set(desc.id, new RunningHubAdapter(opts, this.log));
+          break;
+        }
+        case 'liblib': {
+          const opts = {
+            baseUrl: ps.baseUrl || desc.defaultBaseUrl,
+            // 两段式密钥：少一个都签不出名字，isConfigured() 会据此报未配置
+            accessKey: this.credentials.get(desc.id, 'accessKey'),
+            secretKey: this.credentials.get(desc.id, 'secretKey'),
+            defaultWorkflowId: ps.defaultWorkflowId,
+            defaultModel: ps.defaultModel,
+            timeoutMs
+          };
+          if (existing instanceof LiblibAdapter) existing.updateOptions(opts);
+          else this.adapters.set(desc.id, new LiblibAdapter(opts, this.log));
           break;
         }
         case 'gemini': {

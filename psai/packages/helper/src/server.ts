@@ -264,6 +264,7 @@ export async function buildServer(d: ServerDeps): Promise<FastifyInstance> {
         // 设置页要显示「当前用的是哪个模型」。以前没这个字段，
         // 下拉永远停在「尚未拉取模型」，用户看不出自己配过什么。
         defaultModel: d.settings.providerSettings(s.id).defaultModel,
+        defaultWorkflowId: d.settings.providerSettings(s.id).defaultWorkflowId,
         credentialFields: desc.credentials.map((c) => ({
           ...c,
           masked: c.secret ? d.credentials.mask(s.id, c.key) : null
@@ -275,7 +276,7 @@ export async function buildServer(d: ServerDeps): Promise<FastifyInstance> {
   app.patch('/v1/providers/:id', async (req, reply) => {
     const { id } = req.params as { id: string };
     if (!findProvider(id)) return fail(reply, new PsaiError('PROVIDER_NOT_CONFIGURED', `未知 Provider: ${id}`));
-    const body = (req.body ?? {}) as { enabled?: boolean; baseUrl?: string; defaultModel?: string };
+    const body = (req.body ?? {}) as { enabled?: boolean; baseUrl?: string; defaultModel?: string; defaultWorkflowId?: string };
     const next = d.settings.upsertProvider({ id, ...body });
     // ComfyUI 的地址以「设置 → 本地」的连接分组为准，这里同步过去避免两处不一致
     if (id === 'comfyui' && typeof body.baseUrl === 'string' && body.baseUrl.trim()) {

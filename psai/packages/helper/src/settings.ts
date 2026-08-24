@@ -87,6 +87,11 @@ export class SettingsStore {
       enabled: false,
       baseUrl: desc?.defaultBaseUrl ?? '',
       defaultModel: desc?.defaultModel ?? '',
+      // 旧库里这个值存在全局的 cloud.runninghubWorkflowId 上（那时候只有 RunningHub
+      // 一个工作流型平台）。迁到 Provider 自己身上之后，老用户的配置不能丢 ——
+      // 升级完发现云端工作流 id 空了，任务提交会直接报「没绑工作流」，
+      // 而他上一版明明填过。
+      defaultWorkflowId: id === 'runninghub' ? (this.get().cloud.runninghubWorkflowId ?? '') : '',
       hasCredentials: false
     };
   }
@@ -148,6 +153,8 @@ export class SettingsStore {
           enabled: desc.id === 'comfyui',
           baseUrl: desc.defaultBaseUrl,
           defaultModel: desc.defaultModel ?? '',
+          // 老库里 RunningHub 的工作流 id 存在全局的 cloud 分组下，补种时一并迁过来
+          defaultWorkflowId: desc.id === 'runninghub' ? (this.get().cloud.runninghubWorkflowId ?? '') : '',
           hasCredentials: false
         });
         changed = true;
