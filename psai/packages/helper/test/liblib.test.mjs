@@ -15,7 +15,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
 
-import { normalizeStatus, explainLiblibCode } from '../dist/providers/liblib.js';
+import { normalizeStatus, explainLiblibCode, auditPassed } from '../dist/providers/liblib.js';
 import { PROVIDERS, findProvider } from '../../shared/dist/providers.js';
 
 /* ---------------- 签名 ---------------- */
@@ -50,7 +50,6 @@ test('generateStatus 只认有把握的几档，其余一律 unknown', () => {
   assert.equal(normalizeStatus(2), 'running');
   assert.equal(normalizeStatus(5), 'done');
   assert.equal(normalizeStatus(6), 'failed');
-  assert.equal(normalizeStatus(7), 'failed');
 });
 
 test('没见过的状态码报 unknown，而不是当成失败', () => {
@@ -59,6 +58,22 @@ test('没见过的状态码报 unknown，而不是当成失败', () => {
   for (const code of [0, 8, 99, undefined, -1]) {
     assert.equal(normalizeStatus(code), 'unknown', `${code} 不该被当成终态`);
   }
+});
+
+
+test('已生成/审核中不是终态，要继续轮询', () => {
+  // 平台「返回值说明」：3=已生成 4=审核中 5=任务成功。
+  // 看到 3 就去取图的话 images 还是空的 —— 图要过完审核才给。
+  assert.equal(normalizeStatus(3), 'running');
+  assert.equal(normalizeStatus(4), 'running');
+});
+
+test('只有审核通过（3）的图才收', () => {
+  // auditStatus: 1 待审核 2 审核中 3 审核通过 4 审核拒绝 5 审核失败
+  assert.equal(auditPassed(3), true);
+  for (const s of [1, 2, 4, 5]) assert.equal(auditPassed(s), false, s + ' 不该被当成可用');
+  // 平台没给这个字段时不拦 —— 缺字段是它的自由，我们不该因此丢图
+  assert.equal(auditPassed(undefined), true);
 });
 
 /* ---------------- 错误码映射 ---------------- */
@@ -124,14 +139,36 @@ test('LiblibAI 同时具备云端工作流与托管生图两种能力', () => {
   assert.ok(p.capabilities.includes('imageToImage'));
 });
 
-test('LiblibAI 是两段式密钥，且都必填', () => {
+test('LiblibAI 是两段式密钥，两段都必填且都按密文处理', () => {
   const p = findProvider('liblib');
   const keys = p.credentials.map((c) => c.key);
-  assert.deepEqual(keys, ['accessKey', 'secretKey']);
-  for (const c of p.credentials) {
-    assert.equal(c.secret, true, `${c.key} 必须按密文处理`);
-    assert.equal(c.required, true, `${c.key} 少一个就签不出名字，必须必填`);
+  assert.deepEqual(keys, ['accessKey', 'secretKey', 'comfyTemplateUuid']);
+
+  for (const key of ['accessKey', 'secretKey']) {
+    const c = p.credentials.find((x) => x.key === key);
+    assert.equal(c.secret, true, `${key} 必须按密文处理`);
+    assert.equal(c.required, true, `${key} 少一个就签不出名字，必须必填`);
   }
+});
+
+test('ComfyUI 模板 ID 是第三个字段，且不是必填', () => {
+  // 真机验证出来的：templateUuid 和工作流 uuid 是**两个不同的值**。
+  //   generateParams 非空但没有 workflowUuid → 100000「参数无效: workflowUuid」
+  //   两者都给但 templateUuid 不对            → 100000「template not found」
+  // 只跑托管模型（webui/text2img）时用不到它，所以不能设成必填 ——
+  // 否则想用托管模型的用户会被一个跟他无关的字段拦住。
+  const c = findProvider('liblib').credentials.find((x) => x.key === 'comfyTemplateUuid');
+  assert.ok(c);
+  assert.equal(c.required, false, '只跑托管模型的用户不该被它拦住');
+  assert.equal(c.secret, false, '它不是密钥，别做成密码框让用户看不见自己填了什么');
+});
+
+test('通用 Provider 卡片必须能渲染多个凭据字段', () => {
+  // LiblibAI 有 3 个字段。卡片以前只渲染第一个 secret 的，
+  // 用户填完 AccessKey 保存、验证失败，而界面上根本没有第二个框可填。
+  const multi = PROVIDERS.filter((p) => p.credentials.length > 1).map((p) => p.id);
+  assert.ok(multi.includes('liblib'), 'LiblibAI 是多字段的');
+  assert.ok(multi.includes('runninghub'), 'RunningHub 也是多字段的（apiKey + workflowId）');
 });
 
 test('RunningHub 没有被改坏', () => {

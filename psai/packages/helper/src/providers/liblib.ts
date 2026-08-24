@@ -59,6 +59,12 @@ export interface LiblibOptions {
   defaultWorkflowId: string;
   /** 托管模型的 templateUuid */
   defaultModel: string;
+  /**
+   * 云端 ComfyUI 应用的模板 id。
+   * 和工作流 uuid 是两个值：真机上把工作流 uuid 当 templateUuid 发，
+   * 平台回 template not found。这个常量在工作流页面的「API 参数示例」里。
+   */
+  comfyTemplateUuid: string;
   timeoutMs: number;
 }
 
@@ -261,7 +267,28 @@ export class LiblibAdapter implements ProviderAdapter {
     );
   }
 
+  /**
+   * 云端 ComfyUI 工作流。
+   *
+   * 校验顺序是探出来的（每一步都对应一条真机响应）：
+   *   generateParams 为空                     → 100050 参数完整度校验
+   *   generateParams 非空但没有 workflowUuid  → 100000「参数无效: workflowUuid」
+   *   两者都有但 templateUuid 不对             → 100000「template not found, templateUuid: xxx」
+   *
+   * 所以 templateUuid 和 generateParams.workflowUuid 是**两个不同的东西**，都必填：
+   * 前者是平台侧 ComfyUI 应用模板的常量 id，后者才是用户那份工作流。
+   * 一开始我把工作流 uuid 同时塞给两边，平台直接回 template not found。
+   */
   private async submitWorkflow(workflowUuid: string, ctx: SubmitContext): Promise<SubmitResult> {
+    const templateUuid = this.opts.comfyTemplateUuid.trim();
+    if (!templateUuid) {
+      throw new PsaiError(
+        'WORKFLOW_NOT_BOUND',
+        'LiblibAI 云端工作流还需要一个「ComfyUI 模板 ID」。它在工作流页面「查看 API 参数」里的参数示例中，' +
+          '是 templateUuid 那一项 —— 和工作流 ID 是两个值。填到「设置 → 云端 → LiblibAI」里。'
+      );
+    }
+
     const generateParams: Record<string, unknown> = { workflowUuid };
     const prompt = (ctx.prompt ?? '').trim();
     if (prompt) generateParams['prompt'] = prompt;
@@ -271,7 +298,7 @@ export class LiblibAdapter implements ProviderAdapter {
 
     const data = await this.post<{ generateUuid?: string }>(
       '/api/generate/comfyui/app',
-      { templateUuid: workflowUuid, generateParams },
+      { templateUuid, generateParams },
       Math.max(this.opts.timeoutMs, 60_000)
     );
     const uuid = data.generateUuid;
@@ -329,10 +356,15 @@ export class LiblibAdapter implements ProviderAdapter {
         case 'done':
           return { state: 'done', progress: { ...emptyProgress('已完成'), value: 1 } };
         case 'failed':
+          // 失败原因在 generateMsg 里。不带上它的话，面板上只有一句
+          // 「任务失败」，用户完全不知道是提示词违规、积分不够还是工作流报错。
           return {
             state: 'failed',
             error: toErrorShape(
-              new PsaiError('JOB_FAILED', `LiblibAI 报告任务失败${data.msg ? `：${data.msg}` : ''}`)
+              new PsaiError(
+                'JOB_FAILED',
+                `LiblibAI 报告任务失败${data.generateMsg ? `：${data.generateMsg}` : '（平台没有给出原因）'}`
+              )
             )
           };
         default:
@@ -355,9 +387,10 @@ export class LiblibAdapter implements ProviderAdapter {
     for (const img of images) {
       const url = img?.imageUrl;
       if (!url) continue;
-      // auditStatus 是内容审核结果。被判不合规的图平台会给一张占位图或直接不给，
-      // 这里如实跳过并在下面报出来，别把审核占位图当成用户要的结果写回 Photoshop。
-      if (typeof img.auditStatus === 'number' && img.auditStatus !== 3 && img.auditStatus !== 1) {
+      // 只收审核通过（3）的。平台文档写着 images「只返回审核通过的图片」，
+      // 但我们不能只信这句：真出现别的状态时，写回 Photoshop 的会是一张
+      // 随时可能被撤下的图，用户却以为已经成了。
+      if (!auditPassed(img.auditStatus)) {
         this.log.warn('LiblibAI 有图未通过内容审核，已跳过', { generateUuid: uuid, auditStatus: img.auditStatus });
         continue;
       }
@@ -367,6 +400,14 @@ export class LiblibAdapter implements ProviderAdapter {
       out.push({ buffer: Buffer.from(await res.arrayBuffer()), mime: ct.split(';')[0] ?? 'image/png' });
     }
     if (out.length === 0) {
+      // 出视频的工作流是一种很具体的误配：任务成功、平台也扣了分，
+      // 但产出写不回 Photoshop 图层。说清楚比一句"没有输出"有用得多。
+      if ((data.videos ?? []).length > 0) {
+        throw new PsaiError(
+          'WORKFLOW_NO_OUTPUT',
+          'LiblibAI 这个工作流产出的是视频，不是图片，写不回 Photoshop 图层。请换一个出图的工作流。'
+        );
+      }
       throw new PsaiError(
         'WORKFLOW_NO_OUTPUT',
         images.length > 0
@@ -374,6 +415,13 @@ export class LiblibAdapter implements ProviderAdapter {
           : 'LiblibAI 任务完成但没有图像输出'
       );
     }
+    // 积分消耗如实记下来 —— 云端出图是花钱的，用户该能在日志里对账
+    this.log.info('LiblibAI 取回结果', {
+      generateUuid: uuid,
+      images: out.length,
+      pointsCost: data.pointsCost,
+      accountBalance: data.accountBalance
+    });
     return out;
   }
 
@@ -389,25 +437,36 @@ export class LiblibAdapter implements ProviderAdapter {
 /** 查询一个不可能存在的任务 —— 用来验签名，且一定不计费。 */
 const PROBE_UUID = '00000000000000000000000000000000';
 
+/** /api/generate/comfy|webui/status 的 data。字段名与平台「返回值说明」一致。 */
 interface LiblibStatus {
   generateStatus?: number;
+  /** 0..1 的浮点数（平台文档明确是这个量纲） */
   percentCompleted?: number;
-  msg?: string;
-  images?: Array<{ imageUrl?: string; auditStatus?: number } | null>;
+  /** 生图信息，失败原因在这里 */
+  generateMsg?: string;
+  /** 本次消耗的积分 */
+  pointsCost?: number;
+  /** 账户余额 */
+  accountBalance?: number;
+  images?: Array<{ imageUrl?: string; auditStatus?: number; nodeId?: string; outputName?: string } | null>;
+  /** 出视频的工作流会走这里；我们只处理图，但要能认出"出的是视频"这种情况 */
+  videos?: Array<{ videoUrl?: string } | null>;
 }
 
 function clamp01(n: number): number {
-  // 平台给的是 0..1 还是 0..100，两种都见过类似写法，统一归一化
-  const v = n > 1 ? n / 100 : n;
-  return Math.min(1, Math.max(0, v));
+  return Math.min(1, Math.max(0, n));
 }
 
 /**
- * generateStatus 的数字含义。
+ * generateStatus 的数字含义 —— 已按平台「返回值说明」核对：
+ *   1 等待执行   2 执行中   3 已生成   4 审核中   5 任务成功   6 任务失败
  *
- * 这是目前**唯一靠推断**的映射：探测阶段没有真任务可查，拿不到真实取值。
- * 所以只把有把握的几档写死，其余一律 unknown —— unknown 会让引擎继续轮询，
- * 而猜错成 failed 会把一个正在跑的任务判死，那是不可逆的。
+ * 注意 3「已生成」和 4「审核中」都**不是**终态：图已经出来了，但还要过内容审核，
+ * 审核不过一样拿不到。所以这两档归到 running 继续轮询，
+ * 而不是看到「已生成」就去取图 —— 那时候 images 还是空的。
+ *
+ * 没列出来的码一律 unknown（继续轮询），不猜成 failed：
+ * 判死会把一个还在跑、还在计费的云端任务从界面上抹掉，那是不可逆的。
  */
 export function normalizeStatus(code: number | undefined): 'queued' | 'running' | 'done' | 'failed' | 'unknown' {
   switch (code) {
@@ -420,11 +479,21 @@ export function normalizeStatus(code: number | undefined): 'queued' | 'running' 
     case 5:
       return 'done';
     case 6:
-    case 7:
       return 'failed';
     default:
       return 'unknown';
   }
+}
+
+/**
+ * auditStatus：1 待审核  2 审核中  3 审核通过  4 审核拒绝  5 审核失败
+ *
+ * 只有 3 才算能用。之前写成「!==3 && !==1 才跳过」，等于把「待审核」也放行了 ——
+ * 那张图还没过审，地址可能拿不到、也可能随后被撤下，写回 Photoshop 之后
+ * 用户以为成了，实际拿到的是一张随时会失效的图。
+ */
+export function auditPassed(status: number | undefined): boolean {
+  return status === undefined || status === 3;
 }
 
 /**

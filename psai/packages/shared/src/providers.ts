@@ -130,7 +130,10 @@ export const PROVIDERS: readonly ProviderDescriptor[] = [
      */
     credentials: [
       { key: 'accessKey', label: 'Access Key', secret: true, placeholder: 'LiblibAI AccessKey', required: true },
-      { key: 'secretKey', label: 'Secret Key', secret: true, placeholder: 'LiblibAI SecretKey', required: true }
+      { key: 'secretKey', label: 'Secret Key', secret: true, placeholder: 'LiblibAI SecretKey', required: true },
+      // ComfyUI 应用模板 id：跑云端工作流时必填，只跑托管模型时用不到，所以不设 required。
+      // 它在工作流页面「查看 API 参数」的参数示例里，是 templateUuid 那一项。
+      { key: 'comfyTemplateUuid', label: 'ComfyUI 模板 ID', secret: false, placeholder: '跑云端工作流时必填', required: false }
     ],
     defaultModel: '',
     description: '哩布哩布 AI 开放平台：云端 ComfyUI 工作流与托管生图模型，不占用本机显卡。',

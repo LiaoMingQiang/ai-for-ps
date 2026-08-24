@@ -68,6 +68,10 @@ export class ProviderManager {
             secretKey: this.credentials.get(desc.id, 'secretKey'),
             defaultWorkflowId: ps.defaultWorkflowId,
             defaultModel: ps.defaultModel,
+            // 平台侧 ComfyUI 应用模板 id —— 和工作流 uuid 是两个值。
+            // 走凭据存储只是图省事（它本来就是个不该外传的账号相关常量），
+            // 真机上把工作流 uuid 当它发会直接被回 template not found。
+            comfyTemplateUuid: this.credentials.get(desc.id, 'comfyTemplateUuid') ?? '',
             timeoutMs
           };
           if (existing instanceof LiblibAdapter) existing.updateOptions(opts);
