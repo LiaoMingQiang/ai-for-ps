@@ -474,10 +474,16 @@ export const api = {
     return json.assets[0]!;
   },
 
-  /** 取资产字节（写回时需要落到临时文件） */
-  assetBytes: async (assetId: string, opts: { thumb?: boolean } = {}): Promise<ArrayBuffer> => {
+  /**
+   * 取资产字节。
+   *
+   * 三档：不给参数是原图（写回 Photoshop 走这条，必须是原始像素）；
+   * thumb 是 256 长边的小方块（历史页）；preview 是 1280 长边（生成页预览）。
+   * 写回永远不能走缩略图 —— 那等于把用户的成品悄悄换成一张缩略图。
+   */
+  assetBytes: async (assetId: string, opts: { thumb?: boolean; preview?: boolean } = {}): Promise<ArrayBuffer> => {
     const t = await loadToken();
-    const q = opts.thumb ? '?thumb=1' : '';
+    const q = opts.preview ? '?preview=1' : opts.thumb ? '?thumb=1' : '';
     const res = await fetch(`${BASE}/v1/assets/${encodeURIComponent(assetId)}${q}`, {
       headers: t ? { Authorization: `Bearer ${t}` } : {}
     });
@@ -505,8 +511,11 @@ const imgSrcCache = new Map<string, Promise<string>>();
 /** 缓存上限：按最大的缩略图算也就几十兆，够用又不会无限涨。 */
 const IMG_CACHE_MAX = 200;
 
-export async function assetImgSrc(assetId: string, opts: { thumb?: boolean } = {}): Promise<string> {
-  const key = `${assetId}${opts.thumb ? ':t' : ''}`;
+export async function assetImgSrc(
+  assetId: string,
+  opts: { thumb?: boolean; preview?: boolean } = {}
+): Promise<string> {
+  const key = `${assetId}${opts.preview ? ':p' : opts.thumb ? ':t' : ''}`;
   const hit = imgSrcCache.get(key);
   if (hit) return hit;
 
@@ -517,11 +526,22 @@ export async function assetImgSrc(assetId: string, opts: { thumb?: boolean } = {
     // 8KB 一段。以前是 32KB 并且用 String.fromCharCode(...chunk) 展开 ——
     // 三万多个参数的展开既慢又有爆栈风险，改成逐字节拼更稳。
     const chunk = 0x2000;
+    // 每 64 段（约 512KB）让出一次主线程。
+    //
+    // 这个循环是同步的：一张 4000×3000 的结果图十几兆，跑完要好几秒，
+    // 期间 UXP 的 JS 线程完全被占住 —— 面板不响应、进度条不动、按钮点不动，
+    // 看起来就像插件卡死了。出图尺寸改成「跟随原图」之后这条路径明显变热。
+    // 让出之后总耗时几乎不变，但界面一直是活的。
+    let sinceYield = 0;
     for (let i = 0; i < bytes.length; i += chunk) {
       const end = Math.min(i + chunk, bytes.length);
       let part = '';
       for (let j = i; j < end; j++) part += String.fromCharCode(bytes[j]!);
       bin += part;
+      if (++sinceYield >= 64) {
+        sinceYield = 0;
+        await new Promise((r) => setTimeout(r, 0));
+      }
     }
     return `data:image/png;base64,${btoa(bin)}`;
   })();

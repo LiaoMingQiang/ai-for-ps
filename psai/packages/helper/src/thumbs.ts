@@ -23,6 +23,17 @@ import { deflateSync, inflateSync } from 'node:zlib';
 /** 缩略图最长边。46px 的框在 2x 屏上也够清楚，再大就是浪费。 */
 export const THUMB_MAX_EDGE = 256;
 
+/**
+ * 结果预览用的中间档。
+ *
+ * 历史页那种 46×46 的小方块用 256 就够；但生成页的结果预览是要看清楚出图效果的，
+ * 256 糊得没法判断。而另一头，直接上原图现在很危险 ——
+ * 出图尺寸改成「跟随原图」之后，一张结果可能是 4000×3000 的 PNG，
+ * 十几兆的字节在 UXP 的 JS 线程上转 base64 会把面板冻住好几秒。
+ * 1280 长边既看得清，又只有原图的几十分之一。
+ */
+export const PREVIEW_MAX_EDGE = 1280;
+
 let CRC_TABLE: Int32Array | null = null;
 function crc32(buf: Buffer): number {
   if (!CRC_TABLE) {

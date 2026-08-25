@@ -107,7 +107,10 @@ export function renderResults(opts: ResultsOptions): HTMLElement {
       const img = h('img', { class: 'result-img', alt: `结果 ${i + 1}` }) as HTMLImageElement;
       // 主图和下面的前后对比是同一张图，转一次两处共用。
       // assetImgSrc 内部也有缓存，这里显式复用是为了让意图明确。
-      const srcPromise = assetImgSrc(r.assetId);
+      // 预览走 1280 长边的中间档，不拉原图。
+            // 原图现在是「跟随原图」尺寸，可能上十兆；预览只是给人看效果，
+            // 真正要原图的只有写回那一步（它直接取字节，不经过 base64）。
+            const srcPromise = assetImgSrc(r.assetId, { preview: true });
       void srcPromise.then((src) => (img.src = src));
       stage.appendChild(img);
       stage.appendChild(h('div', { class: 'result-meta muted' }, `${r.width}×${r.height}`));

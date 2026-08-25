@@ -42,7 +42,7 @@ import type { EventHub } from './events.js';
 import { readGpuInfo } from './gpu.js';
 import { ComfyUiAdapter } from './providers/comfyui.js';
 import { join } from 'node:path';
-import { thumbnailFor } from './thumbs.js';
+import { thumbnailFor, PREVIEW_MAX_EDGE } from './thumbs.js';
 
 export interface ServerDeps {
   cfg: HelperConfig;
@@ -625,8 +625,16 @@ export async function buildServer(d: ServerDeps): Promise<FastifyInstance> {
       // 以前每个都在拉原图（平均 1.59MB、最大 15.4MB）再由插件在 UXP 的
       // JS 线程上转 base64 —— 面板卡顿掉帧就是这么来的。
       // 缩放放在这边做，只做一次、结果落盘缓存。
-      if ((req.query as { thumb?: string }).thumb) {
-        const thumb = thumbnailFor(d.assets.absPathOf(rec), join(d.cfg.dataDir, 'thumbs'), rec.sha256);
+      // ?preview=1 是给生成页结果预览的中间档（1280 长边）：
+      // 看得清效果，又不会让 UXP 线程去转一张十几兆的原图。
+      const q = req.query as { thumb?: string; preview?: string };
+      if (q.thumb || q.preview) {
+        const thumb = thumbnailFor(
+          d.assets.absPathOf(rec),
+          join(d.cfg.dataDir, 'thumbs'),
+          rec.sha256,
+          q.preview ? PREVIEW_MAX_EDGE : undefined
+        );
         if (thumb) {
           return reply
             .header('Content-Type', thumb.mime)
