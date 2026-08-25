@@ -511,10 +511,9 @@ const imgSrcCache = new Map<string, Promise<string>>();
 /** 缓存上限：按最大的缩略图算也就几十兆，够用又不会无限涨。 */
 const IMG_CACHE_MAX = 200;
 
-export async function assetImgSrc(
-  assetId: string,
-  opts: { thumb?: boolean; preview?: boolean } = {}
-): Promise<string> {
+// 签名保持单行：接线审计工具是按行认 api 方法名的，
+// 拆成多行之后它会把参数 assetId / opts 当成两个"定义了却没人调"的方法。
+export async function assetImgSrc(assetId: string, opts: { thumb?: boolean; preview?: boolean } = {}): Promise<string> {
   const key = `${assetId}${opts.preview ? ':p' : opts.thumb ? ':t' : ''}`;
   const hit = imgSrcCache.get(key);
   if (hit) return hit;
