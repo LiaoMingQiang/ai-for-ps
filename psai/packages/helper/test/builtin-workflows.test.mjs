@@ -39,9 +39,9 @@ const HELPER_ONLY_PARAMS = new Set([
   'aspect'
 ]);
 
-test('11 个固定功能都有对应的内置工作流目录', () => {
+test('12 个固定功能都有对应的内置工作流目录', () => {
   const features = fixedComfyFeatures();
-  assert.equal(features.length, 11);
+  assert.equal(features.length, 12);
   for (const f of features) {
     const dir = join(WF_ROOT, f.defaultWorkflowId);
     assert.ok(existsSync(dir), `缺少工作流目录 ${f.defaultWorkflowId}`);

@@ -290,6 +290,54 @@ function pUpscaleFactor(defaultValue = '2'): ParamSpec {
   };
 }
 
+
+/**
+ * 抠图后的背景处理方式。
+ *
+ * 白底图是电商最常用的一档，所以做成默认；但抠完保留透明同样常用
+ * （拿去自己合成），两者只差一个参数，没必要拆成两个功能。
+ */
+function pMattingBackground(): ParamSpec {
+  return {
+    kind: 'select',
+    id: 'mattingBackground',
+    label: '背景',
+    options: [
+      { value: 'white', label: '纯白底（电商主图）' },
+      { value: 'alpha', label: '透明（保留 alpha）' }
+    ],
+    defaultValue: 'white'
+  };
+}
+
+function pMaskBlur(defaultValue = 2): ParamSpec {
+  return {
+    kind: 'slider',
+    id: 'maskBlur',
+    label: '边缘羽化',
+    min: 0,
+    max: 20,
+    step: 1,
+    defaultValue,
+    precision: 0,
+    hint: '边缘过渡的柔和程度。毛发、透明材质可以调大一点'
+  };
+}
+
+function pMaskOffset(defaultValue = 0): ParamSpec {
+  return {
+    kind: 'slider',
+    id: 'maskOffset',
+    label: '边缘收缩 / 扩张',
+    min: -10,
+    max: 10,
+    step: 1,
+    defaultValue,
+    precision: 0,
+    hint: '负值向内收（去掉背景残留的白边），正值向外扩'
+  };
+}
+
 function pUpscaleMethod(): ParamSpec {
   return {
     kind: 'select',
@@ -501,6 +549,33 @@ const F_RELIGHT_ADAPTIVE: FeatureSpec = {
   ],
   writeback: WB_IMAGE,
   acceptance: ['立方体角度会改变注入的机位提示词', '稳定度为 C 时 UI 给出风险提示', '融合后主体与背景无明显边缘']
+};
+
+
+/**
+ * 抠图 / 白底图 —— 这一族原来只有闭源实现（cloud.product.whitebg）。
+ *
+ * 本机装了 BiRefNet（ComfyUI-RMBG 的 BiRefNetRMBG 节点自带模型枚举），
+ * 一个节点就能同时给出抠好的图和 mask，还能直接指定背景色 ——
+ * 白底图这件事在本地做甚至比走闭源接口更可控：不联网、不计费、
+ * 出图尺寸严格等于原图。
+ */
+const F_EDIT_MATTING: FeatureSpec = {
+  id: 'comfy.edit.matting',
+  path: ['generate', 'comfyui', 'edit', 'matting'],
+  label: '抠图 / 白底图',
+  description: '本地抠图：BiRefNet 分割主体，可直接输出纯白底电商主图或保留透明通道。不改变原图尺寸。',
+  branch: 'comfyui',
+  engine: 'comfy-workflow',
+  params: [pImage(), pMattingBackground(), pMaskBlur(), pMaskOffset()],
+  defaultWorkflowId: 'wf.edit.matting',
+  requiredNodeTypes: ['BiRefNetRMBG', 'LoadImage', 'SaveImage'],
+  writeback: WB_NEW,
+  acceptance: [
+    '主体边缘干净，无明显背景残留',
+    '选「纯白底」时背景是 #FFFFFF，选「透明」时输出带 alpha',
+    '输出尺寸与输入尺寸完全一致'
+  ]
 };
 
 const F_EDIT_TEXTURE: FeatureSpec = {
@@ -895,7 +970,10 @@ export const CATALOG: readonly CatalogNode[] = [
             id: 'generate.comfyui.edit',
             label: '图像编辑',
             level: 3,
-            children: [{ id: F_EDIT_TEXTURE.id, label: F_EDIT_TEXTURE.label, level: 4, feature: F_EDIT_TEXTURE }]
+            children: [
+              { id: F_EDIT_TEXTURE.id, label: F_EDIT_TEXTURE.label, level: 4, feature: F_EDIT_TEXTURE },
+              { id: F_EDIT_MATTING.id, label: F_EDIT_MATTING.label, level: 4, feature: F_EDIT_MATTING }
+            ]
           },
           {
             id: 'generate.comfyui.misc',

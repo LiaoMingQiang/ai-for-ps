@@ -106,6 +106,14 @@ function transform(
         const clamped = Math.min(1, Math.max(0, ratio));
         return t.outMin + clamped * (t.outMax - t.outMin);
       }
+      case 'map': {
+        // 映射不中就返回 undefined，让节点保持自己的默认值。
+        // 硬塞一个不在枚举里的值，ComfyUI 会在提交时整个拒绝
+        // （value_not_in_list），而且错误信息里看不出是哪个参数干的。
+        const key = toText(raw);
+        if (!key) return undefined;
+        return Object.prototype.hasOwnProperty.call(t.map, key) ? t.map[key] : undefined;
+      }
       case 'int': {
         const n = toNumber(raw);
         return n === undefined ? undefined : Math.round(n);

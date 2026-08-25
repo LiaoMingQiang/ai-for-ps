@@ -95,10 +95,78 @@
 | ControlNet 工作流 | ✅ | ❌ 未建 |
 | 遮罩工作流 | ✅ LoadImageMask/GrowMask/InvertMask | 部分（relight 用到） |
 
-## 五、结论
+## 五、抠图 / 白底图（新增，comfy.edit.matting）
 
-- 已有的 11 个工作流是**真实可用**的：节点齐、模型齐、绑定齐、有输出节点。
-- 真正的缺口是**没有为闭源功能建本地替代**，以及**缺放大模型**。
-- 要让 `cloud.*` 功能能跑本地工作流，需要先改
-  `ProviderManager.resolveProvider()` 的分支逻辑 —— 目前 `cloud-image` 引擎
-  被硬性解析到云端 Provider，这是架构层面的限制，不是补几个 json 就能绕过的。
+给原本**只有闭源实现**的白底图能力补上本机替代。
+
+| 项 | 内容 |
+|---|---|
+| 功能 | `comfy.edit.matting` 「抠图 / 白底图」，挂在 生成 → comfyui → 图像编辑 下 |
+| 工作流 | `wf.edit.matting`（3 节点：LoadImage → BiRefNetRMBG → SaveImage） |
+| 依赖自定义节点 | **ComfyUI-RMBG**（提供 `BiRefNetRMBG`）—— 本机已装 |
+| 依赖模型 | `BiRefNet-general`，由节点在**首次运行时自动从 HuggingFace 下载** |
+| 输入映射 | image → LoadImage.image（支持当前图层/选区/合并可见/上传） |
+| 参数 | 背景（纯白底 / 透明）、边缘羽化 0–20、边缘收缩扩张 ±10 |
+| 输出分辨率 | 不做任何缩放，严格等于输入尺寸 |
+| 静态校验 | **PASS** —— 节点存在、无缺模型、有输出节点、4 条绑定 |
+| ComfyUI 接受提交 | **PASS** —— prompt 通过校验并进入队列 |
+| 真机出图 | **BLOCKED** —— 见下 |
+
+### 为什么是 BLOCKED
+
+第一次真跑时 ComfyUI 接受了 prompt 并开始执行节点 2，然后停在那里 45 分钟以上。
+查下来不是工作流的问题，是 `BiRefNetRMBG` 在下载 BiRefNet-general 权重，
+而 HuggingFace 这条链路很不稳定 —— `~/.cache/huggingface/xet/logs` 里刷满了：
+
+```
+Concurrency control for download: Decreased concurrency from 1 to 1;
+reason: success ratio below threshold (connection struggling)
+```
+
+同期 `D:\comfy` 下没有任何大文件写入，GPU 只有 17% 占用 —— 确认是卡在下载，
+不是在算。**工作流本身已经被 ComfyUI 判定为合法并接受执行**，
+差的只是把权重弄到本地。
+
+解决办法（任选其一）：
+- 挂代理后重跑一次，让节点自己下完；
+- 或手动把 BiRefNet-general 的权重放进 ComfyUI 的 `models/RMBG/` 目录。
+
+### 顺带修掉的两个真问题
+
+1. **binding.json 改了不生效。** `seedBuiltins` 用 `existing.hash === hash` 判断
+   要不要重新播种，而那个 hash **只覆盖 graph.json**。改完绑定重启，
+   播种认为"没变"直接跳过，库里还是旧绑定 —— 参数怎么调都没反应，
+   日志里一个字都没有。工作流作者只会以为自己绑定写错了。现在绑定也参与比较。
+2. **枚举值没法映射。** 节点的枚举词是给 ComfyUI 用户看的（`Alpha`/`Color`），
+   不是给产品用户看的。新增 `map` 变换把界面取值翻译过去；
+   映射不中时**不写这个字段**，让节点保持默认 —— 硬塞非法枚举会让 ComfyUI
+   在提交阶段整个拒绝，而错误信息里看不出是哪个参数干的（真机踩过）。
+
+## 六、结论与更正
+
+**更正上一版写错的一处结论。** 上一版说「`cloud.*` 功能要跑本地工作流需要改
+`resolveProvider()`，是架构限制」—— 这是错的。实际代码里 binding 分支排在
+engine 判断**前面**：
+
+```ts
+const binding = this.settings.binding(featureId);
+if (binding?.enabled && binding.providerId) return { providerId: binding.providerId, feature };
+if (feature.engine === 'comfy-workflow') { ... }
+```
+
+只要把某个 `cloud.*` 功能显式绑定到 `comfyui`，它现在就会走本地。
+再加上这一轮把设置页的候选 Provider 改成按**能力**筛（ComfyUI 声明了
+`textToImage`/`imageToImage`），云功能的下拉里本来就能选到 ComfyUI。
+所以缺的从来不是架构，而是**没有对应的本地工作流**。
+
+真正剩下的缺口：
+
+- **没有任何放大模型文件**。`UpscaleModelLoader` 枚举为空，
+  两个放大工作流实际退化成 `ImageScaleBy` 重采样。需要往
+  `models/upscale_models/` 放 ESRGAN / 4x-UltraSharp 之类的权重。
+- **还有 4 个功能只有闭源实现**：`cloud.wash` / `cloud.t2i` / `cloud.i2i` /
+  `cloud.product.multiview`。本机资产足够实现（SDXL、FLUX Kontext、ControlNet union），
+  按 `wf.edit.matting` 这一套（新增功能 + 工作流 + 绑定 + PRD 同步 + 计数断言）
+  逐个补即可。
+- 用户列表里的背景替换 / 局部重绘 / 物体移除 / 扩图 / 阴影 / 人脸修复 /
+  ControlNet 系列同理，本机节点与模型都具备，尚未建工作流。

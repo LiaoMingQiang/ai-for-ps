@@ -1,0 +1,35 @@
+{
+  "bindings": [
+    {
+      "paramId": "image",
+      "nodeId": "1",
+      "input": "image",
+      "required": true
+    },
+    {
+      "paramId": "maskBlur",
+      "nodeId": "2",
+      "input": "mask_blur",
+      "required": false
+    },
+    {
+      "paramId": "maskOffset",
+      "nodeId": "2",
+      "input": "mask_offset",
+      "required": false
+    },
+    {
+      "paramId": "mattingBackground",
+      "nodeId": "2",
+      "input": "background",
+      "required": false,
+      "transform": {
+        "type": "map",
+        "map": {
+          "white": "Color",
+          "alpha": "Alpha"
+        }
+      }
+    }
+  ]
+}

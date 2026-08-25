@@ -443,10 +443,10 @@ test('内置工作流不可删除', async () => {
 
 /* ==================== 功能目录 ==================== */
 
-test('功能接口返回完整目录与 17 个功能', async () => {
+test('功能接口返回完整目录与 18 个功能', async () => {
   const { json } = await api('GET', '/v1/features');
   assert.equal(json.ok, true);
-  assert.equal(json.features.length, 17);
+  assert.equal(json.features.length, 18);
   assert.equal(json.catalog.length, 4, '一级导航是 4 项');
 
   const f = json.features.find((x) => x.id === 'comfy.wash.portrait');

@@ -1,0 +1,7 @@
+{
+  "id": "wf.edit.matting",
+  "name": "抠图 / 白底图",
+  "version": "1.0.0",
+  "featureId": "comfy.edit.matting",
+  "notes": "BiRefNetRMBG 单节点完成分割 + 背景替换：background=Color 出白底，Alpha 保留透明。不做任何缩放，输出尺寸严格等于输入。需要 ComfyUI-RMBG 自定义节点包。"
+}

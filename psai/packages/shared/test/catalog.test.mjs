@@ -33,6 +33,8 @@ const EXPECTED_FEATURES = [
   'comfy.relight.fixed',
   'comfy.relight.adaptive',
   'comfy.edit.texture',
+  // 本地抠图 / 白底图 —— 给原本只有闭源实现的 cloud.product.whitebg 提供本机替代
+  'comfy.edit.matting',
   'comfy.misc.upscale.general',
   'comfy.misc.upscale.lossless',
   'comfy.misc.retouch.product',
@@ -121,9 +123,9 @@ test('参数的 visibleWhen 只能引用同一功能里存在的参数', () => {
   }
 });
 
-test('11 个 ComfyUI 固定功能全部预绑定了内置工作流', () => {
+test('12 个 ComfyUI 固定功能全部预绑定了内置工作流', () => {
   const fixed = fixedComfyFeatures();
-  assert.equal(fixed.length, 11);
+  assert.equal(fixed.length, 12);
   for (const f of fixed) {
     assert.ok(f.defaultWorkflowId, `${f.id} 没有出厂内置工作流`);
     assert.ok(f.requiredNodeTypes.length > 0, `${f.id} 没有声明依赖节点`);

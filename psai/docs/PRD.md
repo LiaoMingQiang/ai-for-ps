@@ -235,7 +235,7 @@ L1 ── ComfyUI Web            内嵌 ComfyUI 图形编辑器
 | 采样器 `sampler` | 下拉（高级） | `euler` / `euler_ancestral` / `dpmpp_2m` / `dpmpp_2m_sde` / `dpmpp_3m_sde` / `res_multistep` / `ddim` / `uni_pc` / `lcm` | `dpmpp_2m` | `3.sampler_name` |
 | 调度器 `scheduler` | 下拉（高级） | `simple` / `normal` / `karras` / `sgm_uniform` / `exponential` / `beta` / `ddim_uniform` | `karras` | `3.scheduler` |
 | 步数 `steps` | 滑杆（高级） | 1–100，步 1 | 24 | `3.steps` |
-| 分辨率 `resolution` | 滑杆 | 512–2048，步 64 | 1024 | `7.width` · 推导宽<br>`7.height` · 推导高 |
+| 分辨率 `resolution` | 滑杆 | 512–2048，步 64 | 0 | `7.width` · 推导宽<br>`7.height` · 推导高 |
 
 - **写回**：新建智能对象图层 / 新建像素图层 / 选区原位替换 / 仅存资产库（不写回）（默认新建智能对象图层）
 - **验收标准**：
@@ -262,7 +262,7 @@ L1 ── ComfyUI Web            内嵌 ComfyUI 图形编辑器
 | 采样器 `sampler` | 下拉（高级） | `euler` / `euler_ancestral` / `dpmpp_2m` / `dpmpp_2m_sde` / `dpmpp_3m_sde` / `res_multistep` / `ddim` / `uni_pc` / `lcm` | `dpmpp_2m` | `3.sampler_name` |
 | 调度器 `scheduler` | 下拉（高级） | `simple` / `normal` / `karras` / `sgm_uniform` / `exponential` / `beta` / `ddim_uniform` | `karras` | `3.scheduler` |
 | 步数 `steps` | 滑杆（高级） | 1–100，步 1 | 24 | `3.steps` |
-| 分辨率 `resolution` | 滑杆 | 512–2048，步 64 | 1024 | `7.width` · 推导宽<br>`7.height` · 推导高 |
+| 分辨率 `resolution` | 滑杆 | 512–2048，步 64 | 0 | `7.width` · 推导宽<br>`7.height` · 推导高 |
 
 - **写回**：新建智能对象图层 / 新建像素图层 / 选区原位替换 / 仅存资产库（不写回）（默认新建智能对象图层）
 - **验收标准**：
@@ -291,7 +291,7 @@ L1 ── ComfyUI Web            内嵌 ComfyUI 图形编辑器
 | 调度器 `scheduler` | 下拉（高级） | `simple` / `normal` / `karras` / `sgm_uniform` / `exponential` / `beta` / `ddim_uniform` | `karras` | `3.scheduler` |
 | 步数 `steps` | 滑杆（高级） | 1–100，步 1 | 24 | `3.steps` |
 | CFG `cfg` | 滑杆（高级） | 1–20，步 0.1 | 2.5 | `3.cfg` |
-| 分辨率 `resolution` | 滑杆 | 512–2048，步 64 | 768 | `7.width` · 推导宽<br>`7.height` · 推导高<br>`12.width` · 推导宽<br>`12.height` · 推导高 |
+| 分辨率 `resolution` | 滑杆 | 512–2048，步 64 | 0 | `7.width` · 推导宽<br>`7.height` · 推导高<br>`12.width` · 推导宽<br>`12.height` · 推导高 |
 
 - **写回**：新建智能对象图层 / 新建像素图层 / 选区原位替换 / 仅存资产库（不写回）（默认新建智能对象图层）
 - **验收标准**：
@@ -321,7 +321,7 @@ L1 ── ComfyUI Web            内嵌 ComfyUI 图形编辑器
 | 调度器 `scheduler` | 下拉（高级） | `simple` / `normal` / `karras` / `sgm_uniform` / `exponential` / `beta` / `ddim_uniform` | `karras` | `3.scheduler` |
 | 步数 `steps` | 滑杆（高级） | 1–100，步 1 | 24 | `3.steps` |
 | CFG `cfg` | 滑杆（高级） | 1–20，步 0.1 | 2.5 | `3.cfg` |
-| 分辨率 `resolution` | 滑杆 | 512–2048，步 64 | 768 | `7.width` · 推导宽<br>`7.height` · 推导高<br>`12.width` · 推导宽<br>`12.height` · 推导高 |
+| 分辨率 `resolution` | 滑杆 | 512–2048，步 64 | 0 | `7.width` · 推导宽<br>`7.height` · 推导高<br>`12.width` · 推导宽<br>`12.height` · 推导高 |
 
 - **写回**：新建智能对象图层 / 新建像素图层 / 选区原位替换 / 仅存资产库（不写回）（默认新建智能对象图层）
 - **验收标准**：
@@ -348,7 +348,7 @@ L1 ── ComfyUI Web            内嵌 ComfyUI 图形编辑器
 | 采样器 `sampler` | 下拉（高级） | `euler` / `euler_ancestral` / `dpmpp_2m` / `dpmpp_2m_sde` / `dpmpp_3m_sde` / `res_multistep` / `ddim` / `uni_pc` / `lcm` | `dpmpp_2m` | `3.sampler_name` |
 | 调度器 `scheduler` | 下拉（高级） | `simple` / `normal` / `karras` / `sgm_uniform` / `exponential` / `beta` / `ddim_uniform` | `karras` | `3.scheduler` |
 | 步数 `steps` | 滑杆（高级） | 1–100，步 1 | 20 | `3.steps` |
-| 分辨率 `resolution` | 滑杆 | 512–2048，步 64 | 1024 | `7.width` · 推导宽<br>`7.height` · 推导高 |
+| 分辨率 `resolution` | 滑杆 | 512–2048，步 64 | 0 | `7.width` · 推导宽<br>`7.height` · 推导高 |
 
 - **写回**：新建智能对象图层 / 新建像素图层 / 选区原位替换 / 仅存资产库（不写回）（默认新建智能对象图层）
 - **验收标准**：
@@ -356,7 +356,28 @@ L1 ── ComfyUI Web            内嵌 ComfyUI 图形编辑器
   2. 质感强度滑杆对细节量有可见影响
   3. 不引入新的物体
 
-#### 4.2.6 其他功能 / 放大 / 通用放大 `comfy.misc.upscale.general`
+#### 4.2.6 图像编辑 / 抠图 / 白底图 `comfy.edit.matting`
+
+- **入口**：生成 → comfyui → 图像编辑 → 抠图 / 白底图
+- **说明**：本地抠图：BiRefNet 分割主体，可直接输出纯白底电商主图或保留透明通道。不改变原图尺寸。
+- **输入**：图像输入（必需，默认取layer）
+- **内置工作流**：`wf.edit.matting`
+- **依赖节点**：`BiRefNetRMBG`、`LoadImage`、`SaveImage`
+
+| 参数 | 控件 | 取值 | 默认 | 落点 |
+|---|---|---|---|---|
+| 图像输入 `image` | 图像输入 | layer / selection / mergedVisible / paste / upload | layer | `1.image` |
+| 背景 `mattingBackground` | 下拉 | `white` / `alpha` | `white` | `2.background` · map |
+| 边缘羽化 `maskBlur` | 滑杆 | 0–20，步 1 | 2 | `2.mask_blur` |
+| 边缘收缩 / 扩张 `maskOffset` | 滑杆 | -10–10，步 1 | 0 | `2.mask_offset` |
+
+- **写回**：新建智能对象图层 / 新建像素图层 / 仅存资产库（不写回）（默认新建智能对象图层）
+- **验收标准**：
+  1. 主体边缘干净，无明显背景残留
+  2. 选「纯白底」时背景是 #FFFFFF，选「透明」时输出带 alpha
+  3. 输出尺寸与输入尺寸完全一致
+
+#### 4.2.7 其他功能 / 放大 / 通用放大 `comfy.misc.upscale.general`
 
 - **入口**：生成 → comfyui → 其他功能 → 放大 → 通用放大
 - **说明**：通用放大：先按倍数重采样，再用扩散模型补充细节，适合需要"越放越清晰"的场景。
@@ -383,7 +404,7 @@ L1 ── ComfyUI Web            内嵌 ComfyUI 图形编辑器
   2. 细节量高于纯插值放大
   3. 重绘幅度调到最低时几乎不产生新内容
 
-#### 4.2.7 其他功能 / 放大 / 无损放大 `comfy.misc.upscale.lossless`
+#### 4.2.8 其他功能 / 放大 / 无损放大 `comfy.misc.upscale.lossless`
 
 - **入口**：生成 → comfyui → 其他功能 → 放大 → 无损放大
 - **说明**：无损放大：纯重采样，不经过扩散模型，绝不改变画面内容，同输入永远同输出。
@@ -403,7 +424,7 @@ L1 ── ComfyUI Web            内嵌 ComfyUI 图形编辑器
   2. 输出尺寸 = 输入 × 放大倍数
   3. 不含随机性：同输入两次结果完全一致
 
-#### 4.2.8 其他功能 / 精修 / 产品 `comfy.misc.retouch.product`
+#### 4.2.9 其他功能 / 精修 / 产品 `comfy.misc.retouch.product`
 
 - **入口**：生成 → comfyui → 其他功能 → 精修 → 产品
 - **说明**：精修（产品）：针对产品表面做局部提亮、瑕疵清理与细节收拾，保持原构图。
@@ -422,7 +443,7 @@ L1 ── ComfyUI Web            内嵌 ComfyUI 图形编辑器
 | 调度器 `scheduler` | 下拉（高级） | `simple` / `normal` / `karras` / `sgm_uniform` / `exponential` / `beta` / `ddim_uniform` | `karras` | `3.scheduler` |
 | 步数 `steps` | 滑杆（高级） | 1–100，步 1 | 22 | `3.steps` |
 | CFG `cfg` | 滑杆（高级） | 1–20，步 0.1 | 7 | `3.cfg` |
-| 分辨率 `resolution` | 滑杆 | 512–2048，步 64 | 1024 | `7.width` · 推导宽<br>`7.height` · 推导高 |
+| 分辨率 `resolution` | 滑杆 | 512–2048，步 64 | 0 | `7.width` · 推导宽<br>`7.height` · 推导高 |
 
 - **写回**：新建智能对象图层 / 新建像素图层 / 选区原位替换 / 仅存资产库（不写回）（默认新建智能对象图层）
 - **验收标准**：
@@ -430,7 +451,7 @@ L1 ── ComfyUI Web            内嵌 ComfyUI 图形编辑器
   2. 精修强度滑杆有可见影响
   3. 不产生多余肢体/物体
 
-#### 4.2.9 其他功能 / 精修 / 人物 `comfy.misc.retouch.person`
+#### 4.2.10 其他功能 / 精修 / 人物 `comfy.misc.retouch.person`
 
 - **入口**：生成 → comfyui → 其他功能 → 精修 → 人物
 - **说明**：精修（人物）：针对人物皮肤与五官做局部提亮、瑕疵清理与细节收拾，保持原构图。
@@ -449,7 +470,7 @@ L1 ── ComfyUI Web            内嵌 ComfyUI 图形编辑器
 | 调度器 `scheduler` | 下拉（高级） | `simple` / `normal` / `karras` / `sgm_uniform` / `exponential` / `beta` / `ddim_uniform` | `karras` | `3.scheduler` |
 | 步数 `steps` | 滑杆（高级） | 1–100，步 1 | 22 | `3.steps` |
 | CFG `cfg` | 滑杆（高级） | 1–20，步 0.1 | 7 | `3.cfg` |
-| 分辨率 `resolution` | 滑杆 | 512–2048，步 64 | 1024 | `7.width` · 推导宽<br>`7.height` · 推导高 |
+| 分辨率 `resolution` | 滑杆 | 512–2048，步 64 | 0 | `7.width` · 推导宽<br>`7.height` · 推导高 |
 
 - **写回**：新建智能对象图层 / 新建像素图层 / 选区原位替换 / 仅存资产库（不写回）（默认新建智能对象图层）
 - **验收标准**：
@@ -457,7 +478,7 @@ L1 ── ComfyUI Web            内嵌 ComfyUI 图形编辑器
   2. 精修强度滑杆有可见影响
   3. 不产生多余肢体/物体
 
-#### 4.2.10 其他功能 / 精修 / 场景 `comfy.misc.retouch.scene`
+#### 4.2.11 其他功能 / 精修 / 场景 `comfy.misc.retouch.scene`
 
 - **入口**：生成 → comfyui → 其他功能 → 精修 → 场景
 - **说明**：精修（场景）：针对场景环境与道具做局部提亮、瑕疵清理与细节收拾，保持原构图。
@@ -476,7 +497,7 @@ L1 ── ComfyUI Web            内嵌 ComfyUI 图形编辑器
 | 调度器 `scheduler` | 下拉（高级） | `simple` / `normal` / `karras` / `sgm_uniform` / `exponential` / `beta` / `ddim_uniform` | `karras` | `3.scheduler` |
 | 步数 `steps` | 滑杆（高级） | 1–100，步 1 | 22 | `3.steps` |
 | CFG `cfg` | 滑杆（高级） | 1–20，步 0.1 | 7 | `3.cfg` |
-| 分辨率 `resolution` | 滑杆 | 512–2048，步 64 | 1024 | `7.width` · 推导宽<br>`7.height` · 推导高 |
+| 分辨率 `resolution` | 滑杆 | 512–2048，步 64 | 0 | `7.width` · 推导宽<br>`7.height` · 推导高 |
 
 - **写回**：新建智能对象图层 / 新建像素图层 / 选区原位替换 / 仅存资产库（不写回）（默认新建智能对象图层）
 - **验收标准**：
@@ -484,7 +505,7 @@ L1 ── ComfyUI Web            内嵌 ComfyUI 图形编辑器
   2. 精修强度滑杆有可见影响
   3. 不产生多余肢体/物体
 
-#### 4.2.11 其他功能 / 视角转换 / 360° 旋转 `comfy.misc.viewpoint.orbit`
+#### 4.2.12 其他功能 / 视角转换 / 360° 旋转 `comfy.misc.viewpoint.orbit`
 
 - **入口**：生成 → comfyui → 其他功能 → 视角转换 → 360° 旋转
 - **说明**：视角转换（360° 旋转）：由单张图推出其他机位的同一主体，用于补齐多视角素材。
@@ -504,7 +525,7 @@ L1 ── ComfyUI Web            内嵌 ComfyUI 图形编辑器
 | 调度器 `scheduler` | 下拉（高级） | `simple` / `normal` / `karras` / `sgm_uniform` / `exponential` / `beta` / `ddim_uniform` | `karras` | `3.scheduler` |
 | 步数 `steps` | 滑杆（高级） | 1–100，步 1 | 26 | `3.steps` |
 | CFG `cfg` | 滑杆（高级） | 1–20，步 0.1 | 7 | `3.cfg` |
-| 分辨率 `resolution` | 滑杆 | 512–2048，步 64 | 768 | `7.width` · 推导宽<br>`7.height` · 推导高 |
+| 分辨率 `resolution` | 滑杆 | 512–2048，步 64 | 0 | `7.width` · 推导宽<br>`7.height` · 推导高 |
 
 - **写回**：新建智能对象图层 / 新建像素图层 / 仅存资产库（不写回）（默认新建智能对象图层）
 - **验收标准**：
@@ -1663,6 +1684,7 @@ HTTP 状态码与 `error.code` 一一对应，不允许 200 里塞失败。
 | `comfy.relight.fixed` | 生成/comfyui/光影溶图/固定视角 | comfy-workflow | `wf.relight.fixed` | 12 |
 | `comfy.relight.adaptive` | 生成/comfyui/光影溶图/自适应视角 | comfy-workflow | `wf.relight.adaptive` | 13 |
 | `comfy.edit.texture` | 生成/comfyui/图像编辑/质感加强 | comfy-workflow | `wf.edit.texture` | 10 |
+| `comfy.edit.matting` | 生成/comfyui/图像编辑/抠图 / 白底图 | comfy-workflow | `wf.edit.matting` | 4 |
 | `comfy.misc.upscale.general` | 生成/comfyui/其他功能/放大/通用放大 | comfy-workflow | `wf.upscale.general` | 10 |
 | `comfy.misc.upscale.lossless` | 生成/comfyui/其他功能/放大/无损放大 | comfy-workflow | `wf.upscale.lossless` | 3 |
 | `comfy.misc.retouch.product` | 生成/comfyui/其他功能/精修/产品 | comfy-workflow | `wf.retouch.product` | 10 |

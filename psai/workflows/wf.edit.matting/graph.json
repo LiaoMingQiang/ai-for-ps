@@ -1,0 +1,44 @@
+{
+  "1": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "psai_input.png",
+      "upload": "image"
+    },
+    "_meta": {
+      "title": "输入图"
+    }
+  },
+  "2": {
+    "class_type": "BiRefNetRMBG",
+    "inputs": {
+      "image": [
+        "1",
+        0
+      ],
+      "model": "BiRefNet-general",
+      "mask_blur": 2,
+      "mask_offset": 0,
+      "invert_output": false,
+      "refine_foreground": true,
+      "background": "Color",
+      "background_color": "#FFFFFF"
+    },
+    "_meta": {
+      "title": "BiRefNet 抠图"
+    }
+  },
+  "3": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": [
+        "2",
+        0
+      ],
+      "filename_prefix": "psai_matting"
+    },
+    "_meta": {
+      "title": "输出"
+    }
+  }
+}

@@ -61,7 +61,14 @@ export class WorkflowStore {
           const hash = graphHash(graph);
 
           const existing = this.find(meta.id);
-          if (existing && existing.hash === hash) {
+          // hash 只覆盖 graph.json —— 光比 hash 会漏掉 binding.json 的改动。
+          //
+          // 真踩过：改完 binding.json 重启，播种这一步认为"没变"直接跳过，
+          // 库里还是旧绑定，于是参数怎么调都不生效，而日志里一个字都没有。
+          // 工作流作者会以为是绑定写错了，其实是根本没被读进去。
+          // 绑定也参与比较，任一改动都重新播种。
+          const sameBindings = existing ? JSON.stringify(existing.bindings ?? []) === JSON.stringify(bindings) : false;
+          if (existing && existing.hash === hash && sameBindings) {
             expected.delete(meta.id);
             continue;
           }

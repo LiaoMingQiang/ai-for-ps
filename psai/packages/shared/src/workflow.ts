@@ -33,7 +33,19 @@ export type BindingTransform =
   /** 取 resolveSize 的高 */
   | { type: 'sizeHeight' }
   /** 布尔取反 */
-  | { type: 'not' };
+  | { type: 'not' }
+  /**
+   * 枚举值映射：把界面上的取值换成节点认识的那一个。
+   *
+   * 节点的枚举词是给 ComfyUI 用户看的，不是给产品用户看的 ——
+   * BiRefNetRMBG 的 background 只认 'Color' / 'Alpha'，而面板上该写
+   * 「纯白底（电商主图）」「透明」。没有这层映射就只能二选一：
+   * 要么把 'Color' 直接摆到用户面前，要么给每个枚举单独写一个工作流。
+   *
+   * 映射不中时返回 undefined（该字段保持节点原值），不硬塞一个非法值进去 ——
+   * 非法枚举会让 ComfyUI 在提交时整个拒绝，错误信息还指不到是哪个参数。
+   */
+  | { type: 'map'; map: Record<string, string | number | boolean> };
 
 export interface ParamBinding {
   /** FeatureSpec.params 里的 id */
