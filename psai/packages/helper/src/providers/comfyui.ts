@@ -154,7 +154,25 @@ export class ComfyUiAdapter implements ProviderAdapter {
       | undefined;
     if (!node?.input) return [];
     const slot = node.input.required?.[inputName] ?? node.input.optional?.[inputName];
-    if (Array.isArray(slot) && Array.isArray(slot[0])) return (slot[0] as unknown[]).map(String);
+    if (!Array.isArray(slot)) return [];
+
+    // 老写法：[[ "a", "b" ], { ...options }]
+    if (Array.isArray(slot[0])) return (slot[0] as unknown[]).map(String);
+
+    /*
+     * 新写法（ComfyUI 0.30 起）：[ "COMBO", { options: [ "a", "b" ], ... } ]
+     *
+     * 只认老写法的后果很隐蔽：枚举读成空数组，不报错、不抛异常，
+     * 界面上就是一个空下拉。实测这台机器 models/upscale_models 里躺着
+     * 5 个放大模型（4x-UltraSharp、RealESRGAN_x4plus…），而
+     * enumOf('UpscaleModelLoader','model_name') 返回 []，
+     * 于是「放大模型」下拉是空的、依赖体检也看不到它们 ——
+     * 用户会以为自己没装模型，跑去重下一遍。
+     *
+     * 两种格式都认，别赌对端版本。
+     */
+    const meta = slot[1] as { options?: unknown } | undefined;
+    if (Array.isArray(meta?.options)) return meta.options.map(String);
     return [];
   }
 

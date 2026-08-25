@@ -122,14 +122,39 @@
     "class_type": "ImageScaleBy",
     "inputs": {
       "image": [
-        "2",
+        "22",
         0
       ],
       "upscale_method": "lanczos",
-      "scale_by": 2
+      "scale_by": 0.5
     },
     "_meta": {
-      "title": "按倍数放大"
+      "title": "缩到目标倍数（factor ÷ 4）"
+    }
+  },
+  "21": {
+    "class_type": "UpscaleModelLoader",
+    "inputs": {
+      "model_name": "4x-UltraSharp.pth"
+    },
+    "_meta": {
+      "title": "超分模型"
+    }
+  },
+  "22": {
+    "class_type": "ImageUpscaleWithModel",
+    "inputs": {
+      "upscale_model": [
+        "21",
+        0
+      ],
+      "image": [
+        "2",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "超分放大（4×）"
     }
   }
 }

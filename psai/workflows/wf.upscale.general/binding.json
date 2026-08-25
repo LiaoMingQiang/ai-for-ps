@@ -12,7 +12,11 @@
       "input": "scale_by",
       "required": true,
       "transform": {
-        "type": "number"
+        "type": "linear",
+        "inMin": 1.5,
+        "inMax": 4,
+        "outMin": 0.375,
+        "outMax": 1
       }
     },
     {

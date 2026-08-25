@@ -190,12 +190,53 @@ test('分辨率绑定用的是尺寸变换，不是把数字直接塞进宽高',
 });
 
 test('放大倍数绑定会把字符串转成数字', () => {
+  // 分段控件的取值是字符串（'2'），而 scale_by 要的是 FLOAT。
+  // number 和 linear 两种变换内部都会 toNumber，都满足这个要求；
+  // 这里守的是"不能把字符串原样塞给节点"，而不是某一种具体写法。
   for (const id of ['wf.upscale.general', 'wf.upscale.lossless']) {
     const { bindings } = loadWorkflow(id);
     const b = bindings.find((x) => x.paramId === 'upscaleFactor');
     assert.ok(b, `${id} 没有绑定放大倍数`);
     assert.equal(b.input, 'scale_by');
-    assert.equal(b.transform?.type, 'number', '分段控件的值是字符串，必须转成数字');
+    assert.ok(
+      b.transform?.type === 'number' || b.transform?.type === 'linear',
+      `${id} 的放大倍数没有做数值变换（实际 ${b.transform?.type}）`
+    );
+  }
+});
+
+test('无损放大保持纯重采样，不许偷偷接超分模型', () => {
+  // 这个功能的承诺是"绝不改变画面内容，同输入永远同输出"。
+  // 超分模型会**编造**细节 —— 那是通用放大该干的事，不是无损放大。
+  // 哪天有人顺手把它也换成 ESRGAN，这条会拦下来。
+  const { graph } = loadWorkflow('wf.upscale.lossless');
+  const types = Object.values(graph).map((n) => n.class_type);
+  assert.ok(!types.includes('ImageUpscaleWithModel'), '无损放大不该出现超分节点');
+  assert.ok(!types.includes('KSampler'), '无损放大不该经过扩散模型');
+  assert.ok(types.includes('ImageScaleBy'), '无损放大就该是纯重采样');
+});
+
+test('通用放大用的是真超分，倍数换算成 factor ÷ 4', () => {
+  // 本机 models/upscale_models 里有 4x-UltraSharp 等 5 个权重。
+  // 这个图以前写的是 ImageScaleBy 纯插值 —— 放大只是变大，不会变清晰，
+  // 而权重就躺在那儿没被用上。
+  const { graph, bindings } = loadWorkflow('wf.upscale.general');
+  const types = Object.values(graph).map((n) => n.class_type);
+  assert.ok(types.includes('UpscaleModelLoader'), '缺少超分模型加载节点');
+  assert.ok(types.includes('ImageUpscaleWithModel'), '缺少超分节点');
+
+  // 模型固定 4×，面板给的是 1.5/2/3/4，所以放完要按 factor/4 缩回目标尺寸。
+  // factor/4 关于 factor 是线性的，正好能用 linear 表达。
+  const b = bindings.find((x) => x.paramId === 'upscaleFactor');
+  assert.equal(b.transform?.type, 'linear');
+  const { inMin, inMax, outMin, outMax } = b.transform;
+  for (const f of [1.5, 2, 3, 4]) {
+    const ratio = (f - inMin) / (inMax - inMin);
+    const scaleBy = outMin + ratio * (outMax - outMin);
+    assert.ok(
+      Math.abs(scaleBy - f / 4) < 1e-9,
+      `倍数 ${f} 应映射到 ${f / 4}，实际 ${scaleBy}`
+    );
   }
 });
 

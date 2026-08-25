@@ -616,7 +616,7 @@ const F_UPSCALE_GENERAL: FeatureSpec = {
   id: 'comfy.misc.upscale.general',
   path: ['generate', 'comfyui', 'misc', 'upscale', 'general'],
   label: '通用放大',
-  description: '通用放大：先按倍数重采样，再用扩散模型补充细节，适合需要"越放越清晰"的场景。',
+  description: '通用放大：先用超分模型放大，再用扩散模型补充细节，适合需要"越放越清晰"的场景。',
   branch: 'comfyui',
   engine: 'comfy-workflow',
   params: [
@@ -635,6 +635,11 @@ const F_UPSCALE_GENERAL: FeatureSpec = {
   requiredNodeTypes: [
     'CLIPTextEncode',
     'CheckpointLoaderSimple',
+    // 超分这两个是这次接上的：本机 models/upscale_models 里一直躺着
+    // 4x-UltraSharp / RealESRGAN_x4plus 等权重，而图里写的是纯插值。
+    'ImageUpscaleWithModel',
+    'UpscaleModelLoader',
+    // 模型固定 4×，放完还要按 factor÷4 缩回目标尺寸
     'ImageScaleBy',
     'KSampler',
     'LoadImage',
