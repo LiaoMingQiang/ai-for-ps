@@ -13,16 +13,22 @@
 | controlnet | FLUX.1-dev-ControlNet-Union-Pro-2.0、controlnet-union-sdxl-1.0、diffusers_xl_canny_full、diffusers_xl_depth_full、lotus-depth-d-v1-1、Z-Image-Turbo-Fun-Controlnet-Union |
 | vae | ae.safetensors/ae.sft、flux1_vae_bf16、flux2-vae、vae-ft-mse-840000 |
 | lora | boogu_image_turbo、flux2_klein_9b_enhanced_details_realistic、flux2_klein_9b_realistic_detail |
-| **upscale models** | **空 —— 一个都没有** |
+| upscale models | 4x-UltraSharp、4x_NMKD-Siax_200k、4x_foolhardy_Remacri、RealESRGAN_x4plus(.pth/.safetensors) |
 | 抠图 | BiRefNet 全家桶（RembgByBiRefNet / BiRefNetRMBG / LayerMask: BiRefNetUltraV2 / RMBG）、RemBGSession+、TransparentBGSession+ |
 | 分割 | SAM3_Detect、SAMLoader、SAMDetectorCombined、easy humanSegmentation |
 | 人脸 | FaceDetailer、FaceDetailerPipe、easy instantIDApply、easy pulIDApply |
-| 放大流程节点 | UltimateSDUpscale、SUPIRApply、ImageUpscaleWithModel、IterativeLatentUpscale（**但缺模型文件**） |
+| 放大流程节点 | UltimateSDUpscale、SUPIRApply、ImageUpscaleWithModel、IterativeLatentUpscale |
 | 编辑 | FluxKontextImageScale、TextEncodeQwenImageEdit、SkipLayerGuidanceDiT |
 | 套件 | Impact/Inspire（121 个）、LayerStyle、Essentials、easy-use |
 
-**唯一的硬缺口：没有任何放大模型文件**（`UpscaleModelLoader` 的枚举是空的）。
-`UltimateSDUpscale`、`ImageUpscaleWithModel` 这些节点都在，但没有权重可加载。
+> **上一版这里写错了，已更正。** 上一版说"没有任何放大模型文件"，
+> 依据是 `UpscaleModelLoader` 的枚举读出来是空的 —— 那是**我的解析写错了**：
+> 新版 ComfyUI 的枚举返回 `["COMBO", { options: [...] }]`，而旧版是 `[[...], {...}]`，
+> 采集脚本只认旧版，于是把 5 个放大模型读成了 0 个。
+> 用两种格式都认的解析重跑一遍，其余各类（checkpoints / controlnet / vae / lora / unet）
+> 的结论都不变，**只有 upscale_models 这一项是错的**。
+>
+> 实际情况：放大模型齐备，两个放大工作流不需要任何补件。
 
 ## 二、已有内置工作流（11 个）—— 全部通过静态校验
 
@@ -35,7 +41,7 @@
 | 光影溶图·固定视角 | `wf.relight.fixed` | 14 | 15 | 1 | 无 | 无 | **PASS（静态）** |
 | 光影溶图·自适应视角 | `wf.relight.adaptive` | 14 | 16 | 1 | 无 | 无 | **PASS（静态）** |
 | 质感加强 | `wf.edit.texture` | 9 | 11 | 1 | 无 | 无 | **PASS（静态）** |
-| 通用放大 | `wf.upscale.general` | 9 | 10 | 1 | 无 | 无 | **PASS（静态）**，但见下方说明 |
+| 通用放大 | `wf.upscale.general` | 9 | 10 | 1 | 无 | 无 | **PASS（静态）** |
 | 无损放大 | `wf.upscale.lossless` | 3 | 3 | 1 | 无 | 无 | **PASS（静态）** |
 | 精修·产品 | `wf.retouch.product` | 9 | 11 | 1 | 无 | 无 | **PASS（静态）** |
 | 精修·人物 | `wf.retouch.person` | 9 | 11 | 1 | 无 | 无 | **PASS（静态）** |
@@ -48,9 +54,10 @@
 `resolution → ImageScale.width/height`（经 sizeWidth/sizeHeight 变换）、
 `realism → KSampler.cfg`（0–1 线性映射到 4.5–9）。
 
-> **放大功能的真实状态**：两个放大工作流本身是有效的，但因为本机没有放大模型，
-> 它们走的是 `ImageScaleBy` 重采样，不是超分。要真正"越放越清晰"需要补
-> ESRGAN / 4x-UltraSharp 之类的权重放进 `models/upscale_models/`。
+> **放大功能的真实状态**：本机已有 5 个放大模型（含 4x-UltraSharp、RealESRGAN_x4plus），
+> `models/upscale_models/` 不缺东西。当前两个工作流的图里用的是 `ImageScaleBy` 重采样，
+> 那是**工作流本身的写法**，不是缺模型 —— 想要真超分，把图改成
+> `UpscaleModelLoader → ImageUpscaleWithModel` 即可，权重现成的。
 
 ## 三、尚无本地工作流的功能（5 个，全部只能走闭源 API）
 
@@ -83,8 +90,8 @@
 | 重打光 | ✅ **IC-Light 已装** | ✅ `wf.relight.*` |
 | 阴影生成 | ✅ IC-Light fbc | ❌ 未建 |
 | 图像融合 / 合成 | ✅ ImageCompositeMasked | 部分（relight） |
-| 高清修复 | ⚠️ 缺放大模型 | 部分 |
-| 放大 | ⚠️ **缺放大模型** | ✅ 但退化为重采样 |
+| 高清修复 | ✅ 放大模型齐备 | 部分 |
+| 放大 | ✅ 放大模型齐备 | ✅ 但图里用的是重采样，未接超分节点 |
 | 去噪 / 清理 | ✅ | ✅ `wf.wash.*` |
 | 细节增强 | ✅ | ✅ `wf.edit.texture` |
 | 人脸修复 | ✅ FaceDetailer | ❌ 未建 |
@@ -161,12 +168,55 @@ if (feature.engine === 'comfy-workflow') { ... }
 
 真正剩下的缺口：
 
-- **没有任何放大模型文件**。`UpscaleModelLoader` 枚举为空，
-  两个放大工作流实际退化成 `ImageScaleBy` 重采样。需要往
-  `models/upscale_models/` 放 ESRGAN / 4x-UltraSharp 之类的权重。
+- **放大工作流用的是重采样而非超分**（不是缺模型 —— 权重是齐的）。
+  把 `wf.upscale.general` 的图改成 `UpscaleModelLoader → ImageUpscaleWithModel`
+  就能用上已有的 4x-UltraSharp / RealESRGAN_x4plus。
 - **还有 4 个功能只有闭源实现**：`cloud.wash` / `cloud.t2i` / `cloud.i2i` /
   `cloud.product.multiview`。本机资产足够实现（SDXL、FLUX Kontext、ControlNet union），
   按 `wf.edit.matting` 这一套（新增功能 + 工作流 + 绑定 + PRD 同步 + 计数断言）
   逐个补即可。
 - 用户列表里的背景替换 / 局部重绘 / 物体移除 / 扩图 / 阴影 / 人脸修复 /
   ControlNet 系列同理，本机节点与模型都具备，尚未建工作流。
+
+## 七、还需要下载的东西（截至本次核对）
+
+对着运行中的 ComfyUI（`D:\comfy\核心工作\ComfyUI`）逐项核对后，**只差一样**：
+
+### BiRefNet-general 权重 —— `wf.edit.matting` 的唯一阻塞项
+
+节点包 `ComfyUI-RMBG` 已装，`models/RMBG/BiRefNet/` 里已有 `birefnet.py`
+和 `BiRefNet_config.py`，**缺的是权重本身**。节点源码
+（`py/AILab_BiRefNet.py` 的 `MODEL_CONFIG`）声明 BiRefNet-general 需要 4 个文件：
+
+| 文件 | 状态 | 大小 |
+|---|---|---|
+| `birefnet.py` | ✅ 已有 | 92 KB |
+| `BiRefNet_config.py` | ✅ 已有 | 298 B |
+| `BiRefNet-general.safetensors` | ❌ **缺** | 843 MB |
+| `config.json` | ❌ **缺** | < 1 KB |
+
+- 仓库：`1038lab/BiRefNet`
+- 落盘目录：`D:\comfy\核心工作\ComfyUI\models\RMBG\BiRefNet\`
+
+两个地址都实测返回 200：
+
+```
+https://huggingface.co/1038lab/BiRefNet/resolve/main/BiRefNet-general.safetensors
+https://huggingface.co/1038lab/BiRefNet/resolve/main/config.json
+```
+
+国内直连 huggingface.co 会卡在 Xet 传输后端上（真机现象：接受任务后停在节点 2
+超过 45 分钟，`~/.cache/huggingface/xet/logs` 刷满 connection struggling，
+磁盘无写入、GPU 17%）。改用镜像可绕开：
+
+```
+https://hf-mirror.com/1038lab/BiRefNet/resolve/main/BiRefNet-general.safetensors
+https://hf-mirror.com/1038lab/BiRefNet/resolve/main/config.json
+```
+
+### 不需要下载的
+
+- **放大模型**：已有 5 个，见上文更正。
+- 其余尚未建工作流的功能（背景替换 / 局部重绘 / 物体移除 / 扩图 / 阴影 /
+  人脸修复 / ControlNet 系列）所需的节点与模型**本机都已具备**，
+  缺的是工作流本身，不是权重。
