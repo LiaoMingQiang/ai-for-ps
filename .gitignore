@@ -9,3 +9,15 @@ backup/
 # 现行实现全在 psai/ 下，这两个只是历史遗留的打包结果。
 ai-for-ps.zip
 helper/dist-bundle/AI-for-PS-Helper.exe
+
+# 根目录那套 0.9.0 旧实现（2026-08-11/12），不再入库。
+# 现行实现全在 psai/ 下，psai/ 不引用它们中的任何一个。
+# 文件仍在磁盘上，旧文档另存于 docs-0.9.2/旧版存档/。
+/helper/
+/uxp-plugin/
+/installer/
+/test/
+/scripts/
+/version.json
+/HANDOVER.md
+/REAL_PHOTOSHOP_ACCEPTANCE.md

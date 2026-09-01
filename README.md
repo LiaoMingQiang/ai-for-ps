@@ -1,70 +1,32 @@
-# AI-for-PS · 电商 AI 工作台
+# AI for PS
 
-Photoshop UXP 插件: 图层/选区/Mask → AI 任务 → 结果缓存 → Photoshop 安全写回。
+在 Photoshop 里直接调度 AI 生图的电商视觉工作台。设计师不离开 Photoshop，
+就能把当前图层或选区送进本地 ComfyUI 或云端模型，拿回结果并安全写回画布。
 
-**当前版本: 0.9.0 (开发里程碑) — 1.0.0 Release Gate 尚未全部通过 (需 Photoshop 实机 E2E)**
+**项目全部在 [`psai/`](psai/) 下**，那是一个 npm workspace 单仓：
 
-## 架构
+| 位置 | 是什么 |
+| --- | --- |
+| [`psai/packages/plugin`](psai/packages/plugin) | Photoshop UXP 插件，只跟本机 Helper 说话，不直连任何 AI 服务 |
+| [`psai/packages/helper`](psai/packages/helper) | 本机 Helper：Fastify + node:sqlite + ws，作业引擎 / 资产库 / 凭据 / Provider |
+| [`psai/packages/shared`](psai/packages/shared) | 两端共用的协议与类型 |
 
-```
-Photoshop UXP Plugin (apps/uxp-plugin)
-  ↓ pairing token (SecureStorage/local settings)
-Local Helper (apps/helper — 单文件 exe)
-  ├── SQLite (schema v2, 迁移自动备份) / DPAPI 凭据 / Asset Store (sha256+去重)
-  ├── Job Engine (18 态状态机, 重启恢复先查远端不重提交)
-  ├── Provider Adapters: ComfyUI | OpenAI Compatible | Gemini | 火山方舟 | 阿里百炼 | RunningHub | ModelScope
-  ├── Workflow 导入/扫描/Studio/版本 / 依赖中心 / GPU Monitor / Workers / 成本中心
-  └── Agent (受控工具 + Plan 批准 + 审计)
-```
+从 [`psai/README.md`](psai/README.md) 开始读。安装说明见
+[`psai/docs/INSTALL.md`](psai/docs/INSTALL.md)，完整需求见
+[`psai/docs/PRD.md`](psai/docs/PRD.md)。
 
-## 目录
+## 当前版本
 
-```
-ai-for-ps/
-├── uxp-plugin/       Photoshop UXP 插件 (Manifest v5 + entrypoints.setup, PS 25.2+)
-│   ├── src/entry.js  真实插件入口 (browser 预览兼容)
-│   ├── js/ps/        PhotoshopBridge (快照导出/安全写回) + 文档上下文
-│   ├── js/core/      comfyui 客户端 / helper-client / jobs / workflows / providers ...
-│   └── js/ui/        7 大页 UI (生成/AI编辑/工作流/任务/历史/资产库/设置) — 完整保留
-├── helper/           Node.js/TypeScript Helper (Fastify + node:sqlite + ws)
-│   ├── src/          config/db/pairing/credentials(gpu)/job-engine/providers/workflow/agent
-│   ├── dist-bundle/  AI-for-PS-Helper.exe (Node SEA 单文件) + helper.cjs
-│   └── test/         6 个集成测试套件
-├── installer/        旧版浏览器预览安装 (保留); 正式安装见 release/
-├── release/          交付物: AI-for-PS.ccx / helper/AI-for-PS-Helper.exe / AI-for-PS-Setup.nsi / install-helper.bat / checksums.txt / CHANGELOG.md
-├── test/             comfy_stub.py (含 queue/interrupt/WS) / e2e-core.mjs / smoke_ui.py
-└── scripts/          make-release.py / verify-ccx.py
-```
+**0.9.2**（标签 `v0.9.2`）。
 
-## 测试 (全部真实执行)
+自动化套件 604 条，连续两轮全绿，`npm run check` 通过。但**真机 Photoshop
+验收一项都没做** —— [`psai/docs/PHOTOSHOP_ACCEPTANCE.md`](psai/docs/PHOTOSHOP_ACCEPTANCE.md)
+里每个勾选框都是空的。选区遮罩取值、图层捕获、写回这三组只能在装了
+Photoshop 的机器上验，替身再忠实也不是 Photoshop。0.9.2 的安装包也还没在
+任何一台干净机器上装过。
 
-```bash
-cd helper && npm run build && npm test
-# helper-smoke 61/61 · comfyui.integration 22/22 · openai.integration 9/9
-# workflow.integration 28/28 · job-engine.integration 24/24 · cloud.integration 8/8
-cd uxp-plugin && npm run lint && npm run validate
-cd .. && node test/e2e-core.mjs 18188   # 17/17
-python3 test/smoke_ui.py                # 浏览器版冒烟
-```
+## 关于旧版本
 
-## 运行
-
-```bash
-# Helper (开发): cd helper && npm run build && npm start   → http://127.0.0.1:33057
-# Helper (发布): release/install-helper.bat (注册自启动 + 启动单文件 exe)
-# 插件: Photoshop 中 UXP Developer Tool 加载 uxp-plugin/ 或 release/AI-for-PS.ccx
-```
-
-## 安全
-
-- Helper 默认仅监听 127.0.0.1 (局域网模式需显式开启)
-- API Key 仅存 Helper (Windows DPAPI); UXP 只保存配对 token
-- 写回前校验源文档存在/尺寸/图层; 选区任务按任务时记录的 bounds 原位写回
-- AI 成功与写回成功严格区分: 写回失败 → retryable_writeback_failure (结果保留可重试)
-- 无 Mock Success; 未配置 Provider 显示 Disabled + 原因
-
-## 已知限制
-
-- 真实 Photoshop E2E (场景 1-15) 未执行 — 需 PS 实机
-- .ccx 未签名 (正式分发需 Adobe 签名)
-- 云 Provider 适配器协议已测 (mock), 未用真实账户验证
+仓库根目录原先还有一套 0.9.0 时期的实现（`helper/`、`uxp-plugin/`、
+`installer/`、`test/`、`scripts/`）。它已经被现在的 `psai/` 完全取代，
+不再随仓库分发；需要的话在 `v0.9.2` 之前的历史里能找到。
