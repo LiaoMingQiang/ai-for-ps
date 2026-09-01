@@ -27,9 +27,17 @@ const SECRET_PATTERNS: RegExp[] = [
   /\b(sk-[A-Za-z0-9_-]{8,})\b/g,
   /\b(AIza[A-Za-z0-9_-]{20,})\b/g,
   /\b(ms-[A-Za-z0-9-]{16,})\b/g,
-  /("(?:api[_-]?key|apiKey|token|password|secret)"\s*:\s*")([^"]{4,})(")/gi,
+  /("(?:api[_-]?key|apiKey|token|password|secret|access[_-]?key|secret[_-]?key|signature)"\s*:\s*")([^"]{4,})(")/gi,
   /(Bearer\s+)([A-Za-z0-9._~+/-]{12,}=*)/g,
-  /([?&](?:api[_-]?key|apiKey|token|access_token|password|secret)=)([^&\s"']{4,})/gi,
+  // 查询串。LiblibAI 的整套鉴权都在这里：AccessKey 是身份，
+  // Signature 是拿 SecretKey 算出来的 —— 两个都不能出现在日志里。
+  // SignatureNonce 必须排在 Signature 前面：不然 `signature=` 那条会先
+  // 咬掉 `SignatureNonce=` 的前半截，剩下 `Nonce=xxx` 原样留在日志里。
+  /([?&](?:signature[_-]?nonce)=)([^&\s"']{4,})/gi,
+  /([?&](?:api[_-]?key|apiKey|token|access_token|password|secret|access[_-]?key|secret[_-]?key|signature|sign|credential|x-amz-signature|x-amz-credential|oss[_-]?access[_-]?key[_-]?id|ossaccesskeyid|x-oss-signature|x-oss-credential)=)([^&\s"']{4,})/gi,
+  // 请求头形态。mj-api-secret 是 Midjourney 代理接口用的，
+  // x-api-key / api-key 是另外几家的写法。
+  /((?:mj-api-secret|x-api-key|api-key|apikey|x-auth-token)\s*[:=]\s*)([^\s,;"']{8,})/gi,
   /\b([0-9a-f]{32,64})\b/gi
 ];
 

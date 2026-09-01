@@ -17,6 +17,59 @@ type Path = 'unknown' | 'embedded' | 'fallback';
 let detected: Path = 'unknown';
 let detectDetail = '';
 
+/**
+ * 内嵌区的高度，用户拖过就记住（模块级，面板活着期间一直有效）。
+ *
+ * 0 表示"还没拖过，用样式表里的默认值"。不写进设置是有意的：
+ * 这是个随手调的视图偏好，不值得为它多一次落盘和一次迁移。
+ */
+let frameHeight = 0;
+
+/** 内嵌区下沿的拖动条：按住上下拖，改的是一个确定的像素高度。 */
+function makeResizer(frameBox: HTMLElement): HTMLElement {
+  const bar = h('div', { class: 'comfy-resize', title: '按住上下拖，调整 ComfyUI 区域高度' }, '⋯');
+
+  let startY = 0;
+  let startH = 0;
+  let dragging = false;
+
+  const onMove = (ev: PointerEvent): void => {
+    if (!dragging) return;
+    const next = Math.max(220, Math.min(2400, startH + (ev.clientY - startY)));
+    frameHeight = next;
+    frameBox.style.height = `${next}px`;
+  };
+  const onUp = (): void => {
+    dragging = false;
+    try {
+      window.removeEventListener('pointermove', onMove as EventListener);
+      window.removeEventListener('pointerup', onUp);
+    } catch {
+      /* UXP 上 window 事件不一定挂得住，下面还有一层保底 */
+    }
+  };
+
+  bar.addEventListener('pointerdown', (ev: Event) => {
+    const pe = ev as PointerEvent;
+    dragging = true;
+    startY = pe.clientY;
+    // 拖之前先把当前实际高度定下来：样式表里的默认值读不到 style.height
+    startH = frameBox.offsetHeight || frameHeight || 640;
+    try {
+      window.addEventListener('pointermove', onMove as EventListener);
+      window.addEventListener('pointerup', onUp);
+    } catch {
+      /* noop */
+    }
+  });
+  // 保底：有些 UXP 版本 window 上收不到，元素自己也挂一份
+  bar.addEventListener('pointermove', onMove as EventListener);
+  bar.addEventListener('pointerup', onUp);
+  bar.addEventListener('pointerleave', onUp);
+
+  return bar;
+}
+
 /** webview 是否可用：元素能创建、且 manifest 放行了目标域。 */
 function probeWebview(): { supported: boolean; detail: string } {
   try {
@@ -112,7 +165,10 @@ export async function renderComfyWebPage(host: HTMLElement): Promise<void> {
       detectDetail = 'webview 加载本机地址被拦截';
       void renderComfyWebPage(host);
     });
-    host.appendChild(h('div', { class: 'comfy-frame' }, frame));
+    const frameBox = h('div', { class: 'comfy-frame' }, frame);
+    if (frameHeight > 0) frameBox.style.height = `${frameHeight}px`;
+    host.appendChild(frameBox);
+    host.appendChild(makeResizer(frameBox));
     host.appendChild(
       h('div', { class: 'muted small pad' }, '内嵌模式。若这里长时间空白，说明 UXP 拦了本机地址，请点「在浏览器中打开」。')
     );
@@ -161,7 +217,8 @@ async function renderQueue(): Promise<HTMLElement> {
                 type: 'button',
                 onclick: async () => {
                   const res = await api.cancelJob(j.id);
-                  if (!res.ok) toast('取消未生效', res.reason, 'warn');
+                  if (res.pending) toast('正在取消', res.reason);
+                  else if (!res.cancelled) toast('取消未生效', res.reason, 'warn');
                 }
               },
               '取消'

@@ -26,7 +26,15 @@ import {
   filterModelsByScope,
   isModelScope
 } from '@psai/shared';
-import type { ErrorCode, JobListQuery, CreateJobRequest, FeatureBinding, AppSettings, ModelScope } from '@psai/shared';
+import type {
+  ErrorCode,
+  JobListQuery,
+  CreateJobRequest,
+  FeatureBinding,
+  AppSettings,
+  ModelScope,
+  PhotoshopTarget
+} from '@psai/shared';
 import type { HelperConfig } from './config.js';
 import type { Logger } from './log.js';
 import type { Db } from './db.js';
@@ -43,6 +51,7 @@ import { readGpuInfo } from './gpu.js';
 import { ComfyUiAdapter } from './providers/comfyui.js';
 import { join } from 'node:path';
 import { thumbnailFor, PREVIEW_MAX_EDGE } from './thumbs.js';
+import { composeAlpha, checkUsableMask } from './mask.js';
 
 export interface ServerDeps {
   cfg: HelperConfig;
@@ -76,6 +85,9 @@ const STATUS_FOR: Partial<Record<ErrorCode, number>> = {
   WORKFLOW_INVALID_JSON: 400,
   WORKFLOW_NO_OUTPUT: 400,
   WORKFLOW_BINDING_INVALID: 400,
+  // 选区数据本身不自洽（比如遮罩尺寸和画面对不上）是客户端发错了，
+  // 不是服务端出错 —— 回 500 会让面板按"重试也许能好"来处理，而它永远不会好
+  PHOTOSHOP_SELECTION_INVALID: 400,
   ASSET_TOO_LARGE: 413,
   ASSET_UNSUPPORTED_TYPE: 415,
   PROVIDER_UNSUPPORTED: 501,
@@ -593,24 +605,67 @@ export async function buildServer(d: ServerDeps): Promise<FastifyInstance> {
 
   /* ---------------- 资产 ---------------- */
 
+  /**
+   * 上传资产。
+   *
+   * 可以额外带一个 `mask` 文件 + `maskWidth` / `maskHeight` 两个字段：
+   * 那是 Photoshop 的选区灰度（0 未选中 / 255 完全选中 / 中间值是羽化）。
+   * 带了就把它合成进图像的 alpha 通道再落库。
+   *
+   * 为什么合成放在这边：PNG 编解码这边已经有了（缩略图用的那一套），
+   * 而插件跑在 UXP 里，既没有这套代码、也没法被自动化测试覆盖。
+   */
   app.post('/v1/assets', async (req, reply) => {
     try {
       const parts = req.parts();
-      const saved: unknown[] = [];
+      const files: Buffer[] = [];
       let kind: 'input' | 'reference' = 'input';
+      let mask: Buffer | null = null;
+      let maskWidth = 0;
+      let maskHeight = 0;
+
       for await (const part of parts) {
-        if (part.type === 'field' && part.fieldname === 'kind') {
+        if (part.type === 'field') {
           const v = String(part.value);
-          if (v === 'reference') kind = 'reference';
+          if (part.fieldname === 'kind' && v === 'reference') kind = 'reference';
+          if (part.fieldname === 'maskWidth') maskWidth = Number(v) || 0;
+          if (part.fieldname === 'maskHeight') maskHeight = Number(v) || 0;
           continue;
         }
         if (part.type === 'file') {
           const buf = await part.toBuffer();
-          saved.push(d.assets.put(buf, kind));
+          if (part.fieldname === 'mask') mask = buf;
+          else files.push(buf);
         }
       }
-      if (saved.length === 0) throw new PsaiError('JOB_INPUT_MISSING', '没有收到任何文件');
-      return { ok: true, assets: saved };
+      if (files.length === 0) throw new PsaiError('JOB_INPUT_MISSING', '没有收到任何文件');
+
+      const saved: unknown[] = [];
+      for (const [i, buf] of files.entries()) {
+        // 遮罩只作用在第一张上：一次捕获只有一个选区
+        const composed = i === 0 && !!mask;
+        const withMask = composed ? composeAlpha(buf, mask!, maskWidth, maskHeight) : buf;
+        /*
+         * 记下"这张图的 alpha 是一次明确的选区遮罩"。
+         *
+         * 只有真的合成过的那一张才算。别的图哪怕带着 alpha 通道，
+         * 那也只是它自己的透明度 —— 不是用户圈出来的处理区。
+         */
+        saved.push(d.assets.put(withMask, kind, { selectionMask: composed }));
+      }
+
+      /*
+       * 合成完立刻体检一遍，把结果如实带回去。
+       *
+       * 不在这里拦死：拦不拦得住是**功能**说了算 —— 局部重绘那一族没有可用遮罩
+       * 就是废的，而普通图生图带不带遮罩都能跑。这里只负责把事实测出来，
+       * 判断留给创建任务那一步（它才知道这张图要喂给哪个功能）。
+       */
+      const maskInfo = mask ? checkUsableMask(d.assets.read(String((saved[0] as { id: string }).id))) : null;
+      if (maskInfo && !maskInfo.ok) {
+        d.log.warn('选区遮罩体检没过', { reason: maskInfo.reason, stats: maskInfo.stats });
+      }
+      return { ok: true, assets: saved, ...(maskInfo ? { mask: maskInfo } : {}) };
     } catch (e) {
       return fail(reply, e);
     }
@@ -687,10 +742,20 @@ export async function buildServer(d: ServerDeps): Promise<FastifyInstance> {
     events: d.jobs.eventsOf((req.params as { id: string }).id)
   }));
 
+  /**
+   * 取消。
+   *
+   * ok 只表示"这个请求处理成功了"，取消到底生没生效看 cancelled。
+   * 以前把业务结论塞进 ok：远端不支持取消时返回 200 + ok:false，
+   * 于是客户端那套统一的错误处理会把它当成一次**失败的调用**报出去 ——
+   * 而它其实是一次成功的调用，只是答案是"取消不了"。
+   * pending 表示提交还在飞，结论稍后由任务状态给出。
+   */
   app.post('/v1/jobs/:id/cancel', async (req, reply) => {
     try {
-      const res = await d.jobs.cancel((req.params as { id: string }).id);
-      return { ok: res.ok, cancelled: res.ok, reason: res.reason, job: d.jobs.get((req.params as { id: string }).id) };
+      const { id } = req.params as { id: string };
+      const res = await d.jobs.cancel(id);
+      return { ok: true, cancelled: res.cancelled, pending: res.pending, reason: res.reason, job: d.jobs.get(id) };
     } catch (e) {
       return fail(reply, e);
     }
@@ -720,11 +785,59 @@ export async function buildServer(d: ServerDeps): Promise<FastifyInstance> {
     }
   });
 
+  /**
+   * 处置「提交结果未知」的任务。
+   *
+   * 这个状态是终态，普通的 retry / rerun 一律不该碰它 ——
+   * 那两条路会在用户没意识到风险的情况下再发一次请求，
+   * 而上一次可能已经在平台侧计费了。所以单独开一个接口，
+   * 且 retry 分支强制要求 confirmedDuplicateBillingRisk。
+   */
+  app.post('/v1/jobs/:id/resolve-submission', async (req, reply) => {
+    try {
+      const { id } = req.params as { id: string };
+      const body = (req.body ?? {}) as {
+        decision?: 'retry' | 'abandon' | 'adopt';
+        remoteId?: string;
+        confirmedDuplicateBillingRisk?: boolean;
+      };
+      if (!body.decision || !['retry', 'abandon', 'adopt'].includes(body.decision)) {
+        throw new PsaiError('JOB_PARAM_INVALID', 'decision 必须是 retry / abandon / adopt 之一');
+      }
+      const job = d.jobs.resolveSubmissionUnknown(id, body.decision, {
+        ...(body.remoteId ? { remoteId: body.remoteId } : {}),
+        // 严格转发布尔值，不做 truthy 转换 —— 字符串 "false" 也是 truthy，
+        // 在这里悄悄变成 true 的话，引擎那边的严格校验就形同虚设
+        ...(body.confirmedDuplicateBillingRisk === true ? { confirmedDuplicateBillingRisk: true } : {})
+      });
+      return { ok: true, job };
+    } catch (e) {
+      return fail(reply, e);
+    }
+  });
+
   app.post('/v1/jobs/:id/writeback', async (req, reply) => {
     try {
       const { id } = req.params as { id: string };
-      const body = (req.body ?? {}) as { mode?: never; layerName?: string };
-      return { ok: true, job: d.jobs.requestWriteback(id, body.mode, body.layerName) };
+      const body = (req.body ?? {}) as {
+        mode?: never;
+        layerName?: string;
+        auto?: boolean;
+        assetId?: string;
+        /** 显式改绑写回目标：把这条任务的结果写进**另一份**（或第一份）文档 */
+        target?: PhotoshopTarget;
+      };
+      /*
+       * 这个端点不只是"把任务放回待写回"，它同时是一次**执行权的领取**：
+       * 返回的 attemptId 是凭据，插件回报结果时必须带回来。
+       * 没有它的话，两个面板实例会各写一遍，用户文档里凭空多一个图层。
+       */
+      const { job, attemptId } = d.jobs.requestWriteback(id, body.mode, body.layerName, {
+        auto: body.auto === true,
+        ...(body.assetId ? { assetId: body.assetId } : {}),
+        ...(body.target ? { rebindTarget: body.target } : {})
+      });
+      return { ok: true, job, attemptId };
     } catch (e) {
       return fail(reply, e);
     }
@@ -733,8 +846,30 @@ export async function buildServer(d: ServerDeps): Promise<FastifyInstance> {
   app.post('/v1/jobs/:id/writeback-result', async (req, reply) => {
     try {
       const { id } = req.params as { id: string };
-      const body = (req.body ?? {}) as { ok?: boolean; detail?: string; code?: string };
-      return { ok: true, job: d.jobs.reportWriteback(id, !!body.ok, body.detail ?? '', body.code) };
+      const body = (req.body ?? {}) as { ok?: boolean; detail?: string; code?: string; attemptId?: string };
+      return {
+        ok: true,
+        job: d.jobs.reportWriteback(id, !!body.ok, body.detail ?? '', body.code, body.attemptId)
+      };
+    } catch (e) {
+      return fail(reply, e);
+    }
+  });
+
+  /**
+   * 续租。
+   *
+   * 写一张 8K 智能对象可能要几十秒，而租约只有两分钟。没有这个端点的话，
+   * 一次**正在正常进行**的写回会被当成卡死让位，另一个写手接手 ——
+   * 用户文档里就多了一个图层。插件在写的过程中定期来续一次。
+   */
+  app.post('/v1/jobs/:id/writeback/renew', async (req, reply) => {
+    try {
+      const { id } = req.params as { id: string };
+      const body = (req.body ?? {}) as { attemptId?: string };
+      if (!body.attemptId) throw new PsaiError('JOB_PARAM_INVALID', '续租需要 attemptId');
+      const res = d.jobs.renewWriteback(id, body.attemptId);
+      return { ok: true, renewed: res.ok, reason: res.reason };
     } catch (e) {
       return fail(reply, e);
     }

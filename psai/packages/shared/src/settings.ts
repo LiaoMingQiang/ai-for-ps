@@ -19,6 +19,20 @@ export interface ComfyConnectionSettings {
   serverWorkingDir: string;
   /** 连接超时（毫秒） */
   timeoutMs: number;
+  /**
+   * 这台 ComfyUI 是否**独占**给本插件用。
+   *
+   * 关系到能不能取消已经在执行的任务：ComfyUI 的 /interrupt 是全局的，
+   * 它中断的是"这台机器当前正在执行的那一个"，而不是我们指定的那一个。
+   *
+   * 先查 /queue 再决定发不发，是不够的 —— 查完到发出去之间，
+   * ComfyUI 完全可能已经切到下一个任务上了（TOCTOU）。
+   * 那一刀就砍在别人身上，而且没有任何地方会报错。
+   *
+   * 所以只认用户的明确声明：他说"这台机器只跑本插件的任务"，
+   * 我们才敢用那个全局开关。默认 false —— 猜错的代价是废掉别人正在跑的活。
+   */
+  exclusive: boolean;
 }
 
 export interface CloudConnectionSettings {
@@ -102,7 +116,9 @@ export function defaultSettings(): AppSettings {
       baseUrl: 'http://127.0.0.1:8188',
       serverCommand: '',
       serverWorkingDir: '',
-      timeoutMs: 15000
+      timeoutMs: 15000,
+      // 默认不独占：猜错的代价是废掉用户正在跑的别的任务
+      exclusive: false
     },
     cloud: { runninghubWorkflowId: '' },
     providers: [],
@@ -128,3 +144,29 @@ export function renderLayerName(template: string, vars: { feature: string; date?
     .replaceAll('{seed}', vars.seed === undefined ? '' : String(vars.seed))
     .trim();
 }
+
+/**
+ * 一次设置改动要发的东西：**只带变了的那些字段**。
+ *
+ * 分组内部是逐字段可选的（`comfy.baseUrl` 单独发就行），因为 Helper
+ * 按分组浅合并：`{ ...current, ...patch[group] }`。
+ *
+ * 为什么不能用 `Partial<AppSettings>`：那个类型要求 `comfy` 要么不给、
+ * 要么给**完整**一份。于是调用方只能把手里那份展开发上去 ——
+ * 而它多半是渲染那一刻的快照，中间用户改过的别的项会被一起冲掉，
+ * 界面上却还显示着他改过的样子。类型放松到逐字段，这条错路才走不通。
+ *
+ * 数组和标量分组（providers / featureBindings / schemaVersion）没有
+ * "部分"的概念，整份替换。
+ */
+export type SettingsPatch = {
+  schemaVersion?: number;
+  comfy?: Partial<ComfyConnectionSettings>;
+  cloud?: Partial<CloudConnectionSettings>;
+  providers?: ProviderSettings[];
+  featureBindings?: FeatureBinding[];
+  generation?: Partial<GenerationDefaults>;
+  ui?: Partial<UiPreferences>;
+  promptOverrides?: AppSettings['promptOverrides'];
+  customPresets?: AppSettings['customPresets'];
+};

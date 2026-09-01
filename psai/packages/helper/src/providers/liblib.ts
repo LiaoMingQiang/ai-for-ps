@@ -48,7 +48,7 @@ import type {
   CancelResult
 } from './types.js';
 import { emptyProgress } from './types.js';
-import { httpFetch, jsonOf, normalizeBaseUrl, ensureOk } from './http.js';
+import { httpFetch, jsonOf, normalizeBaseUrl, ensureOk, sanitizeExternalText } from './http.js';
 import type { Logger } from '../log.js';
 
 export interface LiblibOptions {
@@ -156,21 +156,43 @@ export class LiblibAdapter implements ProviderAdapter {
     return `${this.base()}${uri}?${q.toString()}`;
   }
 
-  private async post<T>(uri: string, body: Record<string, unknown>, timeoutMs?: number): Promise<T> {
+  /**
+   * 同一个地址，但不带签名 —— 专门用来放进错误消息和日志里。
+   *
+   * signedUrl() 的查询串里是 AccessKey（身份）和 Signature（用 SecretKey 算出来的）。
+   * 把它交给 ensureOk / jsonOf 这类通用助手，等于把密钥写进异常消息，
+   * 而异常消息会一路流到日志、API 响应、用户随手截的那张图里。
+   * 通用助手那边也有一层 safeEndpoint 兜底，但源头就别把它带出来更省事。
+   */
+  private label(uri: string): string {
+    return `${this.base()}${uri}`;
+  }
+
+  private async post<T>(
+    uri: string,
+    body: Record<string, unknown>,
+    timeoutMs?: number,
+    signal?: AbortSignal
+  ): Promise<T> {
     const url = this.signedUrl(uri);
     const res = await httpFetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
-      timeoutMs: timeoutMs ?? this.opts.timeoutMs
+      timeoutMs: timeoutMs ?? this.opts.timeoutMs,
+      // 提交进行中被取消时中止请求 —— 那是唯一能真正省下这次费用的时机
+      ...(signal ? { signal } : {})
     });
     // 这个平台业务错误也走 HTTP 200，真正的判定在 envelope 的 code 上。
     // 只有非 2xx 才是传输层的问题。
     if (!res.ok) {
       const t = await res.text().catch(() => '');
-      throw new PsaiError('PROVIDER_BAD_RESPONSE', `LiblibAI HTTP ${res.status}: ${t.slice(0, 300)}`);
+      throw new PsaiError(
+        'PROVIDER_BAD_RESPONSE',
+        `LiblibAI ${this.label(uri)} HTTP ${res.status}: ${t.slice(0, 300)}`
+      );
     }
-    const json = await jsonOf<Envelope<T>>(res, url);
+    const json = await jsonOf<Envelope<T>>(res, this.label(uri));
     if (json.code !== undefined && json.code !== CODE.OK) throw explainLiblibCode(json.code, json.msg ?? '', uri);
     if (json.data === undefined || json.data === null) {
       throw new PsaiError('PROVIDER_BAD_RESPONSE', `LiblibAI ${uri} 没有返回 data`);
@@ -299,7 +321,8 @@ export class LiblibAdapter implements ProviderAdapter {
     const data = await this.post<{ generateUuid?: string }>(
       '/api/generate/comfyui/app',
       { templateUuid, generateParams },
-      Math.max(this.opts.timeoutMs, 60_000)
+      Math.max(this.opts.timeoutMs, 60_000),
+      ctx.signal
     );
     const uuid = data.generateUuid;
     if (!uuid) throw new PsaiError('PROVIDER_BAD_RESPONSE', 'LiblibAI 没有返回 generateUuid');
@@ -326,12 +349,40 @@ export class LiblibAdapter implements ProviderAdapter {
     const data = await this.post<{ generateUuid?: string }>(
       uri,
       { templateUuid, generateParams },
-      Math.max(this.opts.timeoutMs, 60_000)
+      Math.max(this.opts.timeoutMs, 60_000),
+      ctx.signal
     );
     const uuid = data.generateUuid;
     if (!uuid) throw new PsaiError('PROVIDER_BAD_RESPONSE', 'LiblibAI 没有返回 generateUuid');
     this.log.info('LiblibAI 生图已提交', { jobId: ctx.jobId, templateUuid, uri, generateUuid: uuid });
     return { remoteId: `${RID_WEBUI}${uuid}` };
+  }
+
+  /**
+   * 认领时规范化任务号。
+   *
+   * LiblibAI 有两条产品线，状态接口不是同一个：
+   *   工作流（comfy）→ /api/generate/comfy/status
+   *   托管模型（webui）→ /api/generate/webui/status
+   * 我们靠 remoteId 的前缀区分。用户从平台后台抄回来的只是一个裸 uuid，
+   * 看不出是哪一条线 —— 猜错的话状态永远查不到，一条付过钱的任务被判成丢失。
+   * 所以要求用户连前缀一起给，并把常见的几种写法都认下来。
+   */
+  normalizeRemoteId(raw: string): string {
+    const v = raw.trim();
+    if (v.startsWith(RID_COMFY) || v.startsWith(RID_WEBUI)) return v;
+    // 用户可能只抄了产品线名字 + uuid，宽容一点认下来
+    const m = /^(comfy|workflow|webui|model)[:/\s-]+([0-9a-f]{16,})$/i.exec(v);
+    if (m) {
+      const kind = m[1]!.toLowerCase();
+      const uuid = m[2]!;
+      return kind === 'comfy' || kind === 'workflow' ? `${RID_COMFY}${uuid}` : `${RID_WEBUI}${uuid}`;
+    }
+    throw new PsaiError(
+      'JOB_PARAM_INVALID',
+      `LiblibAI 的任务号要标明是哪条产品线，因为两者的查询接口不同。` +
+        `工作流写成 ${RID_COMFY}<generateUuid>，托管模型写成 ${RID_WEBUI}<generateUuid>。收到的是「${v}」。`
+    );
   }
 
   private statusUri(remoteId: string): { uri: string; uuid: string } {
@@ -378,7 +429,7 @@ export class LiblibAdapter implements ProviderAdapter {
     }
   }
 
-  async fetchResults(remoteId: string): Promise<ResultImage[]> {
+  async fetchResults(remoteId: string, signal?: AbortSignal): Promise<ResultImage[]> {
     this.requireConfigured();
     const { uri, uuid } = this.statusUri(remoteId);
     const data = await this.post<LiblibStatus>(uri, { generateUuid: uuid }, Math.max(this.opts.timeoutMs, 60_000));
@@ -394,7 +445,7 @@ export class LiblibAdapter implements ProviderAdapter {
         this.log.warn('LiblibAI 有图未通过内容审核，已跳过', { generateUuid: uuid, auditStatus: img.auditStatus });
         continue;
       }
-      const res = await ensureOk(await httpFetch(url, { timeoutMs: 180_000 }), url);
+      const res = await ensureOk(await httpFetch(url, { timeoutMs: 180_000, ...(signal ? { signal } : {}) }), url);
       const ct = res.headers.get('content-type') ?? 'image/png';
       if (!ct.startsWith('image/')) continue;
       out.push({ buffer: Buffer.from(await res.arrayBuffer()), mime: ct.split(';')[0] ?? 'image/png' });
@@ -506,7 +557,14 @@ export function auditPassed(status: number | undefined): boolean {
  *   200001 model.notExist
  *   429    请求过多，请稍后重试
  */
-export function explainLiblibCode(code: number, msg: string, uri: string): PsaiError {
+export function explainLiblibCode(code: number, rawMsg: string, uri: string): PsaiError {
+  /*
+   * msg 是平台返回的业务错误文本 —— 外部来的，我们一个字都没参与拼装。
+   * 这个平台的鉴权整个在 URL 上，而它的错误消息里出现过完整请求路径
+   * （"No static resource api/generate/comfy/app" 就是把路径回显了出来）。
+   * 把它当可信文本直接拼进异常，等于给密钥开了一条自己没看住的出口。
+   */
+  const msg = sanitizeExternalText(rawMsg, 400);
   // 限流是"再等等"，不是失败。归到可重试，引擎会退避重试；
   // 判死的话用户看到的是一次莫名其妙的报错，手动重试一下又好了。
   //

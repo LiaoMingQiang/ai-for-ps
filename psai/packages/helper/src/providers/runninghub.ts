@@ -11,6 +11,7 @@
  */
 
 import { PsaiError, toErrorShape, rhPresetByWorkflowId } from '@psai/shared';
+import { checkUsableMask } from '../mask.js';
 import type { JobProgress, ProviderCapability, ComfyApiGraph } from '@psai/shared';
 import type {
   ProviderAdapter,
@@ -79,13 +80,20 @@ export class RunningHubAdapter implements ProviderAdapter {
     return ['workflow', 'textToImage', 'imageToImage', 'multiImageInput', 'progress', 'listModels'];
   }
 
-  private async post<T>(path: string, body: Record<string, unknown>, timeoutMs?: number): Promise<T> {
+  private async post<T>(
+    path: string,
+    body: Record<string, unknown>,
+    timeoutMs?: number,
+    signal?: AbortSignal
+  ): Promise<T> {
     const url = `${this.base()}${path}`;
     const res = await httpFetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Host: hostOf(this.base()) },
       body: JSON.stringify({ apiKey: this.opts.apiKey, ...body }),
-      timeoutMs: timeoutMs ?? this.opts.timeoutMs
+      timeoutMs: timeoutMs ?? this.opts.timeoutMs,
+      // 提交进行中被取消时中止请求 —— 那是唯一能真正省下这次费用的时机
+      ...(signal ? { signal } : {})
     });
     if (!res.ok) {
       const t = await res.text().catch(() => '');
@@ -139,7 +147,7 @@ export class RunningHubAdapter implements ProviderAdapter {
     throw new PsaiError('PROVIDER_UNSUPPORTED', 'RunningHub 以云端工作流为单位，没有可拉取的模型列表');
   }
 
-  async uploadImage(buf: Buffer, filename: string, mime: string): Promise<string> {
+  async uploadImage(buf: Buffer, filename: string, mime: string, signal?: AbortSignal): Promise<string> {
     this.requireConfigured();
     const url = `${this.base()}/task/openapi/upload`;
     const { body, contentType } = buildMultipart([
@@ -152,7 +160,9 @@ export class RunningHubAdapter implements ProviderAdapter {
         method: 'POST',
         headers: { 'Content-Type': contentType },
         body,
-        timeoutMs: Math.max(this.opts.timeoutMs, 120_000)
+        timeoutMs: Math.max(this.opts.timeoutMs, 120_000),
+        // 提交进行中被取消时中止请求 —— 那是唯一能真正省下这次费用的时机
+        ...(signal ? { signal } : {})
       }),
       url
     );
@@ -172,7 +182,7 @@ export class RunningHubAdapter implements ProviderAdapter {
    * 并且只把**真正改动过**的字段放进 nodeInfoList。
    * 同一个 workflowId 在进程内缓存，避免每次提交都多打一次接口。
    */
-  private async remoteGraph(workflowId: string): Promise<ComfyApiGraph> {
+  private async remoteGraph(workflowId: string, signal?: AbortSignal): Promise<ComfyApiGraph> {
     const cached = this.graphCache.get(workflowId);
     if (cached) return cached;
     const data = await this.post<{ prompt?: string }>('/api/openapi/getJsonApiFormat', { workflowId });
@@ -212,22 +222,65 @@ export class RunningHubAdapter implements ProviderAdapter {
       );
     }
 
-    if (preset?.needsMask && !ctx.inputs.some((i) => i.hasAlpha)) {
-      throw new PsaiError(
-        'JOB_PARAM_INVALID',
-        `「${preset.label}」靠输入图的 alpha 通道识别处理区域，但这次的输入图没有透明通道。` +
-          `请在 Photoshop 里先建立选区（或给图层加蒙版）再提交。`
-      );
+    if (preset?.needsMask) {
+      /*
+       * 这里要过两道，缺一不可。
+       *
+       * 第一道：这份 alpha **是不是**一次明确的选区遮罩。
+       *
+       *   「有没有 alpha 通道」根本不够格。透明背景的图层、抠过图的素材、
+       *   带透明边的 PNG —— 全都天生有 alpha，而且往往"有可编辑区"，
+       *   于是能轻松骗过任何只看像素的检查。
+       *   更要命的是选区遮罩**读失败**的那条路：界面会退回外接矩形并提示一句，
+       *   但图照样能提交 —— 如果这张图碰巧自带透明，那片天然透明
+       *   就会被当成用户圈的选区，模型去改一片他完全没碰过的地方。
+       *   用户要等花完钱、拿回结果才看得出不对，而那时候他只会觉得模型不行。
+       *
+       *   所以判据是资产上记着的那个事实：合成的时候真的收到过选区灰度。
+       *
+       * 第二道：这份遮罩里**有没有可编辑区**。
+       *
+       *   按这一族的约定（docs/RUNNINGHUB.md）透明处即处理区。
+       *   一张全不透明的图表达的是"整张都保留"，下游什么都不会做，
+       *   用户等几分钟拿回一张没变的图。
+       *   注意反过来那种（整张都可编辑）是**合法**的：
+       *   按外接矩形裁过之后，一个普通矩形选区就正好是整张都可编辑。
+       */
+      const declared = ctx.inputs.filter((i) => i.hasSelectionMask);
+      if (declared.length === 0) {
+        const strayAlpha = ctx.inputs.some((i) => i.hasAlpha);
+        throw new PsaiError(
+          'JOB_PARAM_INVALID',
+          `「${preset.label}」靠选区遮罩识别处理区域，但这次的输入图没有带上选区。` +
+            (strayAlpha
+              ? '（这张图虽然有透明通道，但那是它自己的透明度，不是你圈出来的区域 —— ' +
+                '拿它当选区用会改到你没碰过的地方。）'
+              : '') +
+            `请在 Photoshop 里先建立选区再捕获；如果刚才提示过「选区已按外接矩形处理」，` +
+            `说明遮罩没读上来，请重试一次捕获。`
+        );
+      }
+
+      const usable = declared.find((i) => checkUsableMask(i.buffer).ok);
+      if (!usable) {
+        const why = checkUsableMask(declared[0]!.buffer).reason;
+        throw new PsaiError(
+          'JOB_PARAM_INVALID',
+          `「${preset.label}」的输入图带了选区，但这份遮罩不可用：${why}。` +
+            `请重新建立选区再提交。`
+        );
+      }
     }
 
     // 输入图先传上去，拿到云端文件名再按绑定落位
     const values: BindingValues = { ...ctx.params };
     for (const img of ctx.inputs) {
-      const name = await this.uploadImage(img.buffer, img.filename, img.mime);
+      const name = await this.uploadImage(img.buffer, img.filename, img.mime, ctx.signal);
       for (const key of imageAliases(img.paramId, img.index)) values[key] = name;
     }
 
-    const graph = await this.remoteGraph(workflowId);
+    // 这一步会拉整份云端工作流（可能不小），同样归取消管
+    const graph = await this.remoteGraph(workflowId, ctx.signal);
     const { nodeInfoList, report } = bindingsToNodeInfoList(graph, bindings, values);
     if (report.skipped.length) {
       this.log.debug('部分云端绑定被跳过', { jobId: ctx.jobId, workflowId, skipped: report.skipped });
@@ -248,7 +301,8 @@ export class RunningHubAdapter implements ProviderAdapter {
     const data = await this.post<{ taskId?: string; taskStatus?: string }>(
       '/task/openapi/create',
       { workflowId, nodeInfoList },
-      Math.max(this.opts.timeoutMs, 60_000)
+      Math.max(this.opts.timeoutMs, 60_000),
+      ctx.signal
     );
     if (!data.taskId) throw new PsaiError('PROVIDER_BAD_RESPONSE', 'RunningHub 没有返回 taskId');
     this.log.info('RunningHub 已提交', {
@@ -259,6 +313,13 @@ export class RunningHubAdapter implements ProviderAdapter {
       覆盖字段数: nodeInfoList.length
     });
     return { remoteId: data.taskId };
+  }
+
+  /** 认领时规范化任务号。RunningHub 的 taskId 是一串纯数字。 */
+  normalizeRemoteId(raw: string): string {
+    const v = raw.trim();
+    if (/^[0-9]{6,}$/.test(v)) return v;
+    throw new PsaiError('JOB_PARAM_INVALID', `RunningHub 的任务号是一串数字（taskId），收到的是「${v}」。`);
   }
 
   async poll(remoteId: string): Promise<PollResult> {
@@ -285,7 +346,7 @@ export class RunningHubAdapter implements ProviderAdapter {
     }
   }
 
-  async fetchResults(remoteId: string): Promise<ResultImage[]> {
+  async fetchResults(remoteId: string, signal?: AbortSignal): Promise<ResultImage[]> {
     this.requireConfigured();
     const data = await this.post<Array<{ fileUrl?: string; fileType?: string }> | { files?: Array<{ fileUrl?: string }> }>(
       '/task/openapi/outputs',
@@ -297,7 +358,7 @@ export class RunningHubAdapter implements ProviderAdapter {
     for (const item of list) {
       const url = item.fileUrl;
       if (!url) continue;
-      const res = await ensureOk(await httpFetch(url, { timeoutMs: 180_000 }), url);
+      const res = await ensureOk(await httpFetch(url, { timeoutMs: 180_000, ...(signal ? { signal } : {}) }), url);
       const ct = res.headers.get('content-type') ?? 'image/png';
       if (!ct.startsWith('image/')) continue;
       out.push({ buffer: Buffer.from(await res.arrayBuffer()), mime: ct.split(';')[0] ?? 'image/png' });

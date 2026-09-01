@@ -22,6 +22,7 @@ process.on('warning', (w) => {
 });
 
 import { createServer } from 'node:http';
+import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import { resolve, dirname, join } from 'node:path';
 import { homedir } from 'node:os';
@@ -167,29 +168,57 @@ export async function startHelper(overrides: Partial<HelperConfig> = {}): Promis
   const server = app.server;
   events.attach(server as unknown as ReturnType<typeof createServer>);
 
-  // 端口以**实际绑上的**为准，不是以配置里写的为准。
-  // 配 0 的时候由系统分配一个空闲端口（测试要的就是这个：写死端口时，
-  // 上一次跑崩留下的进程会一直占着，后面每次跑都报 EADDRINUSE）。
-  // 配置里写死的端口这里拿到的就是同一个值，行为不变。
+  /*
+   * 端口以**实际绑上的**为准，不是以配置里写的为准。
+   * 配 0 的时候由系统分配一个空闲端口（测试要的就是这个：写死端口时，
+   * 上一次跑崩留下的进程会一直占着，后面每次跑都报 EADDRINUSE）。
+   * 配置里写死的端口这里拿到的就是同一个值，行为不变。
+   *
+   * 拿不到就**当场报错**，绝不退回 cfg.port。
+   *
+   * 这里踩过一次，而且极难查：老代码在 address() 返回 null 时退回
+   * cfg.port —— 而测试里 cfg.port 就是 0。于是 url 成了
+   * `http://127.0.0.1:0`，Helper 看起来"启动成功"，直到某个调用方
+   * 拿这个地址发请求，undici 抛一句 `bad port`。
+   * 那条报错出现在三层之外的某个用例里，跟真正的原因毫无关系 ——
+   * 表现是一批本来无关的用例集体变红，而且只在并发跑的时候偶尔出现。
+   *
+   * 一个起不来的 Helper 应该在这里就说清楚，而不是发一个坏地址出去。
+   */
   const addr = server.address();
-  const boundPort = addr && typeof addr === 'object' ? addr.port : cfg.port;
+  const boundPort = addr && typeof addr === 'object' ? addr.port : NaN;
+  if (!Number.isInteger(boundPort) || boundPort <= 0 || boundPort > 65535) {
+    await app.close().catch(() => undefined);
+    throw new Error(
+      `Helper 监听成功了，却拿不到实际绑定的端口（server.address() = ${JSON.stringify(addr)}）——` +
+        `无法给出可用地址，已中止启动。`
+    );
+  }
   cfg.port = boundPort;
 
   const url = `http://${cfg.host === '0.0.0.0' ? '127.0.0.1' : cfg.host}:${boundPort}`;
   log.info(`Helper 已就绪 ${url}`);
 
-  // 启动就探一次 ComfyUI，否则 /v1/health 在有人主动测试之前一直报"离线"，
-  // 面板状态条会对着一个其实好好的 ComfyUI 亮红灯。
-  const probed = providers
-    .probe('comfyui')
-    .then((s) => {
-      log.info('ComfyUI 探测', { online: s.online, baseUrl: s.baseUrl, reason: s.reason });
-    })
-    .catch(() => undefined);
+  /*
+   * 启动就探一次 ComfyUI，否则 /v1/health 在有人主动测试之前一直报"离线"，
+   * 面板状态条会对着一个其实好好的 ComfyUI 亮红灯。
+   *
+   * probeOnStart=false（临时实例）时整段跳过 —— 见 config.ts 里的说明：
+   * 新数据目录的默认地址就是用户本机真实 ComfyUI 的地址，
+   * 几十个测试 Helper 一起去敲它，既不可靠也不礼貌。
+   */
+  const probed = cfg.probeOnStart
+    ? providers
+        .probe('comfyui')
+        .then((s) => {
+          log.info('ComfyUI 探测', { online: s.online, baseUrl: s.baseUrl, reason: s.reason });
+        })
+        .catch(() => undefined)
+    : Promise.resolve(undefined);
 
   // 已配置的云 Provider 也预热一遍，把模型列表拉回缓存。
   // 不然重启之后设置页会退回「尚未拉取模型」，看起来像密钥没保存住。
-  const warmed = providers.warmupCloud().catch(() => undefined);
+  const warmed = cfg.probeOnStart ? providers.warmupCloud().catch(() => undefined) : Promise.resolve(undefined);
 
   // 恢复未完成的任务（先查远端，不重复提交）。
   // 不阻塞启动，但要留下句柄：关闭时必须等它跑完，否则会对着已关闭的数据库写。
@@ -345,6 +374,56 @@ async function runCli(argv: string[]): Promise<boolean> {
   }
 }
 
+/**
+ * 系统里配了代理吗（环境变量口径，和 curl 一致）。
+ *
+ * 只看 https/http/all，不看 NO_PROXY —— 后者是"哪些地址不走代理"，
+ * 由 Node 自己处理（本机 127.0.0.1 默认就在里面，所以本地 ComfyUI 不受影响）。
+ */
+function envProxy(): string | null {
+  for (const k of ['HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy', 'ALL_PROXY', 'all_proxy']) {
+    const v = process.env[k];
+    if (v && v.trim()) return v.trim();
+  }
+  return null;
+}
+
+/**
+ * 配了代理却没启用代理支持时，带着开关把自己重启一遍。
+ *
+ * 为什么必须这么做：Node 的 fetch（undici）**不认** HTTP_PROXY / HTTPS_PROXY
+ * 这些环境变量，curl 认。于是在一台配了代理的机器上：
+ *   curl https://ai.comfly.org/v1/models   → 1 秒，HTTP 401（只是缺 key）
+ *   Node fetch 同一个地址                  → 10 秒后 UND_ERR_CONNECT_TIMEOUT
+ * 界面上只会显示一句「无法连接到服务地址：fetch failed」——
+ * 用户会以为是 Key 填错了、或者平台挂了，然后把时间全花在错的地方。
+ * 实测就是这么发生的：设置页拉不到模型，生成页的闭源模型一个都选不了。
+ *
+ * Node 24 提供了 `NODE_USE_ENV_PROXY=1`，但它在**启动时**就被读走，
+ * 进程内 `process.env.x = '1'` 没有任何作用（试过）。所以只能重启自己。
+ *
+ * 用重启而不是"要求用户加环境变量启动"：装完双击就该能用，
+ * 不该要求用户知道这件事。exe 和 `node dist/index.js` 两条路都走得通，
+ * 因为 spawn 的是 process.execPath + 原样的 argv。
+ *
+ * PSAI_PROXY_REEXEC 是防打转的标记：重启过一次就不再重启，
+ * 哪怕开关没生效（比如 Node 版本太老不认这个变量）——
+ * 那时候宁可带着"连不上"跑，也不能反复 spawn。
+ */
+function reexecWithProxySupport(): boolean {
+  if (process.env['PSAI_PROXY_REEXEC'] === '1') return false;
+  if (process.env['NODE_USE_ENV_PROXY']) return false;
+  const proxy = envProxy();
+  if (!proxy) return false;
+
+  console.log(`检测到系统代理 ${proxy}，正在以代理模式重启 Helper（Node 的 fetch 默认不走代理）`);
+  const r = spawnSync(process.execPath, process.argv.slice(1), {
+    stdio: 'inherit',
+    env: { ...process.env, NODE_USE_ENV_PROXY: '1', PSAI_PROXY_REEXEC: '1' }
+  });
+  process.exit(r.status ?? 0);
+}
+
 const cliArgs = process.argv.slice(2);
 if (cliArgs.some((a) => a.startsWith('--'))) {
   runCli(cliArgs)
@@ -359,6 +438,8 @@ if (cliArgs.some((a) => a.startsWith('--'))) {
       process.exit(1);
     });
 } else if (shouldAutoStart()) {
+  // 起服务之前先处理代理 —— 必须在拿单实例锁之前，否则重启的那个进程会撞锁
+  reexecWithProxySupport();
   startHelper().catch((e) => {
     console.error('Helper 启动失败:', e instanceof Error ? e.message : String(e));
     process.exit(1);

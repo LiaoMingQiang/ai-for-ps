@@ -14,7 +14,15 @@ import { join } from 'node:path';
 
 import { startHelper } from '../dist/index.js';
 
-const PORT = 34215;
+/*
+ * 端口由系统分配，不写死。
+ *
+ * 写死有两个坑，第二个尤其阴：上一次跑崩留下的进程会一直占着；
+ * 而 Windows 上端口被占**未必**报 EADDRINUSE —— 可能就那么挂着，
+ * 整个套件一条输出都没有，报出来是一次超时，跟真正的原因毫无关系。
+ * 每次 startHelper 之后都要重新读一遍：重启拿到的是新端口。
+ */
+let PORT = 0;
 let helper;
 let dataDir;
 
@@ -33,7 +41,8 @@ async function withOrigin(path, origin, method = 'GET') {
 
 before(async () => {
   dataDir = mkdtempSync(join(tmpdir(), 'psai-cors-'));
-  helper = await startHelper({ dataDir, port: PORT, ephemeral: true });
+  helper = await startHelper({ dataDir, port: 0, ephemeral: true });
+  PORT = Number(new URL(helper.url).port);
 });
 
 after(async () => {

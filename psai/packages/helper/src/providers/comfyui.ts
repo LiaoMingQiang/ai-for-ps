@@ -49,6 +49,12 @@ interface ComfyQueue {
 export interface ComfyOptions {
   baseUrl: string;
   timeoutMs: number;
+  /**
+   * 用户声明这台 ComfyUI 只跑本插件的任务。
+   *
+   * 唯一的用处是决定敢不敢用 /interrupt —— 见 cancel() 里的长注释。
+   */
+  exclusive: boolean;
 }
 
 type ProgressListener = (p: JobProgress) => void;
@@ -187,7 +193,7 @@ export class ComfyUiAdapter implements ProviderAdapter {
 
   /* ---------------- 上传与提交 ---------------- */
 
-  async uploadImage(buf: Buffer, filename: string, mime: string): Promise<string> {
+  async uploadImage(buf: Buffer, filename: string, mime: string, signal?: AbortSignal): Promise<string> {
     const url = `${this.base()}/upload/image`;
     const { body, contentType } = buildMultipart([
       { name: 'image', filename, mime, data: buf },
@@ -199,7 +205,8 @@ export class ComfyUiAdapter implements ProviderAdapter {
         method: 'POST',
         headers: { 'Content-Type': contentType },
         body,
-        timeoutMs: Math.max(this.opts.timeoutMs, 60_000)
+        timeoutMs: Math.max(this.opts.timeoutMs, 60_000),
+        ...(signal ? { signal } : {})
       }),
       url
     );
@@ -217,7 +224,7 @@ export class ComfyUiAdapter implements ProviderAdapter {
     // 1. 输入图上传到 ComfyUI，替换成它认识的文件名
     const values: BindingValues = { ...ctx.params };
     for (const img of ctx.inputs) {
-      const name = await this.uploadImage(img.buffer, img.filename, img.mime);
+      const name = await this.uploadImage(img.buffer, img.filename, img.mime, ctx.signal);
       if (img.index === 0) values[img.paramId] = name;
       values[`${img.paramId}[${img.index}]`] = name;
     }
@@ -235,7 +242,8 @@ export class ComfyUiAdapter implements ProviderAdapter {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ prompt: graph, client_id: this.clientId }),
-      timeoutMs: Math.max(this.opts.timeoutMs, 60_000)
+      timeoutMs: Math.max(this.opts.timeoutMs, 60_000),
+      ...(ctx.signal ? { signal: ctx.signal } : {})
     });
     if (!res.ok) {
       // ComfyUI 的 400 会带完整的节点校验信息，原样透出去对排错至关重要
@@ -294,6 +302,27 @@ export class ComfyUiAdapter implements ProviderAdapter {
     return json[promptId] ?? null;
   }
 
+  /**
+   * 和 queue() 一样读队列，但**读不到就返回 null**。
+   *
+   * queue() 把失败吞成空数组，对轮询是对的（当作"暂时看不到"，下次再看）。
+   * 但取消要拿它当判据：空数组会被读成"没有任务在跑"，
+   * 而那正好会让守卫失效。这里必须能分清"没在跑"和"没看到"。
+   */
+  private async queueStrict(): Promise<{ running: string[]; pending: string[] } | null> {
+    const url = `${this.base()}/queue`;
+    try {
+      const res = await ensureOk(await httpFetch(url, { timeoutMs: this.opts.timeoutMs }), url);
+      const json = await jsonOf<ComfyQueue>(res, url);
+      return {
+        running: (json.queue_running ?? []).map(promptIdOfQueueItem).filter((x): x is string => !!x),
+        pending: (json.queue_pending ?? []).map(promptIdOfQueueItem).filter((x): x is string => !!x)
+      };
+    } catch {
+      return null;
+    }
+  }
+
   private async queue(): Promise<{ running: string[]; pending: string[] }> {
     const url = `${this.base()}/queue`;
     try {
@@ -308,7 +337,7 @@ export class ComfyUiAdapter implements ProviderAdapter {
     }
   }
 
-  async fetchResults(remoteId: string): Promise<ResultImage[]> {
+  async fetchResults(remoteId: string, signal?: AbortSignal): Promise<ResultImage[]> {
     const hist = await this.history(remoteId);
     if (!hist) throw new PsaiError('PROVIDER_BAD_RESPONSE', `历史中找不到 ${remoteId}`);
     const out: ResultImage[] = [];
@@ -321,7 +350,7 @@ export class ComfyUiAdapter implements ProviderAdapter {
           type: img.type ?? 'output'
         });
         const url = `${this.base()}/view?${params.toString()}`;
-        const res = await ensureOk(await httpFetch(url, { timeoutMs: 120_000 }), url);
+        const res = await ensureOk(await httpFetch(url, { timeoutMs: 120_000, ...(signal ? { signal } : {}) }), url);
         const buf = Buffer.from(await res.arrayBuffer());
         out.push({ buffer: buf, mime: guessMime(img.filename) });
       }
@@ -330,13 +359,41 @@ export class ComfyUiAdapter implements ProviderAdapter {
     return out;
   }
 
+  /**
+   * 取消。
+   *
+   * ComfyUI 的 /interrupt **是全局的**：它中断的是"这台 ComfyUI 当前正在执行的
+   * 那一个任务"，而不是我们指定的那一个。
+   *
+   * 中间有过一版"先查 /queue，确认正在跑的就是这一条才发中断"。那不成立：
+   * 查完到发出去之间隔着一次网络往返，这期间 ComfyUI 完全可能已经切到
+   * 下一个任务上了（我们这条刚好跑完，队列里下一条顶上来）。
+   * 那一刀就砍在别人身上 —— 而且没有任何地方会报错：
+   * 我们收到 200、如实汇报"已中断"，用户以为取消成功了，
+   * 实际上被废掉的是他另一条正跑到一半的活。
+   * 一个快照授权不了一个全局副作用。
+   *
+   * 所以现在只认用户的明确声明（设置里的「这台 ComfyUI 只跑本插件」）。
+   * 没声明就如实说：排队中的能取消，已经在跑的取消不了。
+   * 这也正是 cancelSupport 里 queuedOnly 承诺的东西。
+   */
   async cancel(remoteId: string, currentState: RemoteState): Promise<CancelResult> {
     try {
       if (currentState === 'running') {
+        if (!this.opts.exclusive) {
+          return {
+            ok: false,
+            reason:
+              'ComfyUI 的中断接口是全局的，会打断这台机器上当前正在执行的任务 —— ' +
+              '未必是这一条。如果这台 ComfyUI 只跑本插件的任务，可在 设置 → 本地 ComfyUI ' +
+              '勾选「独占实例」后再取消；否则请等它跑完。'
+          };
+        }
         const url = `${this.base()}/interrupt`;
         await ensureOk(await httpFetch(url, { method: 'POST', timeoutMs: this.opts.timeoutMs }), url);
-        return { ok: true, reason: '已中断正在执行的任务' };
+        return { ok: true, reason: '已中断正在执行的任务（独占实例）' };
       }
+
       const url = `${this.base()}/queue`;
       await ensureOk(
         await httpFetch(url, {
@@ -347,10 +404,37 @@ export class ComfyUiAdapter implements ProviderAdapter {
         }),
         url
       );
+
+      /*
+       * 删完要回头确认它真的没了。
+       *
+       * ComfyUI 对 `{delete:[...]}` 一律回 200，**哪怕那个 id 根本不在队列里**。
+       * 只看状态码的话，一次什么也没删掉的调用会被汇报成"已取消"——
+       * 最常见的情形是：我们以为它在排队，其实它刚刚开始执行。
+       * 于是界面显示已取消，ComfyUI 把它跑完，显卡白烧一轮，
+       * 而结果会在下一次轮询时冒出来，撞上一条"已取消"的任务。
+       */
+      const after = await this.queueStrict();
+      if (after === null) {
+        return { ok: false, reason: '删除请求发出去了，但读不回队列，无法确认是否真的取消了' };
+      }
+      if (after.running.includes(remoteId)) {
+        return { ok: false, reason: '这条任务已经开始执行了，删队列对它没用；请等它跑完' };
+      }
+      if (after.pending.includes(remoteId)) {
+        return { ok: false, reason: '任务仍在 ComfyUI 的队列里，删除没有生效' };
+      }
       return { ok: true, reason: '已从队列中移除' };
     } catch (e) {
       return { ok: false, reason: toErrorShape(e).message };
     }
+  }
+
+  /** 认领时规范化任务号。ComfyUI 的 prompt_id 是一个 uuid。 */
+  normalizeRemoteId(raw: string): string {
+    const v = raw.trim();
+    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v)) return v;
+    throw new PsaiError('JOB_PARAM_INVALID', `ComfyUI 的任务号是 prompt_id（一个 uuid），收到的是「${v}」。`);
   }
 
   /* ---------------- WebSocket 进度 ---------------- */

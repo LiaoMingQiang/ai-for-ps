@@ -28,6 +28,16 @@ export interface ParamContext {
   set(paramId: string, value: unknown): void;
   /** 运行时可选项（采样器/调度器/模型…），来自 Provider 实时能力 */
   options: Record<string, string[]>;
+  /** 模型列表还在路上。界面据此说"正在载入"而不是"尚未拉取" */
+  modelsLoading?: boolean;
+  /**
+   * 这个平台**根本没有模型目录**（比如 RunningHub 以工作流为单位）。
+   *
+   * 和"拉取失败"是两回事：失败可以重试，而这个平台再拉一百次也不会有列表。
+   * 摆一个永远只有「尚未拉取模型列表」的下拉，就是一个转不动的旋钮 ——
+   * 用户会一直去点「拉取模型」，而真正该改的是设置里的工作流绑定。
+   */
+  modelsUnsupported?: { reason: string } | null;
   /** 模型下拉的口径说明：筛之前一共多少个、实际用上的是哪一档 */
   modelsMeta?: { total: number; scope: string } | null;
   /** 这个功能有没有输入图 —— 没有输入图就没有「原图尺寸」可跟随 */
@@ -249,7 +259,9 @@ function renderPresetPrompt(spec: Extract<ParamSpec, { kind: 'presetPrompt' }>, 
   }
 
   const toggle = spec.toggleable
-    ? h('button', {
+    ? h(
+        'button',
+        {
         class: `switch ${current.enabled ? 'on' : ''}`,
         type: 'button',
         role: 'switch',
@@ -263,7 +275,10 @@ function renderPresetPrompt(spec: Extract<ParamSpec, { kind: 'presetPrompt' }>, 
           btn.setAttribute('aria-checked', String(next));
           toggleClass(preview, 'dim', !next);
         }
-      })
+        },
+        // 滑块是真实子元素，不靠 ::after —— 见 app.css 里的说明
+        h('span', { class: 'switch-knob' })
+      )
     : null;
 
   const preview = h('div', { class: `preset-preview ${current.enabled ? '' : 'dim'}` });
@@ -481,22 +496,44 @@ function renderSegmented(spec: Extract<ParamSpec, { kind: 'segmented' }>, ctx: P
 
 function renderToggle(spec: Extract<ParamSpec, { kind: 'toggle' }>, ctx: ParamContext): HTMLElement {
   const current = Boolean(ctx.get(spec.id) ?? spec.defaultValue);
-  const btn = h('button', {
-    class: `switch ${current ? 'on' : ''}`,
-    type: 'button',
-    role: 'switch',
-    'aria-checked': String(current),
-    onclick: () => {
-      const next = !btn.classList.contains('on');
-      toggleClass(btn, 'on', next);
-      btn.setAttribute('aria-checked', String(next));
-      ctx.set(spec.id, next);
-    }
-  });
+  const btn = h(
+    'button',
+    {
+      class: `switch ${current ? 'on' : ''}`,
+      type: 'button',
+      role: 'switch',
+      'aria-checked': String(current),
+      onclick: () => {
+        const next = !btn.classList.contains('on');
+        toggleClass(btn, 'on', next);
+        btn.setAttribute('aria-checked', String(next));
+        ctx.set(spec.id, next);
+      }
+    },
+    h('span', { class: 'switch-knob' })
+  );
   return field(spec, btn);
 }
 
 function renderModel(spec: Extract<ParamSpec, { kind: 'model' }>, ctx: ParamContext): HTMLElement {
+  /*
+   * 平台没有模型目录时，不画下拉，直接说清楚该去哪儿改。
+   *
+   * 这一档必须先判：它不是"还没拉到"，而是"这里根本不按模型选"。
+   * 画一个空下拉等于让用户对着一个不会有内容的控件反复尝试。
+   */
+  if (ctx.modelsUnsupported) {
+    return field(
+      spec,
+      h(
+        'div',
+        { class: 'model-pick' },
+        h('div', { class: 'muted' }, ctx.modelsUnsupported.reason),
+        h('div', { class: 'muted hint' }, '这个功能用哪份工作流，在「设置 → 固定功能」里改。')
+      )
+    );
+  }
+
   const models = ctx.options['models'] ?? [];
   const current = String(ctx.get(spec.id) ?? spec.defaultValue);
   const select = h('select', {
@@ -504,7 +541,18 @@ function renderModel(spec: Extract<ParamSpec, { kind: 'model' }>, ctx: ParamCont
     onchange: (e: Event) => ctx.set(spec.id, (e.target as HTMLSelectElement).value)
   }) as HTMLSelectElement;
 
-  const placeholder = h('option', { value: '' }, models.length ? '（使用默认模型）' : '（尚未拉取模型列表）') as HTMLOptionElement;
+  /*
+   * 三种说法要分清楚，因为用户该做的事完全不同：
+   *   有列表     → 可以直接选，或者用默认
+   *   正在载入   → 等一下就好（闭源模型那条路实测要十几秒）
+   *   拉过但没有 → 需要去设置里配置或重新拉取
+   * 一律说"尚未拉取"的话，正在载入的那十几秒里用户会跑去设置页折腾。
+   */
+  const placeholder = h(
+    'option',
+    { value: '' },
+    models.length ? '（使用默认模型）' : ctx.modelsLoading ? '（正在载入模型列表…）' : '（尚未拉取模型列表）'
+  ) as HTMLOptionElement;
   if (!current) placeholder.setAttribute('selected', '');
   select.appendChild(placeholder);
   // 当前值不在筛选后的列表里也要列出来，否则用户会以为自己没选过

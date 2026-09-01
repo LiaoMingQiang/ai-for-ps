@@ -19,6 +19,32 @@ export interface PickedImage {
   /** 选区来源时记录，供写回原位使用 */
   selectionBounds: { left: number; top: number; right: number; bottom: number } | null;
   previewSrc: string;
+  /**
+   * 这张图是从哪个 Photoshop 文档取的。
+   *
+   * 提交时要拿它和**当前**文档比一比。两者可以不一样，而且很容易不一样：
+   * 用户从 A 取了图，中间切到 B，然后点了「开始处理」——
+   * 输入是 A 的内容，而写回目标会被冻结成 B。结果就是 A 的图被贴进 B 的文档，
+   * 而两边都不会报错。
+   *
+   * 非 Photoshop 来源（上传、粘贴）为 null —— 那种图本来就不属于任何文档。
+   */
+  sourceDocumentId: number | null;
+  sourceDocumentName: string | null;
+  /**
+   * 取图那一刻文档的**耐久身份**，光靠 id 是不够的。
+   *
+   * Photoshop 的文档 id 在文档关掉之后会被回收：用户关掉 A、新建一份 B，
+   * B 完全可能拿到 A 的旧编号。只比 id 的话，这时候"输入图和当前文档
+   * 对不上"这道检查会**放行** —— 然后 A 的内容被贴进 B 的文档，
+   * 而 B 可能是另一个客户的稿子。
+   *
+   * 存过盘的比路径（最硬的凭据），没存过的比文件名 + 画布尺寸。
+   * 都是取图那一刻记下来的，之后不再变。
+   */
+  sourceDocumentPath: string | null;
+  sourceCanvasWidth: number | null;
+  sourceCanvasHeight: number | null;
 }
 
 export interface ImageInputHandle {
@@ -69,14 +95,31 @@ export function createImageInput(
     status.appendChild(h('span', { class: 'err' }, msg));
   }
 
-  async function addBytes(bytes: ArrayBuffer, name: string, source: InputSource, selectionBounds: PickedImage['selectionBounds']): Promise<void> {
+  async function addBytes(
+    bytes: ArrayBuffer,
+    name: string,
+    source: InputSource,
+    selectionBounds: PickedImage['selectionBounds'],
+    mask?: { gray: Uint8Array; width: number; height: number } | null,
+    sourceDoc?: { id: number; name: string; path: string; width: number; height: number } | null
+  ): Promise<void> {
     if (images.length >= max) {
       setError(`最多 ${max} 张，请先移除一张再添加`);
       return;
     }
     setBusy('上传中…');
     try {
-      const asset = await api.uploadAsset(bytes, name);
+      const asset = await api.uploadAsset(bytes, name, 'image/png', mask);
+      /*
+       * 遮罩体检没过要当场说。
+       *
+       * 全不透明（选区丢了）和全透明（空选区）这两种，下游都不会报错 ——
+       * 前者整张重画、后者什么都不改，用户要等几分钟、花完钱才发现不对，
+       * 而且多半会归咎于模型。在这里说一句，代价是零。
+       */
+      if (asset.maskCheck && !asset.maskCheck.ok) {
+        toast('选区遮罩不可用', asset.maskCheck.reason ?? '', 'warn');
+      }
       // 输入区的预览框也就一百多像素高，同样用缩略图
       const previewSrc = await assetImgSrc(asset.id, { thumb: true });
       const picked: PickedImage = {
@@ -86,7 +129,12 @@ export function createImageInput(
         bytes: asset.bytes,
         source,
         selectionBounds,
-        previewSrc
+        previewSrc,
+        sourceDocumentId: sourceDoc?.id ?? null,
+        sourceDocumentName: sourceDoc?.name ?? null,
+        sourceDocumentPath: sourceDoc?.path ?? null,
+        sourceCanvasWidth: sourceDoc?.width ?? null,
+        sourceCanvasHeight: sourceDoc?.height ?? null
       };
       images = multi ? [...images, picked] : [picked];
       render();
@@ -110,7 +158,37 @@ export function createImageInput(
       if (source === 'layer') snap = await bridge.captureActiveLayers();
       else if (source === 'selection') snap = await bridge.captureSelection();
       else snap = await bridge.captureMergedVisible();
-      await addBytes(snap.bytes, `${source}.png`, source, snap.selectionBounds);
+
+      /*
+       * 取不到遮罩时如实说一声，而且要说清**为什么**。
+       *
+       * 这时候选区退化成了外接矩形，羽化和不规则形状都没了。
+       * 老版本没接口是环境限制，用户改不了；而接口报错、尺寸对不上
+       * 是出了问题，值得他看一眼 —— 混成同一句话的话，
+       * 真正的故障会被当成"我这版 Photoshop 就这样"而长期无人察觉。
+       */
+      if (source === 'selection' && !snap.maskGray) {
+        toast(
+          '选区已按外接矩形处理',
+          `${snap.maskUnavailable ?? '取不到选区遮罩'} —— 羽化与不规则形状不会保留`,
+          'warn'
+        );
+      }
+      await addBytes(
+        snap.bytes,
+        `${source}.png`,
+        source,
+        snap.selectionBounds,
+        snap.maskGray ? { gray: snap.maskGray, width: snap.maskWidth, height: snap.maskHeight } : null,
+        // 身份要在**取图这一刻**记全：id 会被回收，路径和画布尺寸不会
+        {
+          id: snap.context.documentId,
+          name: snap.context.documentName,
+          path: snap.context.documentPath,
+          width: snap.context.width,
+          height: snap.context.height
+        }
+      );
     } catch (e) {
       const msg = e instanceof bridge.BridgeError ? e.message : e instanceof Error ? e.message : String(e);
       setError(msg);

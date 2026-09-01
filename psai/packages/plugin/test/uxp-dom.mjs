@@ -121,7 +121,15 @@ class Element extends Node {
     this.classList = new ClassList(this);
     this.style = new Style();
     this.listeners = new Map();
-    this.value = '';
+    /*
+     * 这里**不能**写 `this.value = ''`。
+     *
+     * 那会走 setter、把 _value 钉成空串，于是下面的 getter 里
+     * `_value ?? getAttribute('value')` 永远短路在空串上 ——
+     * 一个 `h('input', { value: x })` 画出来的输入框，读出来是 ''。
+     * 真实 DOM 的规矩是"用户没动过就跟着 value 属性走"（dirty value flag），
+     * 让 _value 保持 undefined 才对得上。
+     */
     this.checked = false;
     this.disabled = false;
     this.selected = false;
@@ -140,7 +148,16 @@ class Element extends Node {
    * 桩里如果只存一个空串，页面会以为"什么都没选"，测出来的通过是假的。
    */
   get value() {
-    if (this.tagName !== 'SELECT') return this._value ?? '';
+    /*
+     * 没被用户改过的 input，`.value` 反映的是 `value` **属性** ——
+     * 真实 DOM（含 UXP）就是这样，页面正是靠 `h('input', { value: x })`
+     * 把当前值画出来的。
+     *
+     * 桩里原来只认 `_value`（只有 setter 写过才有），于是一个刚画出来的
+     * 输入框读出来永远是空串 —— 任何"控件显示的是不是正确的值"这类断言
+     * 都变成了空的：它们对着一个必定为 '' 的东西比，怎么写都过。
+     */
+    if (this.tagName !== 'SELECT') return this._value ?? this.getAttribute('value') ?? '';
     if (this._value !== undefined && this._value !== '') return this._value;
     const opts = this.querySelectorAll('option');
     const picked = opts.find((o) => o.hasAttribute('selected')) ?? opts[0];

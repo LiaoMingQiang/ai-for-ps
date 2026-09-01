@@ -73,7 +73,19 @@ export interface ProviderDescriptor {
   description: string;
   /** 出厂是否列在「推荐平台」区 */
   recommended: boolean;
-  /** 取消语义：某些云 Provider 官方没有取消接口，必须如实告知 */
+  /**
+   * 取消语义。必须如实告知 —— 用户是根据它决定"点了取消要不要还去平台上确认一遍"。
+   *
+   *   full       指定任务一定能取消
+   *   queuedOnly 排队中的一定能取消；已经在跑的看情况，不保证
+   *   none       平台根本没有取消接口
+   *
+   * ComfyUI 是 queuedOnly 而不是 full：它的 /interrupt 是**全局**的，
+   * 中断的是"这台机器当前正在执行的那一个"，而不是我们指定的那一个。
+   * 我们会先查队列、确认正在跑的就是这一条才敢发 —— 这在独占的 ComfyUI 上
+   * 等同于 full，但只要那台机器上还有别人（另一条我们的任务、
+   * 或者用户自己在网页里跑的活），已在执行的任务就取消不了。承诺不了就别承诺。
+   */
   cancelSupport: 'full' | 'queuedOnly' | 'none';
 }
 
@@ -90,7 +102,8 @@ export const PROVIDERS: readonly ProviderDescriptor[] = [
     defaultModel: null,
     description: '本地 / 远程 ComfyUI。所有 ComfyUI 分支的固定功能与自定义工作流都走它。',
     recommended: false,
-    cancelSupport: 'full'
+    // 见 cancelSupport 的说明：/interrupt 是全局的，只有独占实例才等同于 full
+    cancelSupport: 'queuedOnly'
   },
   {
     id: 'runninghub',

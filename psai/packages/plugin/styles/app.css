@@ -63,6 +63,19 @@ body {
   overflow: hidden;
 }
 
+/*
+ * 状态条和一级导航**不许被压缩**。
+ *
+ * 它们原来没有任何规则，在这个 overflow:hidden 的 flex 列里就是
+ * `flex: 0 1 auto` —— 可以被压到比内容还矮。状态条里那行文档信息
+ * （.status-doc）是换行显示的，一压就顶出去，正好糊在下面的页签上。
+ * 表现是"界面错位"，而看起来像是 CSS 写错了位置，其实是被挤的。
+ */
+.status-host,
+.nav-host {
+  flex: none;
+}
+
 /* ---------------- 状态条 ---------------- */
 
 .statusbar {
@@ -165,6 +178,12 @@ body {
 
 .page-host {
   flex: 1 1 auto;
+  /*
+   * flex 列里的经典坑：min-height 默认是 auto，子项不会缩到比内容更矮。
+   * 于是内容一多，page-host 就把状态条和导航挤出可视区，而不是自己滚动。
+   * 必须显式写 0。
+   */
+  min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
   padding: 10px 10px 14px;
@@ -564,10 +583,21 @@ body {
 }
 
 /* 开关 */
+/*
+ * 开关。
+ *
+ * 滑块是一个**真实的子元素**（.switch-knob），不是 ::after。
+ * 伪元素在 UXP 上不可靠，一旦不渲染，开关就退化成一个空的圆角框 ——
+ * 开和关看起来一模一样，而这里控制的是"结果要不要自动写进你的文档"
+ * 这种不能猜的事。宁可多一个 span，也不赌平台。
+ *
+ * 尺寸和对比度也调大了：关着是灰底灰点，开着是实心强调色 + 白点，
+ * 隔着一米也分得出来。
+ */
 .switch {
-  width: 38px;
-  height: 21px;
-  border-radius: 11px;
+  width: 46px;
+  height: 26px;
+  border-radius: 13px;
   border: 1px solid var(--line);
   background: var(--bg);
   position: relative;
@@ -575,23 +605,42 @@ body {
   flex: none;
   padding: 0;
 }
-.switch::after {
-  content: "";
+.switch-knob {
   position: absolute;
-  top: 2px;
-  left: 2px;
-  width: 15px;
-  height: 15px;
+  top: 3px;
+  left: 3px;
+  width: 18px;
+  height: 18px;
   border-radius: 50%;
   background: var(--text-3);
   transition: left 0.14s ease, background 0.14s ease;
 }
 .switch.on {
-  background: var(--accent-soft);
+  background: var(--accent);
   border-color: var(--accent);
 }
+.switch.on .switch-knob {
+  left: 22px;
+  background: #fff;
+}
+.switch:hover {
+  border-color: var(--accent);
+}
+/* 保底：万一哪个开关漏了子元素，也别是个空框 */
+.switch::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--text-3);
+  transition: left 0.14s ease, background 0.14s ease;
+}
 .switch.on::after {
-  left: 19px;
+  left: 22px;
+  background: #fff;
   background: var(--accent);
 }
 
@@ -1429,10 +1478,37 @@ body {
   color: var(--text);
   font-weight: 600;
 }
-.binding-row .select,
-.binding-row .input,
-.binding-row .rh-picker {
-  flex: 1 1 130px;
+/*
+ * 摘要那一行：功能名占一整行，下面一行是"走谁 · 用哪份"加状态和按钮。
+ * 收起状态下这是用户唯一看得到的信息，所以要能独立看懂。
+ */
+.binding-sum {
+  flex: 1 1 100%;
+  font-size: 11px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/*
+ * 展开后的控件区。整行独占，控件竖着排 ——
+ * 面板很窄，横向挤三个下拉只会各自缩到看不清标签。
+ */
+.binding-slot {
+  flex: 1 1 100%;
+  min-width: 0;
+}
+.binding-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 6px 0 2px;
+}
+.binding-edit .select,
+.binding-edit .input,
+.binding-edit .rh-picker {
+  width: 100%;
   min-width: 0;
 }
 
@@ -1552,6 +1628,50 @@ body {
 .hist-thumb-none {
   color: var(--text-3);
 }
+
+/*
+ * 一次出好几张时，缩略图排成一条可横向滚动的带子。
+ *
+ * 面板很窄（最窄 300px 上下），四五张排开一定放不下。
+ * 换行会把每一行的高度撑起来，历史列表就变成一堵墙；
+ * 横向滚动至少让这一行还是一行。
+ */
+.hist-thumbs {
+  flex: none;
+  display: flex;
+  gap: 4px;
+  max-width: 150px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+.hist-thumb-cell {
+  flex: none;
+  width: 46px;
+  height: 46px;
+  padding: 0;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  background: var(--bg);
+  overflow: hidden;
+  cursor: pointer;
+}
+/* 只有一张时不需要"选中"这个概念，边框保持中性 */
+.hist-thumbs .hist-thumb-cell.chosen {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+/* 只有一张时，外层 .hist-thumb 已经有边框了，里面那个按钮别再画一层 */
+.hist-thumb .hist-thumb-cell {
+  border: none;
+  width: 100%;
+  height: 100%;
+}
+.hist-thumb-cell img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
 .hist-meta {
   flex: 1 1 auto;
   min-width: 0;
@@ -1571,6 +1691,47 @@ body {
   display: flex;
   gap: 5px;
   flex-wrap: wrap;
+}
+/* 「提交结果未知」的处置面板：这条要显眼，它是唯一一处点错会花钱的地方 */
+.hist-resolve {
+  border: 1px solid var(--warn);
+  border-radius: var(--radius-sm);
+  padding: 8px 9px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.hist-resolve-warn {
+  margin: 0;
+  font-size: 10.5px;
+  line-height: 1.55;
+  color: var(--warn);
+}
+.hist-resolve-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.hist-resolve-row .input {
+  flex: 1 1 160px;
+  min-width: 0;
+}
+.hist-resolve .checkline {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10.5px;
+  color: var(--text-2);
+  flex: 1 1 180px;
+}
+.hist-resolve button[disabled] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.hist-resolve button[disabled]:hover {
+  border-color: var(--line);
+  color: var(--text-2);
 }
 .hist-detail {
   border-top: 1px solid var(--line-soft);
@@ -1649,9 +1810,18 @@ body {
 .comfy-bar .input {
   flex: 1 1 180px;
 }
+/*
+ * ComfyUI 内嵌区。
+ *
+ * 高度用**显式像素**，不用 flex 或 vh：这一块要能被用户拖着调，
+ * 而拖动只能改一个确定的值；靠 flex 分配的话拖了也看不出变化。
+ * 默认给足（640px）——原来 420px 的下限在一块很高的面板里显得很局促，
+ * 而 ComfyUI 的画布本来就需要地方。
+ */
 .comfy-frame {
-  flex: 1 1 auto;
-  min-height: 420px;
+  flex: none;
+  height: 640px;
+  min-height: 220px;
   border: 1px solid var(--line);
   border-radius: var(--radius);
   overflow: hidden;
@@ -1660,8 +1830,27 @@ body {
 .comfy-webview {
   width: 100%;
   height: 100%;
-  min-height: 420px;
   border: none;
+}
+/* 拖动条：贴在内嵌区下沿，按住上下拖改高度 */
+.comfy-resize {
+  flex: none;
+  height: 14px;
+  margin: 2px 0 6px;
+  border-radius: 7px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  cursor: ns-resize;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-3);
+  font-size: 10px;
+  user-select: none;
+}
+.comfy-resize:hover {
+  border-color: var(--accent);
+  color: var(--accent);
 }
 .psai-comfyweb .page-host {
   padding-bottom: 10px;
@@ -1837,11 +2026,13 @@ summary:focus-visible {
 .setting > *,
 .provider > *,
 .bindings > *,
+.binding-edit > *,
 .wf-list > *,
 .wf-import > *,
 .preset-list > *,
 .history-list > *,
 .hist-row > *,
+.hist-resolve > *,
 .hist-detail > *,
 .prompt-breakdown > *,
 .rh-picker > *,

@@ -26,6 +26,14 @@ export interface AssetRecord {
   kind: AssetKind;
   createdAt: number;
   refCount: number;
+  /**
+   * alpha 通道是不是一次**明确的选区遮罩**。
+   *
+   * 只有上传时真的带了选区灰度、并且合成进 alpha 的那一张才是 true。
+   * 天然带透明的图（透明背景图层、抠过的素材、带透明边的 PNG）是 false ——
+   * 它们同样有 alpha 通道，但那不是用户圈出来的处理区。
+   */
+  hasSelectionMask: boolean;
 }
 
 const MAX_BYTES = 64 * 1024 * 1024;
@@ -44,7 +52,11 @@ export class AssetStore {
     private readonly assetsDir: string
   ) {}
 
-  put(buf: Buffer, kind: AssetKind = 'input'): AssetRecord {
+  /**
+   * @param opts.selectionMask 这份字节的 alpha 是不是一次明确的选区遮罩。
+   *   传 true 的只有一处：/v1/assets 真的收到了选区灰度并合成过。
+   */
+  put(buf: Buffer, kind: AssetKind = 'input', opts: { selectionMask?: boolean } = {}): AssetRecord {
     if (buf.length === 0) throw new PsaiError('ASSET_UNSUPPORTED_TYPE', '空文件');
     if (buf.length > MAX_BYTES) {
       throw new PsaiError('ASSET_TOO_LARGE', `${(buf.length / 1048576).toFixed(1)}MB 超过 64MB 上限`);
@@ -58,6 +70,19 @@ export class AssetStore {
       | Record<string, unknown>
       | undefined;
     if (existing) {
+      /*
+       * 去重命中。这时候要补一件事：这次带着选区遮罩来，
+       * 而库里那条旧记录可能是"当初没带遮罩"存下的。
+       *
+       * 内容寻址保证字节完全一样，所以"这份 alpha 是选区遮罩"这个事实
+       * 对两条路径同样成立 —— 之前只是没人告诉过我们。补上，
+       * 否则用户重新捕获一次同样的选区，反而会被判成"没有可用遮罩"。
+       * 反方向不做：从来不把 true 改回 false。
+       */
+      if (opts.selectionMask && Number(existing['has_selection_mask']) !== 1) {
+        this.db.prepare('UPDATE assets SET has_selection_mask = 1 WHERE sha256 = ?').run(sha);
+        existing['has_selection_mask'] = 1;
+      }
       const rec = rowToAsset(existing);
       // 文件被外部删掉时补写回去，保证记录与磁盘一致
       const abs = join(this.assetsDir, rec.relPath);
@@ -77,10 +102,11 @@ export class AssetStore {
     const now = Date.now();
     this.db
       .prepare(
-        `INSERT INTO assets(id, sha256, mime, bytes, width, height, rel_path, kind, created_at, ref_count)
-         VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`
+        `INSERT INTO assets(id, sha256, mime, bytes, width, height, rel_path, kind, created_at, ref_count,
+                            has_selection_mask)
+         VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`
       )
-      .run(id, sha, meta.mime, buf.length, meta.width, meta.height, relPath, kind, now);
+      .run(id, sha, meta.mime, buf.length, meta.width, meta.height, relPath, kind, now, opts.selectionMask ? 1 : 0);
 
     return {
       id,
@@ -92,7 +118,8 @@ export class AssetStore {
       relPath,
       kind,
       createdAt: now,
-      refCount: 0
+      refCount: 0,
+      hasSelectionMask: !!opts.selectionMask
     };
   }
 
@@ -170,6 +197,7 @@ function rowToAsset(r: Record<string, unknown>): AssetRecord {
     relPath: String(r['rel_path']),
     kind: String(r['kind']) as AssetKind,
     createdAt: Number(r['created_at']),
-    refCount: Number(r['ref_count'])
+    refCount: Number(r['ref_count']),
+    hasSelectionMask: Number(r['has_selection_mask'] ?? 0) === 1
   };
 }

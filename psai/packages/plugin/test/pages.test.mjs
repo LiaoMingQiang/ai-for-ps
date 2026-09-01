@@ -88,7 +88,10 @@ async function bundlePagesForTest(outfile) {
 
 before(async () => {
   dataDir = mkdtempSync(join(tmpdir(), 'psai-pages-'));
-  helper = await startHelper({ port: 0, dataDir, workflowsDir: resolve(here, '../../../workflows') });
+  // ephemeral：临时实例一律不探宿主机。新数据目录的默认 ComfyUI 地址
+  // 就是用户本机真实 ComfyUI（127.0.0.1:8188），十几个测试 Helper
+  // 一起去敲它，既不可靠也不礼貌 —— 见 config.ts 里 probeOnStart 的说明。
+  helper = await startHelper({ port: 0, dataDir, ephemeral: true, workflowsDir: resolve(here, '../../../workflows') });
   PORT = Number(new URL(helper.url).port);
 
   dom = installUxpDom();
@@ -202,6 +205,18 @@ test('设置页在绑定 RunningHub 时画出预设选择器而不是裸输入�
   assert.ok(tab, '找不到「固定功能」页签');
   tab.dispatchEvent({ type: 'click' });
   // 页签切换是异步重绘，等一轮微任务 + 网络往返
+  await new Promise((r) => setTimeout(r, 300));
+
+  /*
+   * 绑定行的控件是**按需建**的（收起状态下一个下拉都不建，
+   * 否则 13 行几百个节点会让真机滚动时重绘不过来）。
+   * 所以要先点开那一行，选择器才存在。
+   */
+  const edits = host.querySelectorAll('button').filter((b) => b.textContent === '编辑');
+  assert.ok(edits.length > 0, '每行应该有「编辑」按钮');
+  // 全部展开："白底图"这三个字同时出现在 ComfyUI 的抠图功能和云端那条上，
+  // 按文字挑行会挑错。直接全开，再断言 RunningHub 的选择器存在。
+  for (const b of edits) b.dispatchEvent({ type: 'click', target: b, currentTarget: b });
   await new Promise((r) => setTimeout(r, 300));
 
   const picker = host.querySelector('.rh-picker');

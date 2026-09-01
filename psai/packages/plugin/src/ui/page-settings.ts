@@ -19,7 +19,7 @@ import {
   BINDABLE_PARAMS,
   SEMANTIC_TO_PARAM
 } from '@psai/shared';
-import type { AppSettings, WritebackMode, ComfyMode } from '@psai/shared';
+import type { AppSettings, SettingsPatch, WritebackMode, ComfyMode } from '@psai/shared';
 import { h, clear, formatBytes, formatDuration, formatTime, toggleClass } from '../app/dom.js';
 import { api, ApiError, clearToken, ensurePaired, CLIENT_VERSION } from '../app/api.js';
 import type { ProviderView, WorkflowSummary, FeatureView } from '../app/api.js';
@@ -30,7 +30,27 @@ type Section = 'local' | 'cloud' | 'bindings' | 'workflows' | 'platforms' | 'def
 
 let section: Section = 'local';
 
+/** 分节的中文名，只用于报错文案。 */
+const SECTION_LABELS: Record<Section, string> = {
+  local: '本地',
+  cloud: '云端',
+  bindings: '固定功能',
+  workflows: '工作流',
+  platforms: '推荐平台',
+  defaults: '生成默认值',
+  about: '关于'
+};
+
+/**
+ * 当前挂着设置页的那个容器。
+ *
+ * 存一份是为了在"保存失败"之后能把这一页重画回真实状态 ——
+ * 那条路径不在任何一个控件的闭包里，拿不到 host。
+ */
+let currentHost: HTMLElement | null = null;
+
 export async function renderSettingsPage(host: HTMLElement): Promise<void> {
+  currentHost = host;
   clear(host);
   host.appendChild(h('header', { class: 'page-head' }, h('h2', { class: 'page-title' }, '设置')));
 
@@ -55,7 +75,30 @@ export async function renderSettingsPage(host: HTMLElement): Promise<void> {
           type: 'button',
           onclick: () => {
             section = t.id;
-            void renderSettingsPage(host);
+            /*
+             * 这里以前是 `void renderSettingsPage(host)`。
+             *
+             * 分节渲染里任何一处抛错，都会变成一条没人接的 rejection ——
+             * 用户看到的是**一片空白**，没有任何提示，也没法把错误告诉别人。
+             * 「固定功能」那一页就是这么消失的：页签在、标题在、内容没了。
+             *
+             * 空白比报错糟得多：报错至少说得出是哪儿坏了。
+             */
+            void renderSettingsPage(host).catch((e) => {
+              const body = host.querySelector('.settings-body');
+              const msg = e instanceof Error ? e.message : String(e);
+              if (body) {
+                clear(body);
+                body.appendChild(
+                  h(
+                    'div',
+                    { class: 'notice warn' },
+                    h('div', {}, `「${t.label}」这一页没能画出来：${msg}`),
+                    h('div', { class: 'muted' }, '这是个 bug，请把这句话反馈给开发者。')
+                  )
+                );
+              }
+            });
           }
         },
         t.label
@@ -65,31 +108,78 @@ export async function renderSettingsPage(host: HTMLElement): Promise<void> {
   host.appendChild(tabBar);
   host.appendChild(body);
 
+  /*
+   * 先放一个"正在载入"，再去取数据。
+   *
+   * 各分节都要 await 后端。慢一点（甚至挂住）时，这块本来是**一片空白**——
+   * 用户看不出是在加载、还是坏了、还是这一页本来就没内容。
+   * 实测 /v1/providers 要 435ms，闭源模型那条路更是十几秒；
+   * 而只要一直没回来，界面就一直空着，不给任何交代。
+   *
+   * 占位符先垫上，分节画完会把它整个换掉。
+   */
+  const loading = h('div', { class: 'muted pad' }, '正在载入…');
+  body.appendChild(loading);
+
   const settings = getState().settings ?? (await api.settings());
   setState({ settings });
+
+  /*
+   * 分节自己往 body 里 append。占位符要在**第一段内容画进去之前**移走，
+   * 否则会和真内容并排显示。各分节都是"算完再 append"，
+   * 所以在 switch 之前清掉最安全 —— 从这里到 append 之间没有 await。
+   */
+  const dropLoading = (): void => {
+    if (loading.parentElement === body) body.removeChild(loading);
+  };
 
   switch (section) {
     case 'local':
       await renderLocal(body, settings);
+      dropLoading();
       break;
     case 'cloud':
       await renderCloud(body, settings);
+      dropLoading();
       break;
     case 'bindings':
       await renderBindings(body);
+      dropLoading();
       break;
     case 'workflows':
       await renderWorkflows(body);
+      dropLoading();
       break;
     case 'platforms':
       await renderPlatforms(body);
+      dropLoading();
       break;
     case 'defaults':
       await renderDefaults(body, settings);
+      dropLoading();
       break;
     case 'about':
       await renderAbout(body);
+      dropLoading();
       break;
+  }
+
+  /*
+   * 兜底：分节跑完了，却什么都没画出来。
+   *
+   * 这不是假设 —— 「固定功能」真机上就是这样：没抛错、也没内容，
+   * 一片空白。空白说不出任何信息，用户没法反馈，我也没法查。
+   * 宁可摆一句难看的话，也不要让一页假装自己不存在。
+   */
+  if (body.children.length === 0) {
+    body.appendChild(
+      h(
+        'div',
+        { class: 'notice warn' },
+        h('div', {}, `「${SECTION_LABELS[section] ?? section}」这一节渲染完是空的。`),
+        h('div', { class: 'muted' }, '这是个 bug（不是没配置）。请把这句话反馈给开发者。')
+      )
+    );
   }
 }
 
@@ -107,9 +197,63 @@ function fieldRow(label: string, control: HTMLElement, hint?: string): HTMLEleme
   );
 }
 
-async function patch(patchObj: Partial<AppSettings>): Promise<void> {
-  const next = await api.patchSettings(patchObj);
-  setState({ settings: next });
+/**
+ * 存一项设置。
+ *
+ * **只传变了的那一个字段**，别把整组展开发上去。
+ *
+ * 这里踩过一次，而且很难发现：渲染时把 `settings.generation` 抓在闭包里，
+ * 每个控件 onchange 都发 `{ ...g, 我这一项: 新值 }`。而 `g` 是渲染那一刻的
+ * 快照 —— 改设置不触发重画，它永远不会更新。于是：
+ *
+ *   用户关掉「自动写回」→ 存下 false
+ *   用户接着改「图层命名模板」→ 整组里 autoWriteback 还是旧的 true
+ *   → 自动写回自己开回去了，而界面上那个开关还显示着"关"
+ *
+ * 下一次生成，图就自己进了他的文档 —— 他明明关过。
+ *
+ * Helper 按分组浅合并，所以逐字段发是安全的，也是唯一正确的做法。
+ */
+async function patch(patchObj: SettingsPatch): Promise<void> {
+  try {
+    const next = await api.patchSettings(patchObj);
+    setState({ settings: next });
+  } catch (e) {
+    /*
+     * 存不上必须说，而且要让界面退回真实状态。
+     *
+     * 原来这里一个 try 都没有：Helper 掉线、鉴权过期、参数被拒 ——
+     * 请求失败的 promise 直接变成一条没人接的 rejection，
+     * 用户什么都看不到，而那个控件还显示着他刚改的值。
+     * 他会以为存上了，然后对着一个**根本没生效**的设置继续用，
+     * 直到某天行为不对再回来找半天。
+     *
+     * 重画那一下也是必须的：光弹个提示、控件还停在假的新值上，
+     * 等于让界面继续骗人。重画会从 Helper 重新拉一份，
+     * 界面回到真正存着的样子。
+     */
+    const msg = e instanceof ApiError ? e.display : e instanceof Error ? e.message : String(e);
+    toast('设置没保存上', msg, 'error');
+    await refreshFromHelper();
+  }
+}
+
+/**
+ * 丢掉本地那份、从 Helper 重新拉一份，然后重画当前分节。
+ *
+ * 存失败之后必须走一趟：本地 store 里那份可能已经被别的成功修改
+ * 更新过，不能拿它当真 —— 要看的是 Helper 上真正存着的东西。
+ */
+async function refreshFromHelper(): Promise<void> {
+  try {
+    const fresh = await api.settings();
+    setState({ settings: fresh });
+  } catch {
+    // 连读都读不回来（Helper 掉线）——那就别再动界面了，
+    // 上面那条错误提示已经把情况说清楚了。
+    return;
+  }
+  if (currentHost) await renderSettingsPage(currentHost);
 }
 
 /* ---------------- 本地 ---------------- */
@@ -125,7 +269,7 @@ async function renderLocal(host: HTMLElement, settings: AppSettings): Promise<vo
           type: 'button',
           title: COMFY_MODE_HINTS[m],
           onclick: async () => {
-            await patch({ comfy: { ...settings.comfy, mode: m as ComfyMode } });
+            await patch({ comfy: { mode: m as ComfyMode } });
             await renderSettingsPage(host.parentElement as HTMLElement);
           }
         },
@@ -139,7 +283,7 @@ async function renderLocal(host: HTMLElement, settings: AppSettings): Promise<vo
     type: 'text',
     value: settings.comfy.baseUrl,
     onchange: async (e: Event) => {
-      await patch({ comfy: { ...settings.comfy, baseUrl: (e.target as HTMLInputElement).value.trim() } });
+      await patch({ comfy: { baseUrl: (e.target as HTMLInputElement).value.trim() } });
       toast('地址已保存');
     }
   });
@@ -179,7 +323,7 @@ async function renderLocal(host: HTMLElement, settings: AppSettings): Promise<vo
           value: settings.comfy.serverCommand,
           placeholder: '例如 python main.py',
           onchange: async (e: Event) =>
-            patch({ comfy: { ...settings.comfy, serverCommand: (e.target as HTMLInputElement).value } })
+            patch({ comfy: { serverCommand: (e.target as HTMLInputElement).value } })
         }),
         'Helper 会用它拉起 ComfyUI 进程'
       )
@@ -192,7 +336,7 @@ async function renderLocal(host: HTMLElement, settings: AppSettings): Promise<vo
           type: 'text',
           value: settings.comfy.serverWorkingDir,
           onchange: async (e: Event) =>
-            patch({ comfy: { ...settings.comfy, serverWorkingDir: (e.target as HTMLInputElement).value } })
+            patch({ comfy: { serverWorkingDir: (e.target as HTMLInputElement).value } })
         })
       )
     );
@@ -207,10 +351,38 @@ async function renderLocal(host: HTMLElement, settings: AppSettings): Promise<vo
         value: String(settings.comfy.timeoutMs),
         onchange: async (e: Event) => {
           const n = Number((e.target as HTMLInputElement).value.replace(/[^0-9]/g, '')) || 15000;
-          await patch({ comfy: { ...settings.comfy, timeoutMs: n } });
+          await patch({ comfy: { timeoutMs: n } });
         }
       }),
       '毫秒'
+    )
+  );
+
+  /*
+   * 「独占实例」。
+   *
+   * 唯一的作用是：允许取消**已经在执行**的任务。
+   * ComfyUI 的中断接口（/interrupt）是全局的 —— 它掐掉的是这台机器当前
+   * 正在跑的那一个，而不是我们指定的那一个。所以没有这个声明，
+   * 我们只敢取消还在排队的；一旦开跑就只能等它完。
+   *
+   * 不能靠"先查队列确认正在跑的就是这条"来代替：查完到发出去之间
+   * ComfyUI 完全可能已经切到下一个任务了，那一刀就砍在别人身上，
+   * 而且不会有任何地方报错。这种事只能由知道情况的人来担保。
+   */
+  const exclusiveBox = h('input', {
+    type: 'checkbox',
+    class: 'checkbox',
+    onchange: async (e: Event) => {
+      await patch({ comfy: { exclusive: (e.target as HTMLInputElement).checked } });
+    }
+  }) as HTMLInputElement;
+  exclusiveBox.checked = settings.comfy.exclusive === true;
+  items.push(
+    fieldRow(
+      '独占实例',
+      h('label', { class: 'checkline' }, exclusiveBox, '这台 ComfyUI 只跑本插件的任务'),
+      '勾选后才能取消已经在执行的任务：ComfyUI 的中断接口是全局的，共用时会打断别人正在跑的活'
     )
   );
 
@@ -275,9 +447,19 @@ async function renderBindings(host: HTMLElement): Promise<void> {
   );
   table.appendChild(head);
 
-  for (const f of features) {
-    if (f.id === 'comfy.custom') continue;
-
+  /*
+   * 每一行的控件**按需构建**。
+   *
+   * 全部一次性建出来的话：13 个功能 ×（后端下拉 + 工作流下拉 3~13 项
+   * + RunningHub 预设下拉 13 项）≈ 几百个节点，而且都是 <select>。
+   * 真机上滚动这一页会出现重绘残留 —— 行与行叠在一起、左右两列显示的
+   * 是不同滚动位置的内容。那是渲染器跟不上，不是布局算错，
+   * CSS 治不了，只能把要画的东西减下来。
+   *
+   * 现在每行先只有一句摘要，点「编辑」才把那一行的下拉建出来。
+   * 同一时刻通常只有一行是展开的。
+   */
+  const buildControls = (f: FeatureView): HTMLElement => {
     const providerSelect = h('select', {
       class: 'input select',
       onchange: async (e: Event) => {
@@ -385,15 +567,46 @@ async function renderBindings(host: HTMLElement): Promise<void> {
       )
     );
 
+    return h('div', { class: 'binding-edit' }, providerSelect, detailControl, actions);
+  };
+
+  for (const f of features) {
+    if (f.id === 'comfy.custom') continue;
+
+    const status = f.ready
+      ? h('span', { class: 'ok' }, '✅ 就绪')
+      : h('span', { class: 'warn', title: f.reason ?? '' }, `⚠ ${f.reason ?? '未配置'}`);
+
+    const slot = h('div', { class: 'binding-slot hidden' });
+    let built = false;
+
+    const editBtn = h(
+      'button',
+      {
+        class: 'btn-ghost',
+        type: 'button',
+        onclick: () => {
+          if (!built) {
+            slot.appendChild(buildControls(f));
+            built = true;
+          }
+          const nowHidden = slot.classList.contains('hidden');
+          toggleClass(slot, 'hidden', !nowHidden);
+          editBtn.textContent = nowHidden ? '收起' : '编辑';
+        }
+      },
+      '编辑'
+    );
+
     table.appendChild(
       h(
         'div',
         { class: 'binding-row' },
         h('span', { class: 'binding-feature' }, breadcrumb(f.id).slice(1).join(' / ')),
-        providerSelect,
-        detailControl,
+        h('span', { class: 'binding-sum muted' }, bindingSummary(f, workflows)),
         status,
-        actions
+        editBtn,
+        slot
       )
     );
   }
@@ -665,7 +878,9 @@ function providerCard(p: ProviderView, host: HTMLElement): HTMLElement {
         await api.patchProvider(p.id, { enabled: next });
         toggleClass(e.currentTarget as HTMLElement, 'on', next);
       }
-    }
+    },
+    // 滑块必须是**真实子元素**，不能靠 ::after —— 见 app.css 里的说明
+    h('span', { class: 'switch-knob' })
   );
 
   const actions = h('div', { class: 'row gap' });
@@ -839,7 +1054,17 @@ function providerCard(p: ProviderView, host: HTMLElement): HTMLElement {
     fieldRow('默认模型', modelSelect),
     actions,
     result,
-    p.cancelSupport === 'none' ? h('div', { class: 'muted small' }, '该平台不支持取消已提交的任务') : null
+    p.cancelSupport === 'none' ? h('div', { class: 'muted small' }, '该平台不支持取消已提交的任务') : null,
+    // queuedOnly 也得说 —— 用户点了"取消"却没取消掉时，得知道这是已知限制而不是坏了
+    p.cancelSupport === 'queuedOnly'
+      ? h(
+          'div',
+          { class: 'muted small' },
+          p.id === 'comfyui'
+            ? '排队中的任务可以取消；已经在执行的只有在这台 ComfyUI 只跑本插件的任务时才能中断（它的中断接口是全局的）'
+            : '排队中的任务可以取消；已经在执行的不保证'
+        )
+      : null
   );
 }
 
@@ -860,7 +1085,7 @@ async function renderDefaults(host: HTMLElement, settings: AppSettings): Promise
 
   const modeSelect = h('select', {
     class: 'input select',
-    onchange: async (e: Event) => patch({ generation: { ...g, writebackMode: (e.target as HTMLSelectElement).value as WritebackMode } })
+    onchange: async (e: Event) => patch({ generation: { writebackMode: (e.target as HTMLSelectElement).value as WritebackMode } })
   }) as HTMLSelectElement;
   for (const m of WRITEBACK_MODES) {
     const opt = h('option', { value: m }, WRITEBACK_MODE_LABELS[m]) as HTMLOptionElement;
@@ -876,23 +1101,29 @@ async function renderDefaults(host: HTMLElement, settings: AppSettings): Promise
         class: 'input',
         type: 'text',
         value: g.layerNameTemplate,
-        onchange: async (e: Event) => patch({ generation: { ...g, layerNameTemplate: (e.target as HTMLInputElement).value } })
+        onchange: async (e: Event) => patch({ generation: { layerNameTemplate: (e.target as HTMLInputElement).value } })
       }),
       '支持 {feature} {date} {seed}'
     ),
     fieldRow(
       '自动写回',
-      h('button', {
-        class: `switch ${g.autoWriteback ? 'on' : ''}`,
-        type: 'button',
-        role: 'switch',
-        'aria-checked': String(g.autoWriteback),
-        onclick: async (e: Event) => {
-          const next = !(e.currentTarget as HTMLElement).classList.contains('on');
-          toggleClass(e.currentTarget as HTMLElement, 'on', next);
-          await patch({ generation: { ...g, autoWriteback: next } });
-        }
-      }),
+      h(
+        'button',
+        {
+          class: `switch ${g.autoWriteback ? 'on' : ''}`,
+          type: 'button',
+          role: 'switch',
+          'aria-checked': String(g.autoWriteback),
+          onclick: async (e: Event) => {
+            const btn = e.currentTarget as HTMLElement;
+            const next = !btn.classList.contains('on');
+            toggleClass(btn, 'on', next);
+            btn.setAttribute('aria-checked', String(next));
+            await patch({ generation: { autoWriteback: next } });
+          }
+        },
+        h('span', { class: 'switch-knob' })
+      ),
       '关闭后结果会停在「等待写回」，由你点确认'
     ),
     fieldRow(
@@ -904,7 +1135,7 @@ async function renderDefaults(host: HTMLElement, settings: AppSettings): Promise
         onchange: async (e: Event) => {
           const n = Math.min(8, Math.max(1, Number((e.target as HTMLInputElement).value.replace(/[^0-9]/g, '')) || 1));
           (e.target as HTMLInputElement).value = String(n);
-          await patch({ generation: { ...g, maxConcurrency: n } });
+          await patch({ generation: { maxConcurrency: n } });
         }
       }),
       '本地 ComfyUI 建议保持 1，同一张卡上并行只会更慢'
@@ -1236,4 +1467,29 @@ async function renderBindingEditor(w: WorkflowSummary, host: HTMLElement): Promi
     box.appendChild(h('div', { class: 'err' }, e instanceof ApiError ? e.display : String(e)));
   }
   return box;
+}
+
+/**
+ * 绑定行的摘要：一句话说清这个功能现在走谁、用哪份工作流/模型。
+ *
+ * 摘要要能独立看懂 —— 收起状态下这是用户唯一能看到的信息。
+ */
+function bindingSummary(f: FeatureView, workflows: WorkflowSummary[]): string {
+  const backend =
+    f.providerId === 'comfyui'
+      ? 'ComfyUI'
+      : f.providerId === 'runninghub'
+        ? 'RunningHub 云端'
+        : (f.providerId ?? '未选后端');
+
+  if (f.branch === 'comfyui' && f.providerId === 'comfyui') {
+    const w = workflows.find((x) => x.id === f.workflowId);
+    return `${backend} · ${w ? `${w.name} v${w.version}` : '未绑定工作流'}`;
+  }
+  if (f.providerId === 'runninghub') {
+    const id = f.binding?.remoteWorkflowId ?? '';
+    const preset = id ? rhPresetByWorkflowId(id) : null;
+    return `${backend} · ${preset ? preset.label : id ? `自定义 ${id}` : '未绑定工作流'}`;
+  }
+  return `${backend} · ${f.binding?.model || '默认模型'}`;
 }

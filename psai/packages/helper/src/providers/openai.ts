@@ -33,7 +33,15 @@ import type {
   TextCompleteInput
 } from './types.js';
 import { emptyProgress } from './types.js';
-import { httpFetch, ensureOk, jsonOf, normalizeBaseUrl, buildMultipart } from './http.js';
+import {
+  httpFetch,
+  ensureOk,
+  jsonOf,
+  normalizeBaseUrl,
+  buildMultipart,
+  safeEndpoint,
+  sanitizeExternalText
+} from './http.js';
 import type { Logger } from '../log.js';
 
 export interface OpenAiOptions {
@@ -204,10 +212,17 @@ export function pickVisionModel(models: readonly string[]): string | null {
  */
 export function explainHttpError(
   status: number,
-  body: string,
+  rawBody: string,
   label: string,
   fallbackCode: ErrorCode
 ): PsaiError {
+  /*
+   * 响应正文是外部文本。网关和代理很爱把它收到的完整请求 URL 回显在错误里
+   * （"failed to proxy https://…?AccessKey=…&Signature=…" 这种），
+   * 而那串东西会一路进错误消息、进 error_json、进用户截的图。
+   * 在这里清一次，后面拼什么都安全。
+   */
+  const body = sanitizeExternalText(rawBody, 800);
   let upstream = '';
   let parsed = false;
   try {
@@ -266,6 +281,21 @@ export class OpenAiCompatibleAdapter implements ProviderAdapter {
   private headers(extra: Record<string, string> = {}): Record<string, string> {
     const h: Record<string, string> = { ...extra };
     if (this.opts.apiKey) h['Authorization'] = `Bearer ${this.opts.apiKey}`;
+    return h;
+  }
+
+  /**
+   * 带幂等键的请求头。
+   *
+   * OpenAI 兼容族普遍认 `Idempotency-Key`：同一个键在一段时间内重复提交，
+   * 上游只会真正执行并计费一次，后续请求直接回第一次的结果。
+   * 这是"崩溃后不确定钱花没花"这个问题唯一的正解 ——
+   * 有它在，即使我们重放了同一次尝试，用户也不会被扣两次。
+   * 不认这个头的平台会忽略它，没有副作用。
+   */
+  private submitHeaders(ctx: SubmitContext, extra: Record<string, string> = {}): Record<string, string> {
+    const h = this.headers(extra);
+    if (ctx.idempotencyKey) h['Idempotency-Key'] = ctx.idempotencyKey;
     return h;
   }
 
@@ -410,9 +440,11 @@ export class OpenAiCompatibleAdapter implements ProviderAdapter {
 
     const res = await httpFetch(url, {
       method: 'POST',
-      headers: this.headers({ 'Content-Type': 'application/json' }),
+      headers: this.submitHeaders(a.ctx, { 'Content-Type': 'application/json' }),
       body: JSON.stringify(body),
-      timeoutMs: Math.max(this.opts.timeoutMs, IMAGE_TIMEOUT_MS)
+      timeoutMs: Math.max(this.opts.timeoutMs, IMAGE_TIMEOUT_MS),
+      // 提交进行中被取消时中止请求 —— 那是唯一能真正省下这次费用的时机
+      ...(a.ctx.signal ? { signal: a.ctx.signal } : {})
     });
     return this.readImages(await this.okJson(res, url), url);
   }
@@ -439,9 +471,11 @@ export class OpenAiCompatibleAdapter implements ProviderAdapter {
 
     const res = await httpFetch(url, {
       method: 'POST',
-      headers: this.headers({ 'Content-Type': contentType }),
+      headers: this.submitHeaders(a.ctx, { 'Content-Type': contentType }),
       body,
-      timeoutMs: Math.max(this.opts.timeoutMs, IMAGE_TIMEOUT_MS)
+      timeoutMs: Math.max(this.opts.timeoutMs, IMAGE_TIMEOUT_MS),
+      // 提交进行中被取消时中止请求 —— 那是唯一能真正省下这次费用的时机
+      ...(a.ctx.signal ? { signal: a.ctx.signal } : {})
     });
 
     if (res.status === 404 || res.status === 405) {
@@ -464,9 +498,11 @@ export class OpenAiCompatibleAdapter implements ProviderAdapter {
     if (acceptsResponseFormat(a.model)) body['response_format'] = 'b64_json';
     const res = await httpFetch(url, {
       method: 'POST',
-      headers: this.headers({ 'Content-Type': 'application/json' }),
+      headers: this.submitHeaders(a.ctx, { 'Content-Type': 'application/json' }),
       body: JSON.stringify(body),
-      timeoutMs: Math.max(this.opts.timeoutMs, IMAGE_TIMEOUT_MS)
+      timeoutMs: Math.max(this.opts.timeoutMs, IMAGE_TIMEOUT_MS),
+      // 提交进行中被取消时中止请求 —— 那是唯一能真正省下这次费用的时机
+      ...(a.ctx.signal ? { signal: a.ctx.signal } : {})
     });
     return this.readImages(await this.okJson(res, url), url);
   }
@@ -500,9 +536,14 @@ export class OpenAiCompatibleAdapter implements ProviderAdapter {
 
     const res = await httpFetch(url, {
       method: 'POST',
-      headers: this.headers({ 'Content-Type': 'application/json' }),
+      // 这条路一样是真金白银的一次生图调用，幂等键不能漏。
+      // 漏了的话，崩溃恢复重放这一次尝试就会变成第二次计费 ——
+      // 而重放正是我们设计出来的行为，不是异常路径。
+      headers: this.submitHeaders(a.ctx, { 'Content-Type': 'application/json' }),
       body: JSON.stringify({ model: a.model, messages: [{ role: 'user', content }] }),
-      timeoutMs: Math.max(this.opts.timeoutMs, IMAGE_TIMEOUT_MS)
+      timeoutMs: Math.max(this.opts.timeoutMs, IMAGE_TIMEOUT_MS),
+      // 提交进行中被取消时中止请求 —— 那是唯一能真正省下这次费用的时机
+      ...(a.ctx.signal ? { signal: a.ctx.signal } : {})
     });
     if (!res.ok) {
       const text = await res.text().catch(() => '');
@@ -549,11 +590,39 @@ export class OpenAiCompatibleAdapter implements ProviderAdapter {
     return this.base().replace(/\/v\d+(?:beta)?$/i, '');
   }
 
-  private mjHeaders(): Record<string, string> {
+  private mjHeaders(ctx?: SubmitContext): Record<string, string> {
     const h = this.headers({ 'Content-Type': 'application/json' });
     // 这套代理认 mj-api-secret；同时带上 Authorization，两种网关配置都能过
     if (this.opts.apiKey) h['mj-api-secret'] = this.opts.apiKey;
+    // 提交路径上要带幂等键。Midjourney 一次出图是几分钟、也是实打实的额度，
+    // 重复提交的代价比别的模型还高。
+    if (ctx?.idempotencyKey) h['Idempotency-Key'] = ctx.idempotencyKey;
     return h;
+  }
+
+  /**
+   * 认领时规范化任务号。
+   *
+   * 这一族里只有 Midjourney 那条路有**真实的**远端任务号，认领才有意义。
+   * 其余模型是同步出图：remoteId 是我们自己编的 `oai_<uuid>`，只在本进程的
+   * 内存 map 里有意义，重启就没了 —— 让用户"认领"一个这样的 id 毫无用处，
+   * 只会让他以为任务救回来了，然后在下一次轮询时被判成丢失。
+   */
+  normalizeRemoteId(raw: string): string {
+    const v = raw.trim();
+    if (v.startsWith(MJ_PREFIX)) return v;
+    if (/^oai_/.test(v)) {
+      throw new PsaiError(
+        'JOB_PARAM_INVALID',
+        '`oai_…` 是本地临时编号，不是平台上的任务号 —— 它只在当时那个进程里有效，认领它没有意义。'
+      );
+    }
+    // Midjourney 代理返回的是一串数字 id，用户从后台抄回来时不会带前缀
+    if (/^[0-9]{6,}$/.test(v)) return `${MJ_PREFIX}${v}`;
+    throw new PsaiError(
+      'JOB_PARAM_INVALID',
+      `${this.opts.label} 只有 Midjourney 任务可以认领，任务号形如 ${MJ_PREFIX}<数字 id>。收到的是「${v}」。`
+    );
   }
 
   private async mjSubmit(a: { prompt: string; ctx: SubmitContext }): Promise<SubmitResult> {
@@ -570,9 +639,11 @@ export class OpenAiCompatibleAdapter implements ProviderAdapter {
     const url = `${this.mjRoot()}/mj/submit/imagine`;
     const res = await httpFetch(url, {
       method: 'POST',
-      headers: this.mjHeaders(),
+      headers: this.mjHeaders(a.ctx),
       body: JSON.stringify({ prompt }),
-      timeoutMs: Math.max(this.opts.timeoutMs, 120_000)
+      timeoutMs: Math.max(this.opts.timeoutMs, 120_000),
+      // 提交进行中被取消时中止请求 —— 那是唯一能真正省下这次费用的时机
+      ...(a.ctx.signal ? { signal: a.ctx.signal } : {})
     });
     if (!res.ok) {
       const text = await res.text().catch(() => '');
@@ -641,7 +712,7 @@ export class OpenAiCompatibleAdapter implements ProviderAdapter {
       }
     }
     if (out.length === 0) {
-      throw new PsaiError('PROVIDER_BAD_RESPONSE', `${url} 没有返回任何图像`);
+      throw new PsaiError('PROVIDER_BAD_RESPONSE', `${safeEndpoint(url)} 没有返回任何图像`);
     }
     return out;
   }
@@ -677,7 +748,9 @@ export class OpenAiCompatibleAdapter implements ProviderAdapter {
         max_tokens: input.maxTokens ?? 800,
         temperature: 0.4
       }),
-      timeoutMs: Math.max(this.opts.timeoutMs, 120_000)
+      timeoutMs: Math.max(this.opts.timeoutMs, 120_000),
+      // 反推 / 优化也可能跑几十秒，取消时一样要能掐掉
+      ...(input.signal ? { signal: input.signal } : {})
     });
     // 和生图走同一套错误翻译：把上游那句人话读出来，别再报「无法解析的响应」
     if (!res.ok) await this.okJson(res, url);
@@ -773,7 +846,8 @@ export class OpenAiCompatibleAdapter implements ProviderAdapter {
     }
   }
 
-  async fetchResults(remoteId: string): Promise<ResultImage[]> {
+  async fetchResults(remoteId: string, signal?: AbortSignal): Promise<ResultImage[]> {
+    void signal;
     if (remoteId.startsWith(MJ_PREFIX)) {
       const t = await this.mjFetch(remoteId.slice(MJ_PREFIX.length));
       if (!t.imageUrl) throw new PsaiError('PROVIDER_BAD_RESPONSE', 'Midjourney 任务已完成但没有给出图片地址');

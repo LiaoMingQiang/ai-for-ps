@@ -3,3 +3,9 @@ dist/
 release/
 backup/
 *.log
+
+# 旧版（根目录 helper/uxp-plugin 那一套）的构建产物，不入库：
+# 122MB 的 zip 超过 GitHub 100MB 硬限制，exe 也超推荐值。
+# 现行实现全在 psai/ 下，这两个只是历史遗留的打包结果。
+ai-for-ps.zip
+helper/dist-bundle/AI-for-PS-Helper.exe

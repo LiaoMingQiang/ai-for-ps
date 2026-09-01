@@ -87,7 +87,23 @@ export function getState(): AppState {
  * 正在输入的提示词、正在拖的立方体、滚动位置全被冲掉，面板看起来就像卡住点不动。
  * 所以这几个键改成按内容比较。
  */
-const DEEP_COMPARE_KEYS = new Set(['health', 'gpu', 'doc']);
+/*
+ * 这些键即使换了新对象，只要**内容**没变就不算变。
+ *
+ * 为什么 features 必须在里面：设置页的「固定功能」那一节渲染时会
+ * `setState({ features })` 把最新的功能列表放回 store，而主面板订阅了
+ * features、一变就整页重画。features 每次从接口拉回来都是一个新数组，
+ * 只按引用比的话必然判定为"变了" ——
+ *
+ *   渲染固定功能 → setState(features) → 整页重画 → 再渲染固定功能 → …
+ *
+ * 实测这个循环 1.5 秒能拉 87 次功能列表。每轮开头都 clear()，
+ * 于是那一页绝大多数时刻是空的：用户看到的是"设置里的固定功能打不开"，
+ * 同时整个面板跟着卡 —— 而这两件事看起来毫不相干。
+ *
+ * 根子上的规矩是：**一次渲染不该把自己再触发一遍**。深比较是那道闸门。
+ */
+const DEEP_COMPARE_KEYS = new Set(['health', 'gpu', 'doc', 'features', 'settings']);
 
 function sameValue(key: string, a: unknown, b: unknown): boolean {
   if (a === b) return true;

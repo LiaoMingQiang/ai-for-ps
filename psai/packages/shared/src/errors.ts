@@ -59,6 +59,15 @@ export const ERROR_CODES = {
   JOB_CANCEL_UNSUPPORTED: '该 Provider 不支持取消，任务将继续执行',
   JOB_FAILED: '任务执行失败',
   JOB_LOST: '任务状态在 Helper 重启后无法恢复，请重新提交',
+  /*
+   * 「提交出去了，但不知道对面收没收」。
+   *
+   * 必须和 JOB_LOST 分开。JOB_LOST 的文案是"请重新提交"——
+   * 那正是这个状态下最不该做的事：上一次可能已经在平台侧计费了，
+   * 重新提交就是第二次扣费。用同一个码等于一边警告重复扣费、
+   * 一边让用户去重新提交，自相矛盾。
+   */
+  SUBMISSION_UNKNOWN: '提交结果未知：平台可能已经接单并计费，请先到平台账单确认再决定如何处置',
   JOB_INPUT_MISSING: '缺少必需的输入图像',
   JOB_PARAM_INVALID: '参数不合法',
   JOB_CONCURRENCY_LIMIT: '并发数已达上限',
@@ -67,6 +76,24 @@ export const ERROR_CODES = {
   WRITEBACK_TARGET_INVALID: '写回目标信息不完整',
   WRITEBACK_DOCUMENT_CHANGED: '文档尺寸已变化，禁止自动写回',
   WRITEBACK_FAILED: '写回 Photoshop 失败（结果已保留，可重试）',
+  WRITEBACK_IN_PROGRESS: '这条任务正在写回中，请等它结束',
+  /*
+   * 写了一半，而且没能清理干净。
+   *
+   * 和 WRITEBACK_FAILED 必须分开：那个的含义是"文档没被动过，放心重试"，
+   * 而这个是"文档已经被改了、还多出来一个图层"。
+   * 用同一个码的话，用户会直接重试，然后再多一个。
+   */
+  WRITEBACK_PARTIAL: '写回中途失败，且未能撤销已置入的图层 —— 请先手动检查文档',
+  /*
+   * 写回被中断，而且**核不出来到底写没写进去**。
+   *
+   * 和 WRITEBACK_FAILED 必须分开。「失败」的含义是文档没被动过、
+   * 放心重试；而这一种文档可能已经被动过了 —— 用同一句话说的话，
+   * 用户会直接重试，然后可能多一个一模一样的图层。
+   * 这个码要求人先去看一眼文档。
+   */
+  WRITEBACK_UNKNOWN: '写回被中断且无法确认结果 —— 请先打开源文档检查，再决定是否重写',
 
   /* ---- 资产 ---- */
   ASSET_NOT_FOUND: '资产不存在',

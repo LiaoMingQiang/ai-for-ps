@@ -14,9 +14,17 @@ import { join } from 'node:path';
 
 import { startHelper } from '../dist/index.js';
 import { startComfyStub, makePng } from '../../../tools/comfy-stub.mjs';
+import { assertCleanLog } from './_log-assertions.mjs';
 
-const PORT = 34212;
-const STUB_PORT = 18193;
+/*
+ * 端口由系统分配，不写死。
+ *
+ * 写死有两个坑，第二个尤其阴：上一次跑崩留下的进程会一直占着；
+ * 而 Windows 上端口被占**未必**报 EADDRINUSE —— 可能就那么挂着，
+ * 整个套件一条输出都没有，报出来是一次超时，跟真正的原因毫无关系。
+ * 每次 startHelper 之后都要重新读一遍：重启拿到的是新端口。
+ */
+let PORT = 0;
 
 let stub;
 let dataDir;
@@ -99,7 +107,8 @@ async function waitFor(jobId, predicate, timeoutMs = 20000) {
 }
 
 async function boot() {
-  helper = await startHelper({ dataDir, port: PORT, ephemeral: true });
+  helper = await startHelper({ dataDir, port: 0, ephemeral: true });
+  PORT = Number(new URL(helper.url).port);
   token = helper.issueToken();
   // 等恢复跑完再断言，否则会读到恢复中途的状态
   await helper.recovered;
@@ -107,7 +116,7 @@ async function boot() {
 
 before(async () => {
   dataDir = mkdtempSync(join(tmpdir(), 'psai-recovery-'));
-  stub = await startComfyStub(STUB_PORT, { runMs: 200 });
+  stub = await startComfyStub(0, { runMs: 200 });
   await boot();
   await api('PATCH', '/v1/settings', { comfy: { baseUrl: stub.url } });
 });
@@ -115,11 +124,30 @@ before(async () => {
 after(async () => {
   await helper?.stop();
   await stub?.stop();
+  /*
+   * 停机之后、删目录之前翻一遍日志。
+   *
+   * 非法状态转移和唯一约束冲突都不会让任何用例变红：前者只是被
+   * transition() 拒绝 + 记一条 warn，后者会被事务吞掉走别的分支。
+   * 它们会一直积着，直到某天某条路径真的因为被拒而卡死 ——
+   * 而那时候现场早就没了。
+   *
+   * 位置很讲究：早于 helper.stop() 会让进程退不出去（报成超时），
+   * 晚于 rmSync 则日志已经被删了。失败也要先清理再抛，
+   * 否则每失败一次就漏一个临时目录。
+   */
+  let logProblem = null;
+  try {
+    if (dataDir) assertCleanLog(dataDir);
+  } catch (e) {
+    logProblem = e;
+  }
   try {
     rmSync(dataDir, { recursive: true, force: true });
   } catch {
     /* noop */
   }
+  if (logProblem) throw logProblem;
 });
 
 test('重启后：远端已完成的任务直接取结果，不重新提交', async () => {

@@ -155,8 +155,11 @@ test('clampInt 与 roundTo', () => {
 
 /* ---------------- 作业状态机 ---------------- */
 
-test('状态机是 18 态', () => {
-  assert.equal(JOB_STATES.length, 18);
+test('状态机是 19 态', () => {
+  // 18 → 19：加了 submission_unknown（提交出去了但不知道上游收没收）。
+  // 这个断言的意义是"加状态得有人点头"—— 状态机每多一态，
+  // 恢复流程、UI 文案、转移表都要跟着想一遍。
+  assert.equal(JOB_STATES.length, 19);
 });
 
 test('每个状态都有转移表，且目标状态都合法', () => {

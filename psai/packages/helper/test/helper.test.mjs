@@ -11,14 +11,22 @@ import { join } from 'node:path';
 
 import { startHelper } from '../dist/index.js';
 import { startComfyStub, makePng } from '../../../tools/comfy-stub.mjs';
+import { assertCleanLog } from './_log-assertions.mjs';
 
 let helper;
 let stub;
 let token;
 let dataDir;
 
-const PORT = 34211;
-const STUB_PORT = 18192;
+/*
+ * 端口由系统分配，不写死。
+ *
+ * 写死有两个坑，第二个尤其阴：上一次跑崩留下的进程会一直占着；
+ * 而 Windows 上端口被占**未必**报 EADDRINUSE —— 可能就那么挂着，
+ * 整个套件一条输出都没有，报出来是一次超时，跟真正的原因毫无关系。
+ * 每次 startHelper 之后都要重新读一遍：重启拿到的是新端口。
+ */
+let PORT = 0;
 
 function url(path) {
   return `http://127.0.0.1:${PORT}${path}`;
@@ -99,8 +107,9 @@ async function waitForState(jobId, predicate, timeoutMs = 15000) {
 
 before(async () => {
   dataDir = mkdtempSync(join(tmpdir(), 'psai-test-'));
-  stub = await startComfyStub(STUB_PORT, { runMs: 120 });
-  helper = await startHelper({ dataDir, port: PORT, ephemeral: true });
+  stub = await startComfyStub(0, { runMs: 120 });
+  helper = await startHelper({ dataDir, port: 0, ephemeral: true });
+  PORT = Number(new URL(helper.url).port);
   token = helper.issueToken();
   // 把 ComfyUI 指向桩
   await api('PATCH', '/v1/settings', { comfy: { baseUrl: stub.url } });
@@ -109,11 +118,30 @@ before(async () => {
 after(async () => {
   await helper?.stop();
   await stub?.stop();
+  /*
+   * 停机之后、删目录之前翻一遍日志。
+   *
+   * 非法状态转移和唯一约束冲突都不会让任何用例变红：前者只是被
+   * transition() 拒绝 + 记一条 warn，后者会被事务吞掉走别的分支。
+   * 它们会一直积着，直到某天某条路径真的因为被拒而卡死 ——
+   * 而那时候现场早就没了。
+   *
+   * 位置很讲究：早于 helper.stop() 会让进程退不出去（报成超时），
+   * 晚于 rmSync 则日志已经被删了。失败也要先清理再抛，
+   * 否则每失败一次就漏一个临时目录。
+   */
+  let logProblem = null;
+  try {
+    if (dataDir) assertCleanLog(dataDir);
+  } catch (e) {
+    logProblem = e;
+  }
   try {
     rmSync(dataDir, { recursive: true, force: true });
   } catch {
     /* Windows 上偶尔会被占用，忽略 */
   }
+  if (logProblem) throw logProblem;
 });
 
 /* ==================== 健康与鉴权 ==================== */
@@ -601,36 +629,77 @@ test('状态流转全程有审计记录', async () => {
 
 /* ==================== 任务：写回 ==================== */
 
+/** 领一次写回执行权，拿到凭据。回报时必须带上它。 */
+async function leaseWriteback(jobId, body = {}) {
+  const { json } = await api('POST', `/v1/jobs/${jobId}/writeback`, body);
+  assert.equal(json.ok, true, `领取写回执行权失败: ${JSON.stringify(json)}`);
+  assert.ok(json.attemptId, '必须发一个凭据回来');
+  return json.attemptId;
+}
+
 test('写回成功后任务才算完成', async () => {
   const job = await createJob();
   await waitForState(job.id, (j) => j.state === 'writeback_pending');
-  const { json } = await api('POST', `/v1/jobs/${job.id}/writeback-result`, { ok: true, detail: '已置入智能对象' });
+  const attemptId = await leaseWriteback(job.id);
+  const { json } = await api('POST', `/v1/jobs/${job.id}/writeback-result`, {
+    ok: true,
+    detail: '已置入智能对象',
+    attemptId
+  });
   assert.equal(json.job.state, 'succeeded');
+});
+
+test('不带凭据的写回回报一律拒绝', async () => {
+  // 凭据是"这次回报对应哪一次写回"的唯一依据。放行无凭据的回报，
+  // 等于任何一个卡了很久才回过神的面板都能把后来那次成功的写回覆盖成失败 ——
+  // 用户看到"写回失败"，而图其实好好地躺在文档里。
+  const job = await createJob();
+  await waitForState(job.id, (j) => j.state === 'writeback_pending');
+  const { status, json } = await api('POST', `/v1/jobs/${job.id}/writeback-result`, { ok: true, detail: 'x' });
+  assert.equal(json.ok, false);
+  assert.equal(status, 400);
+  assert.match(`${json.error.message}${json.error.details ?? ''}`, /attemptId/);
+  assert.equal(
+    (await api('GET', `/v1/jobs/${job.id}`)).json.job.state,
+    'writeback_pending',
+    '被拒的回报不该动到任务状态'
+  );
 });
 
 test('写回失败不算 AI 失败：结果保留，状态可重试', async () => {
   const job = await createJob();
   await waitForState(job.id, (j) => j.state === 'writeback_pending');
+  const failAttempt = await leaseWriteback(job.id);
   const { json } = await api('POST', `/v1/jobs/${job.id}/writeback-result`, {
     ok: false,
     detail: '源文档已关闭',
-    code: 'PHOTOSHOP_DOCUMENT_NOT_FOUND'
+    code: 'PHOTOSHOP_DOCUMENT_NOT_FOUND',
+    attemptId: failAttempt
   });
   assert.equal(json.job.state, 'retryable_writeback_failure');
   assert.equal(json.job.results.length, 1, '结果必须保留');
   assert.equal(json.job.error.code, 'PHOTOSHOP_DOCUMENT_NOT_FOUND');
 
   // 文档重开后可以再次写回
-  const again = await api('POST', `/v1/jobs/${job.id}/writeback`, {});
-  assert.equal(again.json.job.state, 'writeback_pending');
-  const ok = await api('POST', `/v1/jobs/${job.id}/writeback-result`, { ok: true, detail: '重试成功' });
+  const retryAttempt = await leaseWriteback(job.id);
+  assert.equal((await api('GET', `/v1/jobs/${job.id}`)).json.job.state, 'writeback_pending');
+  const ok = await api('POST', `/v1/jobs/${job.id}/writeback-result`, {
+    ok: true,
+    detail: '重试成功',
+    attemptId: retryAttempt
+  });
   assert.equal(ok.json.job.state, 'succeeded');
+  assert.equal(ok.json.job.error, null, '成功之后那条陈旧的失败错误必须清掉，否则「已完成」旁边挂着一行红字');
 });
 
 test('已完成的任务仍可再次写回（结果永久可用）', async () => {
   const job = await createJob();
   await waitForState(job.id, (j) => j.state === 'writeback_pending');
-  await api('POST', `/v1/jobs/${job.id}/writeback-result`, { ok: true, detail: 'ok' });
+  await api('POST', `/v1/jobs/${job.id}/writeback-result`, {
+    ok: true,
+    detail: 'ok',
+    attemptId: await leaseWriteback(job.id)
+  });
 
   const again = await api('POST', `/v1/jobs/${job.id}/writeback`, { mode: 'pixelLayer', layerName: '再写一次' });
   assert.equal(again.json.job.state, 'writeback_pending');
@@ -665,6 +734,7 @@ test('取消排队中的任务不影响其他任务', async () => {
 
     const cancelled = await api('POST', `/v1/jobs/${a.id}/cancel`);
     assert.equal(cancelled.json.ok, true, JSON.stringify(cancelled.json));
+    assert.equal(cancelled.json.cancelled, true, '排队中的任务一定取消得掉');
     assert.equal(cancelled.json.job.state, 'cancelled');
 
     stub.setHold(false);
@@ -730,9 +800,17 @@ test('重试后的耗时不会是负数', async () => {
 test('已完成的任务不能再取消', async () => {
   const job = await createJob();
   await waitForState(job.id, (j) => j.state === 'writeback_pending');
-  await api('POST', `/v1/jobs/${job.id}/writeback-result`, { ok: true, detail: 'ok' });
+  await api('POST', `/v1/jobs/${job.id}/writeback-result`, {
+    ok: true,
+    detail: 'ok',
+    attemptId: await leaseWriteback(job.id)
+  });
   const { json } = await api('POST', `/v1/jobs/${job.id}/cancel`);
-  assert.equal(json.ok, false);
+  // ok 只表示请求处理成功了；"取消不了"是一个正常答案，看 cancelled。
+  // 以前这里把业务结论塞进 ok，客户端那套统一错误处理会把它当成一次失败的调用报出去。
+  assert.equal(json.ok, true, '请求本身是成功的');
+  assert.equal(json.cancelled, false, '终态任务取消不掉');
+  assert.equal(json.pending, false);
   assert.match(json.reason, /终态/);
 });
 
@@ -893,5 +971,56 @@ test('GPU 信息要么真实要么带原因，绝不编造', async () => {
   } else {
     assert.ok(json.gpu.reason, '读不到 GPU 必须给出原因');
     assert.equal(json.gpu.name, null);
+  }
+});
+
+/* ==================== 启动必须给出可用地址，或者当场失败 ==================== */
+
+test('反复停机重启：每一次给出的地址都必须是可用的', async () => {
+  /*
+   * 这条守的是一个查了很久的坑。
+   *
+   * 老代码在 `server.address()` 拿不到对象时退回 `cfg.port` ——
+   * 而测试里 cfg.port 就是 0。于是 url 成了 `http://127.0.0.1:0`：
+   * Helper 看起来"启动成功"，直到某个调用方拿这个地址发请求，
+   * undici 抛一句 `bad port`。
+   *
+   * 那条报错出现在三层之外的某个用例里，跟真正的原因毫无关系 ——
+   * 表现是一批互不相干的用例集体变红，而且只在并发跑的时候偶尔出现，
+   * 单独跑那个文件永远是绿的。
+   *
+   * 现在拿不到端口就当场抛。这里反复重启几次，每次都把地址真的用一下。
+   */
+  const dir = mkdtempSync(join(tmpdir(), 'psai-boot-'));
+  const started = [];
+  try {
+    for (let i = 0; i < 3; i++) {
+      const h = await startHelper({ dataDir: dir, port: 0, ephemeral: true });
+      started.push(h);
+      await h.recovered;
+
+      const parsed = new URL(h.url);
+      const port = Number(parsed.port);
+      assert.ok(
+        Number.isInteger(port) && port > 0 && port <= 65535,
+        `第 ${i + 1} 次启动给出的地址不可用：${h.url}`
+      );
+
+      // 光看字符串不够 —— 真发一次请求，确认这个地址是能用的
+      const res = await fetch(`${h.url}/v1/health`, {
+        headers: { Authorization: `Bearer ${h.issueToken()}` }
+      });
+      assert.equal(res.status, 200, `第 ${i + 1} 次启动的地址请求不通：${h.url}`);
+
+      await h.stop();
+      started.pop();
+    }
+  } finally {
+    for (const h of started) await h.stop().catch(() => undefined);
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+      /* noop */
+    }
   }
 });

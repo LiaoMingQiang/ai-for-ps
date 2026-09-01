@@ -42,7 +42,13 @@ export class ProviderManager {
 
       switch (desc.kind) {
         case 'comfyui': {
-          const opts = { baseUrl: s.comfy.baseUrl || ps.baseUrl || desc.defaultBaseUrl, timeoutMs };
+          const opts = {
+            baseUrl: s.comfy.baseUrl || ps.baseUrl || desc.defaultBaseUrl,
+            timeoutMs,
+            // 只认用户的明确声明。取消已在执行的任务要用全局 /interrupt，
+            // 没独占的话那一刀会砍在别人身上。
+            exclusive: s.comfy.exclusive === true
+          };
           if (existing instanceof ComfyUiAdapter) existing.updateOptions(opts);
           else this.adapters.set(desc.id, new ComfyUiAdapter(opts, this.log));
           break;

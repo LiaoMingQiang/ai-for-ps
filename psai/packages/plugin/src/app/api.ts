@@ -11,6 +11,7 @@ import type {
   JobRecord,
   JobEvent,
   AppSettings,
+  SettingsPatch,
   ProviderRuntimeStatus,
   GpuInfo,
   CatalogNode,
@@ -353,7 +354,18 @@ export const api = {
     ).then((r) => r.usage),
 
   settings: () => request<{ settings: AppSettings }>('GET', '/v1/settings').then((r) => r.settings),
-  patchSettings: (patch: Partial<AppSettings>) =>
+  /**
+   * 只发**变了的那些字段**，不要把整组抄一遍发上去。
+   *
+   * Helper 是按分组浅合并的（`{ ...current, ...patch[group] }`），
+   * 所以 `{ generation: { autoWriteback: false } }` 就够了，
+   * 兄弟字段会原样留着。
+   *
+   * 反过来"整组发"是有害的：调用方手里那份多半是**渲染那一刻**的快照，
+   * 中间用户已经改过别的项了 —— 整组发会把那些改动一起冲掉，
+   * 而界面上还显示着他改过的样子。
+   */
+  patchSettings: (patch: SettingsPatch) =>
     request<{ settings: AppSettings }>('PATCH', '/v1/settings', patch).then((r) => r.settings),
 
   providers: () => request<{ providers: ProviderView[] }>('GET', '/v1/providers').then((r) => r.providers),
@@ -429,15 +441,77 @@ export const api = {
     target: PhotoshopTarget | null;
     writeback: { mode: WritebackMode; layerName?: string } | null;
   }) => request<{ job: JobRecord }>('POST', '/v1/jobs', payload).then((r) => r.job),
+  /**
+   * 取消。
+   *
+   * 注意读的是 `cancelled` 而不是 `ok`：请求本身总是成功的（否则会抛 ApiError），
+   * "远端不支持取消"是一个正常答案，不是错误。pending 表示提交还在飞，
+   * 结论稍后会通过任务状态推过来。
+   */
   cancelJob: (id: string) =>
-    request<{ ok: boolean; reason: string; job: JobRecord }>('POST', `/v1/jobs/${encodeURIComponent(id)}/cancel`),
+    request<{ ok: true; cancelled: boolean; pending: boolean; reason: string; job: JobRecord }>(
+      'POST',
+      `/v1/jobs/${encodeURIComponent(id)}/cancel`
+    ),
   discardJob: (id: string) => request<{ job: JobRecord }>('POST', `/v1/jobs/${encodeURIComponent(id)}/discard`).then((r) => r.job),
   retryJob: (id: string) => request<{ job: JobRecord }>('POST', `/v1/jobs/${encodeURIComponent(id)}/retry`).then((r) => r.job),
   rerunJob: (id: string) => request<{ job: JobRecord }>('POST', `/v1/jobs/${encodeURIComponent(id)}/rerun`).then((r) => r.job),
-  requestWriteback: (id: string, mode?: WritebackMode, layerName?: string) =>
-    request<{ job: JobRecord }>('POST', `/v1/jobs/${encodeURIComponent(id)}/writeback`, { mode, layerName }).then((r) => r.job),
-  reportWriteback: (id: string, ok: boolean, detail: string, code?: string) =>
-    request<{ job: JobRecord }>('POST', `/v1/jobs/${encodeURIComponent(id)}/writeback-result`, { ok, detail, code }).then((r) => r.job),
+  /**
+   * 处置「提交结果未知」的任务。
+   *
+   * 这个状态的意思是：请求已经发往付费平台，但没等到回复 —— 本地无法判断钱花没花。
+   * 所以它没有"自动"出路，只有三条需要人明确点一下的：
+   *   retry   重新提交（会再产生一次费用，必须先确认风险）
+   *   abandon 放弃这次提交
+   *   adopt   已经在平台上找到那条任务，把任务号认领回来接着轮询
+   */
+  resolveSubmission: (
+    id: string,
+    decision: 'retry' | 'abandon' | 'adopt',
+    opts: { remoteId?: string; confirmedDuplicateBillingRisk?: boolean } = {}
+  ) =>
+    request<{ job: JobRecord }>('POST', `/v1/jobs/${encodeURIComponent(id)}/resolve-submission`, {
+      decision,
+      ...opts
+    }).then((r) => r.job),
+  /**
+   * 领取一次写回的执行权。
+   *
+   * 返回的 attemptId 是凭据，回报结果时必须带回来 —— Helper 靠它保证
+   * 一次授权只会被兑现一次。两个面板实例同时想写回时，第二个会被拒
+   * （WRITEBACK_IN_PROGRESS），而不是两个都往用户的文档里写。
+   */
+  requestWriteback: (
+    id: string,
+    mode?: WritebackMode,
+    layerName?: string,
+    auto?: boolean,
+    assetId?: string,
+    /** 显式改绑写回目标。只有用户明确选了"写进当前这份文档"时才传。 */
+    target?: PhotoshopTarget | null
+  ) =>
+    request<{ job: JobRecord; attemptId: string }>('POST', `/v1/jobs/${encodeURIComponent(id)}/writeback`, {
+      mode,
+      layerName,
+      auto,
+      // 写的是哪一张。不传就是第一张 —— 但多图结果里那多半不是用户选的那张。
+      assetId,
+      ...(target ? { target } : {})
+    }),
+  /** 续租：写回耗时超过租约时定期调用，告诉 Helper "我还活着" */
+  renewWriteback: (id: string, attemptId: string) =>
+    request<{ ok: true; renewed: boolean; reason: string }>(
+      'POST',
+      `/v1/jobs/${encodeURIComponent(id)}/writeback/renew`,
+      { attemptId }
+    ),
+  reportWriteback: (id: string, ok: boolean, detail: string, code?: string, attemptId?: string) =>
+    request<{ job: JobRecord }>('POST', `/v1/jobs/${encodeURIComponent(id)}/writeback-result`, {
+      ok,
+      detail,
+      code,
+      attemptId
+    }).then((r) => r.job),
   deleteJob: (id: string) => request<{ ok: true }>('DELETE', `/v1/jobs/${encodeURIComponent(id)}`),
 
   prompts: (featureId?: string, kind?: string) => {
@@ -457,21 +531,43 @@ export const api = {
     request<{ text: string; providerId: string; model: string | null }>('POST', '/v1/text/complete', payload),
 
   /** 上传一张图，返回资产。二进制走 multipart，不走 JSON。 */
-  uploadAsset: async (data: ArrayBuffer | Uint8Array, filename: string, mime = 'image/png') => {
+  /**
+   * 上传资产。
+   *
+   * `mask` 是 Photoshop 的选区灰度（0 未选中 / 255 完全选中 / 中间是羽化）。
+   * 带上它，Helper 会把它合成进图像的 alpha 通道 —— 那是把"用户到底选了什么形状"
+   * 传给下游的唯一途径，光靠外接矩形会把羽化和不规则形状一起丢掉。
+   */
+  uploadAsset: async (
+    data: ArrayBuffer | Uint8Array,
+    filename: string,
+    mime = 'image/png',
+    mask?: { gray: Uint8Array; width: number; height: number } | null
+  ) => {
     const t = await loadToken();
     const form = new FormData();
     const buffer = data instanceof Uint8Array ? data.slice().buffer : data;
     form.append('file', new Blob([buffer], { type: mime }), filename);
+    if (mask) {
+      form.append('mask', new Blob([mask.gray.slice().buffer], { type: 'application/octet-stream' }), 'mask.gray');
+      form.append('maskWidth', String(mask.width));
+      form.append('maskHeight', String(mask.height));
+    }
     const res = await fetch(`${BASE}/v1/assets`, {
       method: 'POST',
       headers: t ? { Authorization: `Bearer ${t}` } : {},
       body: form
     });
-    const json = (await res.json()) as { ok?: boolean; error?: PsaiErrorShape; assets?: Array<{ id: string; width: number; height: number; bytes: number; mime: string; sha256: string }> };
+    const json = (await res.json()) as {
+      ok?: boolean;
+      error?: PsaiErrorShape;
+      assets?: Array<{ id: string; width: number; height: number; bytes: number; mime: string; sha256: string }>;
+      mask?: { ok: boolean; reason?: string };
+    };
     if (!res.ok || json.ok === false || !json.assets?.length) {
       throw new ApiError(json.error ?? { code: 'INTERNAL_ERROR', message: '上传失败', retryable: false }, res.status);
     }
-    return json.assets[0]!;
+    return { ...json.assets[0]!, maskCheck: json.mask ?? null };
   },
 
   /**
@@ -570,6 +666,27 @@ export function onHelperEvent(fn: EventHandler): () => void {
   return () => handlers.delete(fn);
 }
 
+/**
+ * WebSocket **真正连上**时的回调。
+ *
+ * 和「健康检查从离线变在线」不是一回事：健康检查走的是 HTTP，
+ * 它说"在线"的时候 WebSocket 可能还在重连、也可能刚断。
+ * 靠它来触发补偿的话，补偿会跑在一个其实还没接上的连接上 ——
+ * 而且 WebSocket 自己悄悄重连的那些次（网络抖一下）根本不会经过健康检查，
+ * 那期间漏掉的事件永远没人补。
+ */
+const openHandlers = new Set<() => void>();
+
+export function onEventsOpen(fn: () => void): () => void {
+  openHandlers.add(fn);
+  return () => openHandlers.delete(fn);
+}
+
+/** 测试与排查用：WebSocket 现在是不是连着的。 */
+export function eventsConnected(): boolean {
+  return !!ws && ws.readyState === WebSocket.OPEN;
+}
+
 export async function connectEvents(): Promise<void> {
   const t = await loadToken();
   if (!t) return;
@@ -585,6 +702,14 @@ export async function connectEvents(): Promise<void> {
 
   ws.onopen = () => {
     backoff = 1000;
+    // 断线期间发生的事件不会补发，连上的这一刻必须主动去对一次账
+    for (const fn of openHandlers) {
+      try {
+        fn();
+      } catch {
+        /* 一个订阅者出错不该拖垮别的 */
+      }
+    }
   };
   ws.onmessage = (e: MessageEvent) => {
     try {

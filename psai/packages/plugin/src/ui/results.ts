@@ -9,10 +9,26 @@ import { api, assetImgSrc } from '../app/api.js';
 
 export interface ResultsOptions {
   job: JobRecord | null;
-  /** 输入图预览，用于前后对比 */
+  /**
+   * 输入图的**资产 id**，前后对比要用它去取清晰的那一档。
+   *
+   * 只给 previewSrc（缩略图）是不够的：那张图是给输入区那个一百多像素的
+   * 小格子用的，拉到整幅宽度做对比就是一团糊。而右半边的结果用的是
+   * preview 档（长边 1280）—— 左糊右清，看起来像是"AI 把图弄清楚了"，
+   * 完全是假象。
+   */
+  inputAssetId: string | null;
+  /** 输入图缩略图。先垫上，等清晰那张到了再换，避免中间一片空白 */
   inputPreview: string | null;
   availableModes: WritebackMode[];
-  onWriteback(mode: WritebackMode, layerName: string): void;
+  /**
+   * assetId 是**用户当前正在看的那一张**，不是第 0 张。
+   *
+   * 多图结果里这两者经常不是一回事：用户点开 #3 觉得最好、点「写回」，
+   * 进文档的却是 #1 —— 而界面上没有任何地方提示他写回的不是他选的那张。
+   * 他只会觉得写回坏了，或者以为自己点错了。
+   */
+  onWriteback(mode: WritebackMode, layerName: string, assetId: string): void;
   onCancel(): void;
   onDiscard(): void;
   onRetry(): void;
@@ -94,10 +110,19 @@ export function renderResults(opts: ResultsOptions): HTMLElement {
     card.appendChild(box);
   }
 
+  /*
+   * 当前正在看的是第几张。
+   *
+   * 提到这一层是因为下面的「写回」按钮要读它 —— 以前它埋在结果图那个
+   * if 块里，写回拿不到，于是永远写第 0 张。多图结果里这就是个真问题：
+   * 用户点开 #3 觉得最好、点写回，进文档的却是 #1，
+   * 而界面上没有任何地方提示他写回的不是他选的那张。
+   */
+  let activeIdx = 0;
+
   /* ---- 结果图 ---- */
   if (job.results.length > 0) {
     const strip = h('div', { class: 'result-strip' });
-    let activeIdx = 0;
     const stage = h('div', { class: 'result-stage' });
 
     const showAt = (i: number): void => {
@@ -118,7 +143,22 @@ export function renderResults(opts: ResultsOptions): HTMLElement {
       // 前后对比
       if (opts.inputPreview) {
         const compare = h('div', { class: 'compare' });
-        const before = h('img', { class: 'compare-before', src: opts.inputPreview, alt: '原图' });
+        const before = h('img', { class: 'compare-before', src: opts.inputPreview, alt: '原图' }) as HTMLImageElement;
+        /*
+         * 先用缩略图占位，再异步换成清晰的那一档。
+         *
+         * 不直接等清晰图：那要走一次 HTTP + base64，几百毫秒起步，
+         * 期间对比区会是空的。先垫后换，用户看到的是"由糊变清"，
+         * 而不是"先空一下"。
+         */
+        if (opts.inputAssetId) {
+          void assetImgSrc(opts.inputAssetId, { preview: true }).then(
+            (src) => {
+              before.src = src;
+            },
+            () => undefined
+          );
+        }
         const afterWrap = h('div', { class: 'compare-after-wrap' });
         const after = h('img', { class: 'compare-after', alt: '结果' }) as HTMLImageElement;
         void srcPromise.then((src) => (after.src = src));
@@ -193,7 +233,13 @@ export function renderResults(opts: ResultsOptions): HTMLElement {
       {
         class: 'btn-primary',
         type: 'button',
-        onclick: () => opts.onWriteback(select.value as WritebackMode, nameInput.value.trim() || 'AI 结果')
+        onclick: () =>
+          opts.onWriteback(
+            select.value as WritebackMode,
+            nameInput.value.trim() || 'AI 结果',
+            // 用户正在看的那一张，不是第 0 张
+            job.results[activeIdx]?.assetId ?? job.results[0]!.assetId
+          )
       },
       job.state === 'succeeded' ? '再次写回 Photoshop' : '写回 Photoshop'
     );

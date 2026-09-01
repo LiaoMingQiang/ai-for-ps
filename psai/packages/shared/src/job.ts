@@ -19,6 +19,15 @@ export const JOB_STATES = [
   'inputs_ready',
   'queued_local',
   'submitting',
+  /**
+   * 提交出去了，但**不知道上游收没收**。
+   *
+   * 典型来源：Helper 在「HTTP 请求已发出」和「remote_id 已落库」之间崩了。
+   * 这时候钱可能已经花了，也可能没有 —— 本地没有任何证据能判断。
+   * 自动重来一次是最糟的选择：上游要是其实收下了，用户就被扣两次费。
+   * 所以单独立一个状态停在这里，等人来决定。
+   */
+  'submission_unknown',
   'submitted',
   'remote_queued',
   'running',
@@ -42,6 +51,7 @@ export const JOB_STATE_LABELS: Record<JobState, string> = {
   inputs_ready: '输入就绪',
   queued_local: '本地排队中',
   submitting: '提交中',
+  submission_unknown: '提交结果未知（可能已计费）',
   submitted: '已提交',
   remote_queued: '远端排队中',
   running: '生成中',
@@ -59,6 +69,10 @@ export const JOB_STATE_LABELS: Record<JobState, string> = {
 
 /** 终态：不会再自动流转。 */
 export const TERMINAL_STATES: ReadonlySet<JobState> = new Set<JobState>([
+  // submission_unknown 也算终态 —— 它的定义就是"不知道钱花没花"。
+  // 任何自动动作（恢复、重新入队、退避重试）在这个状态下都可能造成重复扣费，
+  // 所以它必须停在原地，由用户明确决定重来还是放弃。
+  'submission_unknown',
   'succeeded',
   'cancelled',
   'failed',
@@ -93,9 +107,16 @@ export const JOB_TRANSITIONS: Record<JobState, readonly JobState[]> = {
   inputs_uploading: ['inputs_ready', 'failed', 'cancel_requested'],
   inputs_ready: ['queued_local', 'failed', 'cancel_requested'],
   queued_local: ['submitting', 'cancel_requested', 'failed'],
-  submitting: ['submitted', 'failed', 'cancel_requested'],
+  // 提交结果未知：只能由用户明确选择"确实没提交成功，重来一次"（→ queued_local）
+  // 或"算了"（→ cancelled / failed）。绝不自动往回走。
+  submitting: ['submitted', 'submission_unknown', 'failed', 'cancel_requested'],
+  submission_unknown: ['queued_local', 'submitted', 'cancelled', 'failed'],
   submitted: ['remote_queued', 'running', 'downloading', 'failed', 'cancel_requested', 'lost'],
-  remote_queued: ['running', 'cancel_requested', 'failed', 'lost'],
+  // downloading 这条边是真实存在的：任务在远端排着队，等我们下一次轮询时
+  // 它已经跑完了 —— 中间那个 running 我们根本没观察到。
+  // 少了这条边，每一个"跑得比轮询间隔快"的任务都会刷一条非法转移告警，
+  // 而它其实一切正常。转移表要描述真实发生的事，不是我们希望发生的事。
+  remote_queued: ['running', 'downloading', 'result_ready', 'cancel_requested', 'failed', 'lost'],
   running: ['downloading', 'result_ready', 'failed', 'cancel_requested', 'lost'],
   downloading: ['result_ready', 'failed', 'lost'],
   result_ready: ['writeback_pending', 'succeeded', 'failed'],
@@ -190,7 +211,18 @@ export interface JobRecord {
   inputs: JobImageInput[];
   results: JobResultAsset[];
   target: PhotoshopTarget | null;
-  writeback: { mode: WritebackMode; layerName: string } | null;
+  writeback: {
+    mode: WritebackMode;
+    layerName: string;
+    /**
+     * 这条任务创建时，「自动写回」是开着的吗。
+     *
+     * 在任务上冻结而不是每次去读当前设置：用户可能在任务跑的这几分钟里
+     * 把开关关掉了，那时候再按新设置自动写回，就是往他的文档里塞他刚说不要的东西。
+     * 反过来也一样 —— 中途打开开关不该让已经在等的任务突然自己动起来。
+     */
+    auto: boolean;
+  } | null;
   error: PsaiErrorShape | null;
   /** Provider 侧的任务 id（ComfyUI prompt_id / RunningHub taskId） */
   remoteId: string | null;

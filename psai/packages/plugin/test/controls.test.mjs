@@ -83,7 +83,10 @@ async function bundle(outfile) {
 
 before(async () => {
   dataDir = mkdtempSync(join(tmpdir(), 'psai-controls-'));
-  helper = await startHelper({ port: 0, dataDir, workflowsDir: resolve(here, '../../../workflows') });
+  // ephemeral：临时实例一律不探宿主机。新数据目录的默认 ComfyUI 地址
+  // 就是用户本机真实 ComfyUI（127.0.0.1:8188），十几个测试 Helper
+  // 一起去敲它，既不可靠也不礼貌 —— 见 config.ts 里 probeOnStart 的说明。
+  helper = await startHelper({ port: 0, dataDir, ephemeral: true, workflowsDir: resolve(here, '../../../workflows') });
   PORT = Number(new URL(helper.url).port);
   dom = installUxpDom();
   const outfile = join(dataDir, 'controls.test.mjs');

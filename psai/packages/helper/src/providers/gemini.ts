@@ -124,13 +124,15 @@ export class GeminiAdapter implements ProviderAdapter {
       .filter((x) => x.length > 0);
   }
 
-  private async generate(model: string, parts: GeminiPart[]): Promise<GeminiResponse> {
+  private async generate(model: string, parts: GeminiPart[], signal?: AbortSignal): Promise<GeminiResponse> {
     const url = `${this.base()}/models/${encodeURIComponent(model)}:generateContent`;
     const res = await httpFetch(url, {
       method: 'POST',
       headers: this.headers({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ contents: [{ role: 'user', parts }] }),
-      timeoutMs: Math.max(this.opts.timeoutMs, 180_000)
+      timeoutMs: Math.max(this.opts.timeoutMs, 180_000),
+      // 提交进行中被取消时中止请求 —— 那是唯一能真正省下这次费用的时机
+      ...(signal ? { signal } : {})
     });
     if (!res.ok) {
       const t = await res.text().catch(() => '');
@@ -154,7 +156,7 @@ export class GeminiAdapter implements ProviderAdapter {
     }
     parts.push({ text: prompt });
 
-    const json = await this.generate(model, parts);
+    const json = await this.generate(model, parts, ctx.signal);
     const images = collectImages(json);
     if (images.length === 0) {
       const text = collectText(json).slice(0, 300);
@@ -179,7 +181,7 @@ export class GeminiAdapter implements ProviderAdapter {
       parts.push({ inline_data: { mime_type: img.mime, data: img.buffer.toString('base64') } });
     }
     parts.push({ text: [input.instruction, input.userText].filter(Boolean).join('\n\n') });
-    const json = await this.generate(model, parts);
+    const json = await this.generate(model, parts, input.signal);
     const text = collectText(json).trim();
     if (!text) throw new PsaiError('PROVIDER_BAD_RESPONSE', 'Gemini 没有返回文本');
     return text;
@@ -191,7 +193,8 @@ export class GeminiAdapter implements ProviderAdapter {
       : { state: 'unknown' };
   }
 
-  async fetchResults(remoteId: string): Promise<ResultImage[]> {
+  async fetchResults(remoteId: string, signal?: AbortSignal): Promise<ResultImage[]> {
+    void signal;
     const hit = this.results.get(remoteId);
     if (!hit) throw new PsaiError('JOB_LOST', 'Gemini 的结果已过期，请重新提交');
     return hit.images;

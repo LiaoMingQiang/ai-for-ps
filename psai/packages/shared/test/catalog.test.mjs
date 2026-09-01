@@ -252,7 +252,11 @@ test('Provider 注册表覆盖图谱里的推荐平台', () => {
   }
   // 取消语义必须如实标注
   assert.equal(PROVIDERS.find((p) => p.id === 'runninghub').cancelSupport, 'none');
-  assert.equal(PROVIDERS.find((p) => p.id === 'comfyui').cancelSupport, 'full');
+  // ComfyUI 是 queuedOnly 而不是 full：它的 /interrupt 是**全局**的，
+  // 中断的是"这台机器当前正在执行的那一个"，不是我们指定的那一个。
+  // 独占实例上等同于 full，但只要那台机器上还有别人，已在执行的任务就取消不了 ——
+  // 承诺不了就别承诺。
+  assert.equal(PROVIDERS.find((p) => p.id === 'comfyui').cancelSupport, 'queuedOnly');
 });
 
 test('需要密钥的 Provider 都把密钥字段标成了 secret', () => {

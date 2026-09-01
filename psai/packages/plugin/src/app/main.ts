@@ -12,6 +12,7 @@ import {
   connectEvents,
   disconnectEvents,
   onHelperEvent,
+  onEventsOpen,
   ApiError,
   resolveBase,
   probeResults,
@@ -24,8 +25,44 @@ import { renderGeneratePage, refreshGenerateResults, detachGenerateResults } fro
 import { renderHistoryPage } from '../ui/page-history.js';
 import { renderSettingsPage } from '../ui/page-settings.js';
 import { renderComfyWebPage } from '../ui/page-comfyweb.js';
+import { maybeAutoWriteback, reconcileAutoWriteback, pruneAutoWriteback } from '../ui/autowriteback.js';
+import { resumePendingAcks, flushAcks, stopAckFlush } from '../ui/writeback-queue.js';
+import { mergeJobSnapshot } from './reconcile.js';
 
 let booted = false;
+/** onEventsOpen 的退订函数。不留着的话，重复 boot 会越挂越多。 */
+let unsubEventsOpen: (() => void) | null = null;
+
+const RECONCILE_LIMIT = 100;
+
+/**
+ * 把面板里的任务列表和 Helper 对齐。
+ *
+ * 和 Photoshop **无关**：断线期间漏掉的状态变化，不管 Photoshop
+ * 在不在都得补。上一版把这件事挂在 reconcileAutoWriteback 里，
+ * 而那个函数第一句就是 `if (!bridge.isAvailable()) return` ——
+ * 于是在浏览器预览里、Photoshop 崩过一次之后、或者干脆没装 Photoshop 的
+ * 机器上，任务列表永远停在断线那一刻，用户看到一堆假的「生成中」。
+ *
+ * 合并是单调的（见 reconcile.ts）：几百毫秒前发出的这次请求，
+ * 回来时可能已经比 WebSocket 刚推来的状态旧了，绝不能盖上去。
+ */
+export async function reconcileJobs(): Promise<void> {
+  const requestedAt = Date.now();
+  let snapshot;
+  try {
+    snapshot = await api.jobs({ limit: RECONCILE_LIMIT });
+  } catch {
+    // 拉不回来就用内存里那份凑合，总比把列表清空强
+    return;
+  }
+  setState({
+    jobs: mergeJobSnapshot(getState().jobs, snapshot, {
+      complete: snapshot.length < RECONCILE_LIMIT,
+      requestedAt
+    })
+  });
+}
 let healthTimer: ReturnType<typeof setTimeout> | null = null;
 const mounts = new Set<{ root: HTMLElement; kind: 'main' | 'comfyWeb'; dispose: () => void }>();
 
@@ -105,7 +142,64 @@ export async function bootPlugin(): Promise<void> {
   scheduleHealth();
 
   onHelperEvent(handleHelperEvent);
+
+  /*
+   * 补偿挂在 **WebSocket 真正连上** 这个事件上，不是健康检查。
+   *
+   * 健康检查走的是 HTTP：它说"在线"的时候 WebSocket 可能还在重连。
+   * 而 WebSocket 自己悄悄重连的那些次（网络抖一下）根本不经过健康检查 ——
+   * 那期间漏掉的 job:update 就永远没人补，任务停在「等待写回」不动，
+   * 用户看到的是"自动写回没生效"。
+   */
+  /*
+   * 重复 boot 时先把上一次的订阅退掉。
+   *
+   * 不退的话每 boot 一次就多挂一个回调：一次重连会触发 N 次对账、
+   * N 次补报。表现是越用越卡，而且并发的对账互相打架 ——
+   * 而这种问题在开发时（只 boot 一次）永远看不到。
+   */
+  unsubEventsOpen?.();
+  unsubEventsOpen = onEventsOpen(() => {
+    /*
+     * 顺序有讲究：先补报、再对账、最后才轮到自动写回。
+     *
+     * 补报排第一：断线期间可能有"Photoshop 已经改完、回报没发出去"的
+     * 结果卡在队列里。不先补的话，下面的对账会把这些任务看成还停在
+     * writeback_pending，于是自动写回**再写一遍** —— 用户文档里多一个图层。
+     *
+     * 对账排第二，而且**不看 Photoshop 在不在**：列表要对齐是独立的需求。
+     */
+    void (async () => {
+      await flushAcks();
+      await reconcileJobs();
+      // 自动写回接在后面，用的是已经对齐过的列表。它自己会判断
+      // Photoshop 在不在，不需要在这里挡。
+      await reconcileAutoWriteback({ refresh: false });
+    })();
+  });
+
   setState({ booted: true });
+
+  /*
+   * 启动时也要过一遍。
+   *
+   * Photoshop 关掉再打开、插件被重新加载 —— 这期间完成的任务
+   * 一条 job:update 都不会补发给我们。
+   */
+  void (async () => {
+    await reconcileJobs();
+    await reconcileAutoWriteback({ refresh: false });
+  })();
+
+  /*
+   * 把上一次面板关掉时还没报上去的结果捡回来。
+   *
+   * 这些写回**已经改过用户的文档**了 —— 只是结论没送到。
+   * 不捡的话 Helper 那边等到租约过期，判成「等待插件回报超时」，
+   * 用户在历史页看到"写回失败"，而他文档里那个图层好端端地待着，
+   * 于是他会再写一次，多出第二个一模一样的图层。
+   */
+  void resumePendingAcks();
 }
 
 export function teardownPlugin(): void {
@@ -113,6 +207,18 @@ export function teardownPlugin(): void {
   if (healthTimer) clearTimeout(healthTimer);
   healthTimer = null;
   disconnectEvents();
+  // 退订，否则下一次 boot 会再挂一个，重连时对账跑好几遍
+  unsubEventsOpen?.();
+  unsubEventsOpen = null;
+  /*
+   * 只停计时器，**不清**待报队列。
+   *
+   * 队列里那些结果对应的是"文档已经改完、只差报一声"。
+   * 卸载时清掉的话，等于每次关面板都主动制造一次
+   * "Helper 永远等不到结论"——它会等到租约过期，判成写回失败，
+   * 而用户文档里那个图层好端端地待着，然后他会再写一次。
+   */
+  stopAckFlush();
   for (const m of mounts) m.dispose();
   mounts.clear();
   resetStore();
@@ -122,6 +228,10 @@ function handleHelperEvent(ev: HelperEvent): void {
   switch (ev.type) {
     case 'job:update':
       upsertJob(ev.job);
+      // 「自动写回」开着的话，任务一进待写回就自己写下去。
+      // 写回只能发生在插件这一侧（只有 UXP 碰得到 Photoshop），
+      // 所以这个开关必须由这里驱动，Helper 那边做不了。
+      void maybeAutoWriteback(ev.job);
       break;
     case 'gpu':
       setState({ gpu: ev.gpu });
@@ -199,6 +309,7 @@ async function loadBaseData(): Promise<void> {
       api.jobs({ limit: 100 })
     ]);
     setState({ features, settings, providers, workflows, jobs });
+    pruneAutoWriteback(jobs);
     if (settings.ui.lastFeatureId && features.some((f) => f.id === settings.ui.lastFeatureId)) {
       setState({ featureId: settings.ui.lastFeatureId });
     }
@@ -369,9 +480,13 @@ export async function mountMainPanel(root: HTMLElement): Promise<void> {
   };
 
   let painting = false;
-  const paintPage = async (): Promise<void> => {
-    if (painting) return;
-    painting = true;
+  /** 画的过程中又有人要求重画：记下来，画完立刻补一轮。 */
+  let paintDirty = false;
+
+  /**
+   * 画一次当前页。只由 paintPage 调用，它保证同时只有一个在跑。
+   */
+  const paintOnce = async (): Promise<void> => {
     try {
       const page = getState().page;
       clear(pageHost);
@@ -403,6 +518,32 @@ export async function mountMainPanel(root: HTMLElement): Promise<void> {
       pageHost.appendChild(
         h('div', { class: 'notice warn' }, '页面渲染出错：', String(e instanceof Error ? e.message : e))
       );
+    }
+  };
+
+  /*
+   * 重画请求不许被丢掉。
+   *
+   * 老写法是 `if (painting) return` —— 正在画的时候来的请求直接扔了。
+   * 而画一页是**异步**的（要拉预设、拉模型列表，几百毫秒起步），
+   * 这段时间恰恰是用户最可能再点一下的时候：他点了「历史」，
+   * 上一次重画还没画完，于是这一下被吞掉 —— 界面停在生成页不动。
+   * 他会再点一次，运气不好再被吞一次。
+   *
+   * 改成"记一个脏标记，画完再补一轮"：中间那些状态用户本来也看不见，
+   * 而最后落到的一定是他最后要的那一页。
+   */
+  const paintPage = async (): Promise<void> => {
+    if (painting) {
+      paintDirty = true;
+      return;
+    }
+    painting = true;
+    try {
+      do {
+        paintDirty = false;
+        await paintOnce();
+      } while (paintDirty);
     } finally {
       painting = false;
     }
@@ -433,17 +574,42 @@ export async function mountMainPanel(root: HTMLElement): Promise<void> {
    * 但每一次都是真的拆 DOM、重建 <img>。
    * 合并到下一帧再画：用户看到的还是最新状态，重绘次数掉一个数量级。
    */
+  /*
+   * 结果区重绘的**最小间隔**。
+   *
+   * 原来是合并到下一帧就画。一条任务在跑的时候 job:update 是连续来的
+   * （进度、状态迁移、结果落库），七条一起跑就是每帧都在拆 DOM 重建 ——
+   * 而重建的内容里有 <img>，还带 base64 源。
+   * 表现就是"上下滑动不流畅"：滚动和重建抢同一个主线程。
+   *
+   * 250ms 一次对进度条完全够看（一秒四次），而重建次数掉了一个数量级。
+   */
+  const RESULTS_REPAINT_MS = 250;
   let repaintQueued = false;
+  let lastRepaintAt = 0;
+
   const queueResultsRepaint = (): void => {
     if (repaintQueued) return;
     repaintQueued = true;
+
     const run = (): void => {
       repaintQueued = false;
+      lastRepaintAt = Date.now();
       if (getState().page !== 'generate') return;
       // 只重画结果区。整页重建会把正在输入的提示词、刚选好的图和立方体角度全冲掉。
       // 万一生成页还没登记回调（刚切过来、还在渲染），才退回整页重绘。
       if (!refreshGenerateResults()) void paintPage();
     };
+
+    /*
+     * 离上一次不足 250ms 就排到边界上再画（trailing）——
+     * 而不是丢弃：最后那条更新必须画出来，否则进度会停在 99% 不动。
+     */
+    const wait = Math.max(0, RESULTS_REPAINT_MS - (Date.now() - lastRepaintAt));
+    if (wait > 0) {
+      setTimeout(run, wait);
+      return;
+    }
     // UXP 有 requestAnimationFrame，但不保证；退回 setTimeout(0) 同样能合并同一批事件
     if (typeof requestAnimationFrame === 'function') requestAnimationFrame(run);
     else setTimeout(run, 0);
