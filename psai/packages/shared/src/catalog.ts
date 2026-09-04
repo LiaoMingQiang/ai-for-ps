@@ -16,6 +16,8 @@
 
 import type { ParamSpec } from './paramspec.js';
 import { defaultValues } from './paramspec.js';
+// workflow.ts 不 import 任何东西，所以这条不会成环
+import { BINDABLE_PARAMS } from './workflow.js';
 import type { WritebackMode, InputSource } from './params.js';
 import {
   MAX_REFERENCE_IMAGES,
@@ -1075,6 +1077,62 @@ export function allFeatures(): FeatureSpec[] {
   return walkCatalog()
     .map((n) => n.feature)
     .filter((f): f is FeatureSpec => !!f);
+}
+
+/**
+ * 一份导入工作流的参数绑定 → 生成页要画的控件。
+ *
+ * 「自定义工作流」的参数是**跟着选中的那份图走的**：这份图绑了提示词和步数，
+ * 界面就该有这两个控件；换一份绑了重绘幅度的，界面就该跟着换。
+ * 它不像别的功能那样有一张写死的参数表。
+ *
+ * 复用上面那些 pXxx 构造器，而不是在界面层另写一套：范围、步长、默认值、
+ * 哪些该收进「高级」——这些取值都是调出来的（比如重绘幅度 0.2~0.35 保结构）。
+ * 各写一套的话，同一个「步数」在内置功能里是 1~100、在自定义工作流里
+ * 可能变成 1~50，而用户没有任何理由预期这种差别。
+ *
+ * 图像位不在这里出：图由功能自己的图像输入区提供，提交时按绑定填进去。
+ * 在参数区再画一个图片框，就成了两个都能放图、而只有一个算数的输入口。
+ */
+export function paramsForWorkflowBindings(bindings: ReadonlyArray<{ paramId: string }>): ParamSpec[] {
+  const make: Record<string, () => ParamSpec> = {
+    prompt: () => pPrompt({ required: false }),
+    negativePrompt: () => pNegativePrompt(),
+    seed: pSeed,
+    steps: () => pSteps(),
+    cfg: () => pCfg(),
+    denoise: () => pDenoise(),
+    sampler: () => pSampler(),
+    scheduler: () => pScheduler(),
+    strength: () => pStrength(),
+    upscaleFactor: () => pUpscaleFactor(),
+    batchSize: () => ({
+      kind: 'slider',
+      id: 'batchSize',
+      label: '批量数',
+      min: 1,
+      max: 8,
+      step: 1,
+      defaultValue: 1,
+      precision: 0,
+      advanced: true
+    })
+  };
+
+  const out: ParamSpec[] = [];
+  const seen = new Set<string>();
+  for (const b of bindings) {
+    // 同一个参数可以绑到多个节点上（例：正向提示词同时喂两个 CLIPTextEncode）。
+    // 那是绑定层的事，界面上仍然只该有一个控件。
+    if (seen.has(b.paramId)) continue;
+    seen.add(b.paramId);
+    const f = make[b.paramId];
+    if (f) out.push(f());
+  }
+  // 按 BINDABLE_PARAMS 的顺序排，界面顺序才稳定 —— 否则同一份图
+  // 换个绑定顺序保存一次，控件就会跟着重排，用户会以为界面出错了。
+  const order = BINDABLE_PARAMS.map((p) => p.id);
+  return out.sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id));
 }
 
 /** 固定功能：需要在「设置 → 固定功能」里绑定工作流的那些（不含自定义）。 */

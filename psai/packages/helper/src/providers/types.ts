@@ -43,6 +43,14 @@ export interface SubmitContext {
   /** 云端工作流 id（RunningHub） */
   remoteWorkflowId?: string;
   /**
+   * 用户登记的那条云端工作流记录。
+   *
+   * 光有 remoteWorkflowId 不够：RunningHub 上「AI 应用」和「ComfyUI 工作流」
+   * 走两套完全不同的接口，而且 AI 应用的节点参数表只存在这条记录里
+   * （平台没有任何接口能查到它）。
+   */
+  remoteWorkflow?: WorkflowRecord;
+  /**
    * 幂等键。上游支持时带上，同一个键重复提交只会计一次费。
    *
    * 崩溃恢复重放的是**同一个** attempt、用同一个键；

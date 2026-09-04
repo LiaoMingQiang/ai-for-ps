@@ -251,7 +251,8 @@ before(async () => {
   dataDir = mkdtempSync(join(tmpdir(), 'psai-autowb-'));
   comfy = await startComfyStub(0, { runMs: 100 });
   helper = await startHelper({ port: 0, dataDir, ephemeral: true, workflowsDir: resolve(here, '../../../workflows') });
-  PORT = Number(new URL(helper.url).port);
+  PORT = helper.port; // 不从 url 里抠：端口等于 80 时 URL 会规范化掉，Number('') === 0 → undici 报 bad port
+  if (!Number.isInteger(PORT) || PORT <= 0) throw new Error(`Helper 端口不可用：${PORT}（url=${helper.url}）`);
   token = helper.issueToken();
   await helper.recovered;
 

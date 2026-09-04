@@ -113,10 +113,16 @@ export const PROVIDERS: readonly ProviderDescriptor[] = [
     defaultBaseUrl: 'https://www.runninghub.cn',
     baseUrlEditable: true,
     capabilities: ['workflow', 'textToImage', 'imageToImage', 'multiImageInput', 'progress', 'listModels'],
-    credentials: [
-      { key: 'apiKey', label: 'API Key', secret: true, placeholder: 'RunningHub API Key', required: true },
-      { key: 'workflowId', label: '工作流 ID', secret: false, placeholder: '云端工作流 ID', required: false }
-    ],
+    /*
+     * 这里曾经还有一条 `workflowId`（标签「工作流 ID」）。它是死的：
+     * 凭据存储会把它存下来，但整个 Helper 里没有任何一处读它 ——
+     * 真正生效的是 Provider 设置上的 defaultWorkflowId。
+     *
+     * 两个字段在设置页上下紧挨着，标签只差「默认」两个字，
+     * 于是用户填了上面那个（死的），以为配好了，提交时却报没有工作流 ID。
+     * 删掉，只留真正生效的那一个。
+     */
+    credentials: [{ key: 'apiKey', label: 'API Key', secret: true, placeholder: 'RunningHub API Key', required: true }],
     defaultModel: null,
     description: '把 ComfyUI 工作流放到云端跑，不占用本机显卡。',
     recommended: true,

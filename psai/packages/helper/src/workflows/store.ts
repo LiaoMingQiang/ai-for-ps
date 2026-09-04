@@ -8,8 +8,15 @@
 import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync, existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { PsaiError, fixedComfyFeatures } from '@psai/shared';
-import type { ComfyApiGraph, ParamBinding, ScanResult, WorkflowRecord, DependencyReport } from '@psai/shared';
+import { PsaiError, fixedComfyFeatures, PROVIDERS } from '@psai/shared';
+import type {
+  ComfyApiGraph,
+  ParamBinding,
+  ScanResult,
+  WorkflowRecord,
+  WorkflowKind,
+  DependencyReport
+} from '@psai/shared';
 import type { Db } from './../db.js';
 import { scanWorkflow, scanApiGraph } from './scanner.js';
 import type { ObjectInfo } from './scanner.js';
@@ -202,8 +209,98 @@ export class WorkflowStore {
     return { workflow: this.get(id), scan: result, versionBumped: sameName.length > 0 };
   }
 
+  /**
+   * 登记一条**云端**工作流：只记名字和平台侧的 ID，本机没有图。
+   *
+   * 和 import() 的区别不只是少了图。云端条目上扫不出字段、做不了依赖检查，
+   * 参数怎么喂由平台那边的工作流自己决定 —— 我们能保证的只有
+   * 「提交时把这个 ID 发过去」。所以这里**不**碰 bindings，也不跑 validateBindings，
+   * 那两个东西对着一份空图跑出来的结论没有意义。
+   *
+   * 不在这里联网校验 ID 存不存在：登记和验证是两件事。断网、平台抽风、
+   * key 还没填 —— 任何一个都不该挡着用户先把 ID 记下来。要验证有单独的按钮。
+   */
+  importCloud(input: {
+    name: string;
+    providerId: string;
+    remoteId: string;
+    notes?: string;
+    remoteKind?: 'workflow' | 'aiApp';
+    nodeInfo?: Array<{ nodeId: string; fieldName: string; description: string; defaultValue: string }>;
+    bindings?: ParamBinding[];
+  }): {
+    workflow: WorkflowRecord;
+    versionBumped: boolean;
+  } {
+    const name = input.name.trim();
+    const remoteId = input.remoteId.trim();
+    if (!name) throw new PsaiError('JOB_PARAM_INVALID', '缺少工作流名称');
+    if (!remoteId) throw new PsaiError('JOB_PARAM_INVALID', '缺少云端工作流 ID');
+
+    const desc = PROVIDERS.find((p) => p.id === input.providerId);
+    if (!desc) throw new PsaiError('JOB_PARAM_INVALID', `未知的 Provider：${input.providerId}`);
+    if (!desc.capabilities.includes('workflow') || desc.kind === 'comfyui') {
+      throw new PsaiError('JOB_PARAM_INVALID', `${desc.label} 不是以工作流为单位的平台，不能登记云端工作流 ID`);
+    }
+
+    /*
+     * AI 应用必须带 nodeInfoList，否则不许登记。
+     *
+     * 少了它，提交时 nodeInfoList 会是空的 —— RunningHub **照跑不误**，
+     * 用作者预置的示例图出一张图。那是一张跟用户输入毫无关系、
+     * 却带着 SUCCESS 状态回来的图，而且是花了钱才拿到的。
+     * 这种假成功比登记时就被拦下难查得多，所以拦在这里。
+     */
+    if (input.remoteKind === 'aiApp' && !(input.nodeInfo && input.nodeInfo.length)) {
+      throw new PsaiError(
+        'JOB_PARAM_INVALID',
+        'AI 应用必须带上节点参数表：请到平台该应用的 API 页面，把「提交请求 → 请求示例」那段 curl 复制过来。' +
+          '（AI 应用的节点号没有任何接口能查到，只能这样带进来。）'
+      );
+    }
+
+    // 哈希用「平台 + ID」而不是图：同一个 ID 重复登记应当被认作同一条
+    const hash = createHash('sha256').update(`${input.providerId}:${remoteId}`).digest('hex');
+    const sameName = this.versionsOf(name);
+    const identical = sameName.find((w) => w.hash === hash);
+    if (identical) return { workflow: identical, versionBumped: false };
+
+    const version = sameName.length === 0 ? '1.0.0' : bumpMinor(sameName[0]!.version);
+    const id = `wf.cloud.${slug(name)}.${version.replace(/\./g, '_')}`;
+    const now = Date.now();
+    this.db
+      .prepare(
+        `INSERT INTO workflows(id, name, version, source, kind, provider_id, remote_id, remote_kind,
+                               node_info_json, format, graph_json, bindings_json, output_nodes_json,
+                               required_nodes_json, required_models_json, hash, feature_id, notes,
+                               created_at, updated_at)
+         VALUES(?, ?, ?, 'imported', 'cloud', ?, ?, ?, ?, 'api', '{}', ?, '[]', '[]', '[]', ?, NULL, ?, ?, ?)`
+      )
+      .run(
+        id,
+        name,
+        version,
+        input.providerId,
+        remoteId,
+        input.remoteKind ?? 'workflow',
+        input.nodeInfo ? JSON.stringify(input.nodeInfo) : null,
+        JSON.stringify(input.bindings ?? []),
+        hash,
+        input.notes ?? '',
+        now,
+        now
+      );
+
+    return { workflow: this.get(id), versionBumped: sameName.length > 0 };
+  }
+
   saveBindings(id: string, bindings: ParamBinding[]): WorkflowRecord {
     const wf = this.get(id);
+    // 云端条目没有图，绑定要绑到的节点根本不在本机。validateBindings 对着
+    // 空图会把每一条都判成「节点不存在」，报出来的错完全是误导。
+    if (wf.kind === 'cloud') {
+      throw new PsaiError('JOB_PARAM_INVALID', '云端工作流的参数由平台侧的工作流决定，本机不做参数绑定');
+    }
     const problems = validateBindings(wf.graph, bindings);
     if (problems.length) throw new PsaiError('WORKFLOW_BINDING_INVALID', problems.join('; '));
     this.db
@@ -254,6 +351,16 @@ function rowToWorkflow(r: Record<string, unknown>): WorkflowRecord {
     name: String(r['name']),
     version: String(r['version']),
     source: String(r['source']) as 'builtin' | 'imported',
+    // 老库里这一列不存在（ensureColumn 补的默认值只对新写入生效），
+    // 所以读的时候也要兜一次 'comfy'，否则升级后旧记录会变成 undefined
+    kind: (r['kind'] === 'cloud' ? 'cloud' : 'comfy') as WorkflowKind,
+    providerId: r['provider_id'] === null || r['provider_id'] === undefined ? null : String(r['provider_id']),
+    remoteId: r['remote_id'] === null || r['remote_id'] === undefined ? null : String(r['remote_id']),
+    remoteKind:
+      r['remote_kind'] === null || r['remote_kind'] === undefined
+        ? null
+        : (String(r['remote_kind']) as 'workflow' | 'aiApp'),
+    nodeInfo: r['node_info_json'] ? safeParse(String(r['node_info_json']), null) : null,
     format: String(r['format']) as 'api' | 'ui',
     graph: safeParse<ComfyApiGraph>(String(r['graph_json']), {}),
     bindings: safeParse<ParamBinding[]>(String(r['bindings_json'] ?? '[]'), []),

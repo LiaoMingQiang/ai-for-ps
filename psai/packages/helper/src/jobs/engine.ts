@@ -159,7 +159,27 @@ export class JobEngine {
     // 工作流解析（comfy 类必须有）
     let workflowId: string | null = null;
     let workflowVersion: string | null = null;
-    if (feature.engine === 'comfy-workflow' && providerId !== 'runninghub') {
+    /*
+     * 先看这次点名的是不是一条**云端**工作流条目。
+     *
+     * 「自定义工作流」的工作流是每次提交时在生成页选的，选到云端条目时
+     * 走的是云端平台，不该套本机图的那套校验（节点在平台那边，本机没有图）。
+     * 记下 id 就够了 —— 跑的时候按 id 取回它的 remoteId 发给平台。
+     *
+     * 放在下面那个 if 之前判：那个分支的条件里有 `providerId !== 'runninghub'`，
+     * 云端条目多半正好落在被排除的那一侧，写在后面就永远走不到，
+     * workflowId 会留在 null，于是选了等于没选。
+     */
+    const requestedWorkflowId =
+      req.workflowId ?? this.settings.binding(req.featureId)?.workflowId ?? feature.defaultWorkflowId;
+    const requestedRecord =
+      feature.engine === 'comfy-workflow' && requestedWorkflowId ? this.workflows.find(requestedWorkflowId) : null;
+    const requestedCloud = requestedRecord?.kind === 'cloud' ? requestedRecord : null;
+
+    if (requestedCloud) {
+      workflowId = requestedCloud.id;
+      workflowVersion = requestedCloud.version;
+    } else if (feature.engine === 'comfy-workflow' && providerId !== 'runninghub') {
       const binding = this.settings.binding(req.featureId);
       workflowId = req.workflowId ?? binding?.workflowId ?? feature.defaultWorkflowId;
       if (!workflowId) {
@@ -473,6 +493,18 @@ export class JobEngine {
 
     // 5. 提交
     const binding = this.settings.binding(job.featureId);
+    /*
+     * job.workflowId 可能指向两类东西：本机图，或者一条云端条目。
+     *
+     * 本机图 → 整份图发给 ComfyUI。
+     * 云端条目 → 本机没有图，要发的是它记着的那个平台侧 ID。
+     *
+     * 用 find 而不是 get：get 找不到会抛，而这里已经在跑作业了 ——
+     * 工作流在提交后被删掉是可能的，那时候该按"没绑工作流"往下走，
+     * 而不是抛一个没人接的异常把整条作业卡在中间态。
+     */
+    const jobWorkflow = job.workflowId ? this.workflows.find(job.workflowId) : null;
+    const cloudRemoteId = jobWorkflow?.kind === 'cloud' ? jobWorkflow.remoteId : null;
     const ctx = {
       jobId,
       featureId: job.featureId,
@@ -480,12 +512,26 @@ export class JobEngine {
       inputs: images,
       prompt: resolved.prompt,
       negativePrompt: resolved.negativePrompt,
-      ...(job.workflowId ? { workflow: this.workflows.get(job.workflowId) } : {}),
+      ...(jobWorkflow && jobWorkflow.kind !== 'cloud' ? { workflow: jobWorkflow } : {}),
+      // 云端条目整条带过去：AI 应用的节点参数表只存在这条记录里，
+      // 平台没有任何接口能查到它
+      ...(jobWorkflow?.kind === 'cloud' ? { remoteWorkflow: jobWorkflow } : {}),
       ...(binding?.model ? { model: binding.model } : {}),
       ...(typeof resolved.values['model'] === 'string' && resolved.values['model']
         ? { model: resolved.values['model'] as string }
         : {}),
-      ...(binding?.remoteWorkflowId ? { remoteWorkflowId: binding.remoteWorkflowId } : {})
+      /*
+       * 这一次点名的云端条目优先于功能上的固定绑定。
+       *
+       * 顺序不能反：「自定义工作流」是每次提交现选的，如果让固定绑定盖过它，
+       * 用户在下拉里选了 A、跑出来的却是别处绑的 B —— 而界面上没有任何
+       * 地方能看出这件事。现选的永远赢。
+       */
+      ...(cloudRemoteId
+        ? { remoteWorkflowId: cloudRemoteId }
+        : binding?.remoteWorkflowId
+          ? { remoteWorkflowId: binding.remoteWorkflowId }
+          : {})
     };
 
     if (stopNow()) {

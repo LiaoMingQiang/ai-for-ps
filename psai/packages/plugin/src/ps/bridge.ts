@@ -936,6 +936,33 @@ export async function pickImageFile(): Promise<{ bytes: ArrayBuffer; name: strin
   return { bytes: await entry.read({ format: fsFormats.binary }), name: entry.name };
 }
 
+/**
+ * 从磁盘选一个文本文件（工作流 JSON）。
+ *
+ * 为什么要有它：ComfyUI 导出的图动辄几十 KB、上千行。让用户把这么一大坨
+ * 粘进一个文本框，本身就是个别扭的做法 —— 粘贴容易漏、看不全、
+ * 也没法确认到底进去了多少。直接读文件是这件事的正常做法。
+ *
+ * 走 UXP 的文件选择器而不是 input[type=file]：UXP 的 DOM 子集里
+ * 那个控件不可用（它没有文件系统权限模型，选了也读不到内容）。
+ *
+ * 用 utf8 格式读：JSON 就是文本，按二进制读回来还得自己解码，
+ * 而 ComfyUI 导出的文件里常有中文提示词，解错就是一堆乱码。
+ */
+export async function pickJsonFile(): Promise<{ text: string; name: string } | null> {
+  requirePs();
+  const entry = (await localFileSystem!.getFileForOpening({
+    types: ['json'],
+    allowMultiple: false
+  })) as { read(opts?: { format?: unknown }): Promise<string>; name: string } | null;
+  if (!entry) return null;
+  const fsFormats = ((globalThis as { require?: (m: string) => { storage?: { formats?: { utf8?: unknown } } } }).require?.(
+    'uxp'
+  )?.storage?.formats ?? {}) as { utf8?: unknown };
+  const text = await entry.read(fsFormats.utf8 === undefined ? undefined : { format: fsFormats.utf8 });
+  return { text: String(text), name: entry.name };
+}
+
 /* ---------------- 写回前校验 ---------------- */
 
 export interface ValidateResult {

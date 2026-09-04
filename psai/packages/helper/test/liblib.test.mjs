@@ -166,9 +166,15 @@ test('ComfyUI 模板 ID 是第三个字段，且不是必填', () => {
 test('通用 Provider 卡片必须能渲染多个凭据字段', () => {
   // LiblibAI 有 3 个字段。卡片以前只渲染第一个 secret 的，
   // 用户填完 AccessKey 保存、验证失败，而界面上根本没有第二个框可填。
+  //
+  // 原来这里还断言 RunningHub 也是多字段的（apiKey + workflowId）。那个
+  // workflowId 是**死字段** —— 存得进去，Helper 里没有任何一处读它，
+  // 而它在设置页上就挨着真正生效的「默认工作流 ID」，只差两个字。
+  // 用户填了上面那个以为配好了，提交却说没有工作流 ID。已经删掉，
+  // 所以这条改成只认 LiblibAI：它的三个字段是真的都要用的。
   const multi = PROVIDERS.filter((p) => p.credentials.length > 1).map((p) => p.id);
-  assert.ok(multi.includes('liblib'), 'LiblibAI 是多字段的');
-  assert.ok(multi.includes('runninghub'), 'RunningHub 也是多字段的（apiKey + workflowId）');
+  assert.ok(multi.includes('liblib'), 'LiblibAI 是多字段的（accessKey + secretKey + comfyTemplateUuid）');
+  assert.equal(findProvider('liblib').credentials.length, 3);
 });
 
 test('RunningHub 没有被改坏', () => {
@@ -180,7 +186,11 @@ test('RunningHub 没有被改坏', () => {
   assert.equal(p.defaultBaseUrl, 'https://www.runninghub.cn');
   assert.equal(p.recommended, true);
   assert.ok(p.capabilities.includes('workflow'));
-  assert.deepEqual(p.credentials.map((c) => c.key), ['apiKey', 'workflowId']);
+  // 只剩 apiKey：原来那个 workflowId 是死字段，见上面那条用例的注释。
+  assert.deepEqual(
+    p.credentials.map((c) => c.key),
+    ['apiKey']
+  );
   assert.equal(p.cancelSupport, 'none');
 });
 

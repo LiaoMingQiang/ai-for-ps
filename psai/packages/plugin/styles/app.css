@@ -491,8 +491,17 @@ body {
 }
 .textarea {
   resize: vertical;
-  min-height: 54px;
+  /* 54px 只有三行多一点。这些框里装的是整段提示词、甚至几十 KB 的
+     工作流 JSON —— 用户反馈过"输入区太小、看不全"。放到 120px，
+     仍然可以手动往下拉。 */
+  min-height: 120px;
   line-height: 1.5;
+}
+/* 工作流 JSON 是这里面最长的东西（ComfyUI 导出的图上千行），单独给更高 */
+.json-area {
+  min-height: 260px;
+  font-family: var(--mono);
+  font-size: 11px;
 }
 .select {
   cursor: pointer;
@@ -1534,6 +1543,23 @@ body {
   font-size: 12.5px;
   font-weight: 600;
 }
+/* 本机 / 云端 徽章。用底色区分而不是只靠文字 ——
+   列表长了以后，扫一眼颜色比逐行读字快。 */
+.wf-tag {
+  font-size: 9.5px;
+  font-weight: 600;
+  padding: 1px 5px;
+  border-radius: 3px;
+  vertical-align: middle;
+}
+.wf-tag.local {
+  background: var(--line-soft);
+  color: var(--text);
+}
+.wf-tag.cloud {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
 .wf-sub,
 .wf-notes {
   font-size: 10.5px;
@@ -1542,6 +1568,13 @@ body {
   display: flex;
   flex-direction: column;
   gap: 7px;
+}
+/* 「自定义工作流」页顶上的工作流选择器 */
+.wf-pick-body,
+.wf-pick {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
 .preset-list {
@@ -2029,6 +2062,8 @@ summary:focus-visible {
 .binding-edit > *,
 .wf-list > *,
 .wf-import > *,
+.wf-pick-body > *,
+.wf-pick > *,
 .preset-list > *,
 .history-list > *,
 .hist-row > *,
@@ -2174,7 +2209,7 @@ summary:focus-visible {
 
 /* textarea 是多行的，不该被单行高度按住 */
 .textarea {
-  min-height: 54px;
+  min-height: 120px;
 }
 
 /* 滑杆右边那个数字框比主控件小一号，跟着小号高度走 */

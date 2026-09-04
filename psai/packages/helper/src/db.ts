@@ -321,6 +321,16 @@ export function openDb(dbPath: string, backupsDir: string, log: Logger): OpenDbR
   ensureColumn(db, 'jobs', 'finalized_at', 'INTEGER');
   ensureColumn(db, 'jobs', 'results_expected', 'INTEGER');
   ensureColumn(db, 'assets', 'has_selection_mask', 'INTEGER NOT NULL DEFAULT 0');
+  // 云端工作流条目：本机没有图，只记「名字 → 平台上的哪个 ID」。
+  // 默认 'comfy' 让老库里已有的行原样成立，不需要数据回填。
+  ensureColumn(db, 'workflows', 'kind', "TEXT NOT NULL DEFAULT 'comfy'");
+  ensureColumn(db, 'workflows', 'provider_id', 'TEXT');
+  ensureColumn(db, 'workflows', 'remote_id', 'TEXT');
+  // RunningHub 的「AI 应用」和「ComfyUI 工作流」是两种东西，接口完全不同，
+  // 光有 remote_id 分不出该往哪儿发。见 shared/runninghub.ts 里的实测记录。
+  ensureColumn(db, 'workflows', 'remote_kind', 'TEXT');
+  // AI 应用的 nodeInfoList 模板：本机拉不到它的图，节点号只能由用户粘贴带进来
+  ensureColumn(db, 'workflows', 'node_info_json', 'TEXT');
 
   const current = readVersion(db);
   const target = PSAI_SCHEMA_VERSION;

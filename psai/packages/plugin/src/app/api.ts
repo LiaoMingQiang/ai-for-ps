@@ -23,6 +23,7 @@ import type {
   ScanResult,
   DependencyReport,
   WorkflowRecord,
+  WorkflowKind,
   ParamBinding,
   PsaiErrorShape,
   ModelScope
@@ -117,6 +118,12 @@ export interface WorkflowSummary {
   name: string;
   version: string;
   source: 'builtin' | 'imported';
+  /** 本机的 ComfyUI 图，还是云端平台上的一个 ID */
+  kind: WorkflowKind;
+  /** kind==='cloud' 时：属于哪个 Provider */
+  providerId: string | null;
+  /** kind==='cloud' 时：平台侧的工作流 / webapp ID */
+  remoteId: string | null;
   format: 'api' | 'ui';
   nodeCount: number;
   requiredNodeTypes: string[];
@@ -424,6 +431,18 @@ export const api = {
   scanWorkflow: (json: unknown) => request<{ scan: ScanResult }>('POST', '/v1/workflows/scan', { json }).then((r) => r.scan),
   importWorkflow: (json: unknown, name: string) =>
     request<{ workflow: WorkflowSummary; scan: ScanResult; versionBumped: boolean }>('POST', '/v1/workflows/import', { json, name }),
+  /** 登记一条云端工作流：只记名字和平台侧 ID，本机没有图。 */
+  addCloudWorkflow: (input: {
+    name: string;
+    providerId: string;
+    remoteId: string;
+    notes?: string;
+    /** 平台上这个 ID 是「工作流」还是「AI 应用」—— 两者接口完全不同 */
+    remoteKind?: 'workflow' | 'aiApp';
+    /** AI 应用：从平台 API 页面复制来的「请求示例」原文，服务端解析出 nodeInfoList */
+    nodeInfoRaw?: string;
+  }) =>
+    request<{ workflow: WorkflowSummary; versionBumped: boolean }>('POST', '/v1/workflows/cloud', input),
   deleteWorkflow: (id: string) => request<{ ok: true }>('DELETE', `/v1/workflows/${encodeURIComponent(id)}`),
   dependencies: (id: string) =>
     request<{ report: DependencyReport }>('GET', `/v1/workflows/${encodeURIComponent(id)}/dependencies`).then((r) => r.report),
@@ -440,6 +459,20 @@ export const api = {
     inputs: Array<{ paramId: string; assetId: string; index: number; source: string }>;
     target: PhotoshopTarget | null;
     writeback: { mode: WritebackMode; layerName?: string } | null;
+    /**
+     * 这一次用哪份本机工作流，覆盖功能的默认绑定。
+     *
+     * 「自定义工作流」靠它才跑得起来：那个功能没有出厂绑定，
+     * 设置页的「固定功能」也不给它绑 —— 工作流是每次提交时在生成页选的。
+     */
+    workflowId?: string;
+    /**
+     * 这一次走哪个后端，覆盖功能的默认解析。
+     *
+     * 「自定义工作流」选到云端条目时必须带上：那个功能挂在 comfyui 分支下，
+     * 不带的话会被解析成本机 ComfyUI，而要跑的图在平台那边。
+     */
+    providerId?: string;
   }) => request<{ job: JobRecord }>('POST', '/v1/jobs', payload).then((r) => r.job),
   /**
    * 取消。
@@ -526,6 +559,16 @@ export const api = {
   },
   updatePrompt: (id: string, patch: { prompt?: string; negativePrompt?: string; label?: string; restore?: boolean }) =>
     request<{ preset: unknown }>('PUT', `/v1/prompts/${encodeURIComponent(id)}`, patch),
+  /**
+   * 新增一条自己的提示词预设。
+   *
+   * 路由和存储一直都在，只是设置页从来没给过入口 —— 于是这一页只能改和
+   * 恢复出厂文本，加不了自己的。
+   */
+  createPrompt: (input: { label: string; kind: string; scope: string[]; prompt: string; description?: string }) =>
+    request<{ preset: { id: string; label: string } }>('POST', '/v1/prompts', input),
+  /** 删除自定义预设。出厂预设删不掉，服务端会拒绝（只能「恢复默认」）。 */
+  deletePrompt: (id: string) => request<{ ok: true }>('DELETE', `/v1/prompts/${encodeURIComponent(id)}`),
 
   textComplete: (payload: { presetId: string; userText?: string; assetIds?: string[]; featureId?: string }) =>
     request<{ text: string; providerId: string; model: string | null }>('POST', '/v1/text/complete', payload),

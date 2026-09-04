@@ -399,3 +399,109 @@ export function rhPresetsForFeature(featureId: string): RunningHubPreset[] {
 export function rhPostUrl(workflowId: string): string {
   return 'https://www.runninghub.cn/post/' + workflowId;
 }
+
+/* ============================ AI 应用（v2 接口） ============================ */
+
+/**
+ * RunningHub 的「AI 应用」和「ComfyUI 工作流」是**两种不同的东西**，
+ * 接口也完全不同。实测（用真实 ID 打 /api/openapi/getJsonApiFormat）：
+ *
+ *   AI 应用 ID  1892509998193545217 → code 380 WORKFLOW_NOT_EXISTS
+ *   工作流 ID   2095750036550721537 → code 810 WORKFLOW_NOT_SAVED_OR_NOT_RUNNING
+ *
+ * 也就是说工作流接口**根本不认识** AI 应用的 ID，不是"没权限"也不是"没绑定"。
+ * 而工作流那个 810 是另一回事：ID 认出来了，只是那份工作流还没在平台上
+ * 保存并成功跑过一次，平台就不给它的 API 格式图。
+ *
+ * 两者的差别决定了本机能做什么：
+ *   工作流  —— 能拉回 ComfyUI 图，于是能扫描、能自动推导参数绑定
+ *   AI 应用 —— 拉不到图，节点号只存在于平台给每个应用单独生成的 API 文档页里，
+ *             没有任何公开接口能查。所以只能让用户把那段 curl 贴进来。
+ */
+export type RunningHubRemoteKind = 'workflow' | 'aiApp';
+
+/** AI 应用 nodeInfoList 里的一项。 */
+export interface RhNodeField {
+  nodeId: string;
+  fieldName: string;
+  /** 平台文档里对这个字段的说明，原样带给用户看 */
+  description: string;
+  /** 文档示例里的值。图片位会被换掉，其余的作为默认值 */
+  defaultValue: string;
+}
+
+/**
+ * 从用户粘贴的内容里解析出 nodeInfoList。
+ *
+ * 接受三种形态，因为用户手上可能是其中任意一种：
+ *   整段 curl（平台「复制文档」给的就是这个）
+ *   请求体 JSON        {"nodeInfoList": [...], "instanceType": "default"}
+ *   光是那个数组        [{"nodeId": "525", ...}]
+ *
+ * 之所以不要求用户自己摘出数组：那一步全靠手工，摘错了报的错会指向别处，
+ * 而他并不知道自己摘错了。宁可这里多认几种形态。
+ */
+export function parseRhNodeInfo(raw: string): RhNodeField[] {
+  const text = raw.trim();
+  if (!text) throw new Error('请先把平台上的「请求示例」粘贴进来。');
+
+  const candidates: string[] = [];
+  // curl 里的 --data-raw '...' / --data '...'，单双引号都认
+  for (const m of text.matchAll(/--data(?:-raw|-binary)?\s+(['"])([\s\S]*?)\1/g)) {
+    if (m[2]) candidates.push(m[2]);
+  }
+  candidates.push(text);
+
+  for (const c of candidates) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(c.trim());
+    } catch {
+      continue;
+    }
+    const list = Array.isArray(parsed)
+      ? parsed
+      : ((parsed as { nodeInfoList?: unknown })?.nodeInfoList ?? null);
+    if (!Array.isArray(list)) continue;
+
+    const out: RhNodeField[] = [];
+    for (const item of list) {
+      const o = item as Record<string, unknown>;
+      const nodeId = o['nodeId'];
+      const fieldName = o['fieldName'];
+      if (typeof nodeId !== 'string' && typeof nodeId !== 'number') continue;
+      if (typeof fieldName !== 'string' || !fieldName) continue;
+      out.push({
+        nodeId: String(nodeId),
+        fieldName,
+        description: typeof o['description'] === 'string' ? o['description'] : '',
+        defaultValue: o['fieldValue'] === undefined || o['fieldValue'] === null ? '' : String(o['fieldValue'])
+      });
+    }
+    if (out.length) return out;
+  }
+
+  throw new Error(
+    '没能从粘贴的内容里找到 nodeInfoList。请到应用的 API 页面，把「提交请求 → 请求示例」那段 curl 整个复制过来。'
+  );
+}
+
+/**
+ * 哪一项是图片位。
+ *
+ * 判据按可靠性排序：字段名叫 image 最硬；其次是示例值看着像图片文件名；
+ * 最后才看说明里有没有「上传/图」这类字眼。
+ *
+ * 认不出来时返回 null 而不是猜第一个 —— 猜错的后果是把图塞进一个数值字段，
+ * 平台照跑不误，然后用作者的示例图出一张跟你输入无关的图。
+ * 那种"看起来成功了"的结果比直接报错难查得多。
+ */
+export function pickRhImageField(fields: readonly RhNodeField[]): RhNodeField | null {
+  return (
+    fields.find((f) => /^image$/i.test(f.fieldName)) ??
+    fields.find((f) => /image|img|photo|picture/i.test(f.fieldName)) ??
+    fields.find((f) => /\.(png|jpe?g|webp)$/i.test(f.defaultValue)) ??
+    fields.find((f) => /上传|图片|图像|产品图/.test(f.description)) ??
+    null
+  );
+}

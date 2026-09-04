@@ -47,11 +47,44 @@ import { readGpuInfo } from './gpu.js';
 export interface StartedHelper {
   cfg: HelperConfig;
   url: string;
+  /**
+   * 实际绑定的端口，已校验在 1~65535 内。
+   *
+   * 单独给一个数字，是因为调用方从 url 里把它抠出来这件事有个陷阱：
+   * `Number(new URL(u).port)` 在端口正好等于协议默认端口（http 的 80）时
+   * 会得到 **0** —— URL 规范会把默认端口规范化成空串，而 Number('') 是 0。
+   * 拿 0 去 fetch，undici 报的是一句 `bad port`，跟真正的原因隔着十万八千里。
+   *
+   * 测试全部用 port: 0 让系统分配，这台机器的动态端口范围又被调得很低
+   * （日志里出现过 6667、10705），所以这不是纯理论。与其让每个调用方
+   * 各自小心，不如根本不让他们做这个转换。
+   */
+  port: number;
   stop: () => Promise<void>;
   /** 恢复流程的完成信号。stop() 会等它，避免关库时恢复还在写。 */
   recovered: Promise<void>;
   /** 测试用：拿一个可用 token，免去走配对流程 */
   issueToken: () => string;
+}
+
+/**
+ * 问一下占着这个端口的 Helper 是哪一版。撞锁时用来把日志说清楚。
+ *
+ * /v1/health 不需要配对 token —— 状态条在配对之前也要能显示在线状态，
+ * 所以它本来就是公开的。超时给得很短：这只是为了让一条日志更有用，
+ * 不值得让启动卡在这儿。
+ */
+async function probeRunningVersion(port: number): Promise<string | null> {
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/v1/health`, {
+      signal: AbortSignal.timeout(1500)
+    });
+    if (!res.ok) return null;
+    const body = (await res.json()) as { version?: unknown };
+    return typeof body.version === 'string' ? body.version : null;
+  } catch {
+    return null;
+  }
 }
 
 function acquireLock(cfg: HelperConfig, log: Logger): boolean {
@@ -126,7 +159,29 @@ export async function startHelper(overrides: Partial<HelperConfig> = {}): Promis
   log.info(`AI for PS Helper ${PSAI_VERSION} 启动中`, { dataDir: cfg.dataDir, port: cfg.port });
 
   if (!acquireLock(cfg, log)) {
-    throw new Error('已有 Helper 实例在运行');
+    /*
+     * 只说「已有实例在运行」是不够的 —— 真机上出过这样一次：
+     * 用户装了新版，面板却一直显示旧的 Helper 版本号，怎么重装都没用。
+     * 原因是一个几天前手工起的旧 Helper 一直占着端口，新装的那个
+     * 每次启动都撞锁、悄悄退掉。日志里只有这一句话，看不出撞的是谁，
+     * 于是"安装包没更新后端"这个错误结论看起来完全成立。
+     *
+     * 所以撞锁时去问一下对方是哪一版，把两个版本号一起写进日志。
+     * 探测失败也不影响结论（进程可能刚死、或者端口是别的程序占的），
+     * 那就退回原来那句话。
+     */
+    const other = await probeRunningVersion(cfg.port);
+    let detail = '已有 Helper 实例在运行';
+    if (other) {
+      detail =
+        other === PSAI_VERSION
+          ? `已有同版本 Helper ${other} 在运行（端口 ${cfg.port}），本次启动跳过`
+          : `端口 ${cfg.port} 被 Helper ${other} 占着，而本次要启动的是 ${PSAI_VERSION} —— ` +
+            `版本不一致。多半是旧版本还在跑（可能来自旧的开机自启或手工启动），` +
+            `装了新版也用不上。请先结束那个进程再启动本版本。`;
+    }
+    log.warn(detail);
+    throw new Error(detail);
   }
 
   const { db, fromVersion, toVersion, backupPath } = openDb(cfg.dbPath, cfg.backupsDir, log);
@@ -262,6 +317,7 @@ export async function startHelper(overrides: Partial<HelperConfig> = {}): Promis
   return {
     cfg,
     url,
+    port: boundPort,
     stop,
     recovered,
     issueToken: () => {

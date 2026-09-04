@@ -499,14 +499,16 @@ async function renderBindings(host: HTMLElement): Promise<void> {
           await renderSettingsPage(host.parentElement as HTMLElement);
         }
       }) as HTMLSelectElement;
-      for (const w of workflows) {
+      // 本机 ComfyUI 只能跑本机的图。云端条目在这个下拉里出现的话，
+      // 选中后提交会被 ComfyUI 直接拒 —— 它拿到的是一份空图。
+      for (const w of workflows.filter((x) => x.kind !== 'cloud')) {
         const opt = h('option', { value: w.id }, `${w.name} v${w.version}${w.source === 'builtin' ? '（内置）' : ''}`) as HTMLOptionElement;
         if (w.id === f.workflowId) opt.setAttribute('selected', '');
         wfSelect.appendChild(opt);
       }
       detailControl = wfSelect;
     } else if (f.providerId === 'runninghub') {
-      detailControl = renderRunningHubPicker(f);
+      detailControl = renderRunningHubPicker(f, workflows);
     } else {
       detailControl = h('input', {
         class: 'input',
@@ -616,6 +618,93 @@ async function renderBindings(host: HTMLElement): Promise<void> {
 
 /* ---------------- 工作流 ---------------- */
 
+/**
+ * 括号有没有配平（字符串内部的括号不算）。
+ *
+ * 只用来判断「是不是粘了半截」，所以不追求是个完整的 JSON 校验器：
+ * 深度收不回 0 就说明后半截没了。字符串状态和转义要处理 —— ComfyUI 的
+ * 提示词里出现 `{` `}` 很常见（权重语法），不排除的话正常的图会被误判成截断。
+ */
+function unbalanced(text: string): boolean {
+  let depth = 0;
+  let inStr = false;
+  let escaped = false;
+  for (const ch of text) {
+    if (inStr) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inStr = false;
+      continue;
+    }
+    if (ch === '"') inStr = true;
+    else if (ch === '{' || ch === '[') depth++;
+    else if (ch === '}' || ch === ']') depth--;
+  }
+  return depth > 0 || inStr;
+}
+
+/** Provider id → 中文名。认不出来就原样显示 id，总比显示 undefined 强。 */
+function providerLabel(id: string | null): string {
+  if (!id) return '未知平台';
+  return findProvider(id)?.label ?? id;
+}
+
+/**
+ * 把用户粘进文本框的东西解析成一份工作流图。
+ *
+ * 原来这里是裸的 `JSON.parse(jsonArea.value)`。文本框空着时它抛的是
+ * `Unexpected end of JSON input` —— 一句 V8 的英文内部错误，直接被当成
+ * 「导入失败」的副标题显示出来。用户看到的是插件坏了，而不是「你还没粘东西」。
+ * 扫描按钮同一个毛病。
+ *
+ * 所以这里把几种真实会发生的情况分开说清楚，而不是把异常原样端上去：
+ *   什么都没粘 · 粘的是网页而不是 JSON · 粘到一半被截断 · 顶层不是对象
+ *
+ * 顺手容错两种常见的粘贴污染：BOM，以及从聊天窗口复制时带出来的 ``` 围栏。
+ * 这两个都会让 JSON.parse 失败，但用户看着自己粘的内容是对的，很难自查。
+ */
+export function parseGraphInput(raw: string): unknown {
+  let text = raw.replace(/^﻿/, '').trim();
+  if (!text) throw new Error('请先把 ComfyUI 导出的 JSON 粘贴到下面的框里。');
+
+  // ```json … ``` 围栏
+  const fenced = /^```[a-zA-Z]*\s*\r?\n([\s\S]*?)\r?\n?```$/.exec(text);
+  if (fenced?.[1]) text = fenced[1].trim();
+
+  if (text.startsWith('<')) {
+    throw new Error('粘进来的是网页内容，不是 JSON。请在 ComfyUI 里用「导出(API)」保存成文件，再把文件内容粘过来。');
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    /*
+     * 「粘贴时被截断」是这里最常见的失败，值得单独说 —— 用户会以为
+     * 自己粘的是完整的，只有点破了才会回去重新复制。
+     *
+     * 不能靠匹配 V8 的错误文案来判断：断在 token 中间（`"seed": 12`）时
+     * 它报的是 "Expected ',' or '}'"，只有断在结构边界才报 "Unexpected end"。
+     * 所以直接数括号 —— 没配平就是缺了后半截，这个判据跟引擎的措辞无关。
+     */
+    if (unbalanced(text)) {
+      throw new Error(
+        `JSON 不完整，像是粘贴时被截断了（当前 ${text.length} 个字符）。ComfyUI 导出的图通常有几十 KB，检查一下是不是只粘进来一部分。`
+      );
+    }
+    throw new Error(`这段文本不是合法的 JSON：${msg}`);
+  }
+
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('这不是一份工作流：顶层应该是一个对象。ComfyUI 的「导出(API)」格式是 { 节点 id: {…} }。');
+  }
+  if (Object.keys(parsed as object).length === 0) {
+    throw new Error('这份 JSON 是空的，里面没有任何节点。');
+  }
+  return parsed;
+}
+
 async function renderWorkflows(host: HTMLElement): Promise<void> {
   const workflows = await api.workflows();
   setState({ workflows });
@@ -626,11 +715,49 @@ async function renderWorkflows(host: HTMLElement): Promise<void> {
   const importBox = h('div', { class: 'wf-import' });
   const nameInput = h('input', { class: 'input', type: 'text', placeholder: '工作流名称' }) as HTMLInputElement;
   const jsonArea = h('textarea', {
-    class: 'input textarea',
-    rows: '6',
-    placeholder: '把 ComfyUI 导出的 JSON 粘贴到这里（推荐用「导出(API)」格式）'
+    class: 'input textarea json-area',
+    rows: '14',
+    placeholder: '把 ComfyUI 导出的 JSON 粘贴到这里（推荐用「导出(API)」格式），或者用下面的「选择 JSON 文件」'
   }) as HTMLTextAreaElement;
   const scanOut = h('div', { class: 'muted' });
+
+  /*
+   * 字符数。
+   *
+   * 用户反馈"粘贴不进全部字符"。粘贴到底进去了多少，光看一个高度固定的
+   * 文本框是判断不出来的 —— 它只显示末尾几行，看起来永远像是"只有这些"。
+   * 报出字符数，用户拿它跟源文件一比就知道全没全。
+   */
+  const sizeOut = h('div', { class: 'muted hint' });
+  const showSize = (): void => {
+    const n = jsonArea.value.length;
+    sizeOut.textContent = n ? `当前 ${n.toLocaleString()} 个字符` : '';
+  };
+  jsonArea.oninput = showSize;
+
+  const fileBtn = h(
+    'button',
+    {
+      class: 'btn-ghost',
+      type: 'button',
+      onclick: async () => {
+        try {
+          const picked = await bridge.pickJsonFile();
+          if (!picked) return; // 用户取消了
+          jsonArea.value = picked.text;
+          showSize();
+          // 文件名去掉扩展名当默认名字，省一次手打
+          if (!nameInput.value.trim()) nameInput.value = picked.name.replace(/\.json$/i, '');
+          scanOut.className = 'ok';
+          scanOut.textContent = `已读入 ${picked.name}（${picked.text.length.toLocaleString()} 个字符）`;
+        } catch (e) {
+          scanOut.className = 'err';
+          scanOut.textContent = `读文件失败：${e instanceof Error ? e.message : String(e)}`;
+        }
+      }
+    },
+    '选择 JSON 文件'
+  );
 
   const scanBtn = h(
     'button',
@@ -641,7 +768,7 @@ async function renderWorkflows(host: HTMLElement): Promise<void> {
         scanOut.className = 'muted';
         scanOut.textContent = '正在扫描…';
         try {
-          const scan = await api.scanWorkflow(JSON.parse(jsonArea.value));
+          const scan = await api.scanWorkflow(parseGraphInput(jsonArea.value));
           const semantics = scan.fields.filter((f) => f.semantic).map((f) => f.semantic);
           scanOut.className = 'ok';
           scanOut.textContent = `格式 ${scan.format} · ${scan.nodeCount} 节点 · 输出节点 ${scan.outputNodeIds.join(',')} · 识别出 ${new Set(semantics).size} 类可绑定字段`;
@@ -665,7 +792,7 @@ async function renderWorkflows(host: HTMLElement): Promise<void> {
           return;
         }
         try {
-          const res = await api.importWorkflow(JSON.parse(jsonArea.value), nameInput.value.trim());
+          const res = await api.importWorkflow(parseGraphInput(jsonArea.value), nameInput.value.trim());
           toast(res.versionBumped ? `已导入为 v${res.workflow.version}` : '已导入', res.workflow.name);
           jsonArea.value = '';
           nameInput.value = '';
@@ -680,63 +807,189 @@ async function renderWorkflows(host: HTMLElement): Promise<void> {
 
   importBox.appendChild(fieldRow('名称', nameInput));
   importBox.appendChild(fieldRow('JSON', jsonArea));
-  importBox.appendChild(h('div', { class: 'row gap' }, scanBtn, importBtn));
+  importBox.appendChild(sizeOut);
+  importBox.appendChild(h('div', { class: 'row gap' }, fileBtn, scanBtn, importBtn));
   importBox.appendChild(scanOut);
 
   host.appendChild(card(`工作流（${workflows.length}）`, list));
-  host.appendChild(card('导入工作流', importBox));
+  host.appendChild(card('导入 ComfyUI 工作流（本机）', importBox));
+  host.appendChild(card('添加云端工作流', await cloudWorkflowBox(host)));
+}
+
+/**
+ * 「添加云端工作流」表单。
+ *
+ * 为什么需要它：以前云端工作流 ID 只能在两个地方手打 —— Provider 卡片上的
+ * 「默认工作流 ID」，和某个功能绑定里的「自定义工作流 ID…」。打完不留痕，
+ * 换个功能要再打一遍 19 位数字，也没有任何地方能看到「我一共加过哪些」。
+ *
+ * 登记之后，这条会和本机工作流并排出现在上面的列表里（带「云端」徽章），
+ * 并且出现在「固定功能」的下拉里 —— 用户不用再记 ID。
+ *
+ * 这里**不**做联网验证：登记和验证是两件事。断网、平台抽风、key 还没填，
+ * 任何一个都不该挡着用户先把 ID 记下来。验证在列表行上单独做。
+ */
+async function cloudWorkflowBox(host: HTMLElement): Promise<HTMLElement> {
+  const box = h('div', { class: 'wf-import' });
+
+  // 只列以工作流为单位的云端平台。ComfyUI 是本机跑的，不在此列；
+  // 以模型为单位的平台（Comfly 之类）也没有「工作流 ID」这个概念。
+  const providers = (await api.providers()).filter((p) => p.capabilities.includes('workflow') && p.kind !== 'comfyui');
+
+  if (!providers.length) {
+    box.appendChild(h('div', { class: 'muted' }, '还没有以工作流为单位的云端平台。先在「推荐平台」里启用 RunningHub 或 LiblibAI。'));
+    return box;
+  }
+
+  const nameInput = h('input', { class: 'input', type: 'text', placeholder: '给它起个名字，比如「老照片修复」' }) as HTMLInputElement;
+  const providerSelect = h('select', { class: 'input select' }) as HTMLSelectElement;
+  for (const p of providers) providerSelect.appendChild(h('option', { value: p.id }, p.label));
+  const idInput = h('input', { class: 'input', type: 'text', placeholder: '平台上的工作流 / webapp ID' }) as HTMLInputElement;
+  const out = h('div', { class: 'muted' });
+
+  /*
+   * RunningHub 上「ComfyUI 工作流」和「AI 应用」是两种不同的东西，
+   * 接口也完全不同。实测拿 AI 应用的 ID 去打工作流接口，回的是
+   * 380 WORKFLOW_NOT_EXISTS —— 工作流接口根本不认识它。
+   *
+   * 所以登记时必须问清是哪一类，否则提交时才发现发错了地方，
+   * 而那时候报出来的错会指向"没有参数绑定"这种完全不相干的原因。
+   */
+  const kindSelect = h('select', { class: 'input select' }) as HTMLSelectElement;
+  kindSelect.appendChild(h('option', { value: 'workflow' }, 'ComfyUI 工作流（地址里带 /workflow/）'));
+  kindSelect.appendChild(h('option', { value: 'aiApp' }, 'AI 应用（地址里带 /ai-detail/）'));
+
+  const nodeInfoArea = h('textarea', {
+    class: 'input textarea json-area',
+    rows: '10',
+    placeholder: '把应用 API 页面上「提交请求 → 请求示例」那段 curl 整个粘贴到这里'
+  }) as HTMLTextAreaElement;
+  const nodeInfoRow = fieldRow(
+    '请求示例',
+    nodeInfoArea,
+    'AI 应用的节点号没有任何接口能查到，只能从平台的 API 页面复制过来 —— 少了它，提交会拿作者的示例图出图，结果和你的输入无关。'
+  );
+  const kindHint = h('div', { class: 'muted hint' });
+
+  const paintKind = (): void => {
+    const isApp = kindSelect.value === 'aiApp';
+    toggleClass(nodeInfoRow, 'hidden', !isApp);
+    clear(kindHint);
+    kindHint.textContent = isApp
+      ? '在应用页点右上角「API」进到接口页，那里有这段 curl。'
+      : '工作流要先在 RunningHub 上保存并成功跑过一次，平台才会给出它的接口格式；否则登记后提交会报「尚未保存或未运行」。';
+  };
+  kindSelect.onchange = paintKind;
+
+  const addBtn = h(
+    'button',
+    {
+      class: 'btn-primary',
+      type: 'button',
+      onclick: async () => {
+        out.className = 'muted';
+        out.textContent = '';
+        try {
+          const res = await api.addCloudWorkflow({
+            name: nameInput.value.trim(),
+            providerId: providerSelect.value,
+            remoteId: idInput.value.trim(),
+            remoteKind: kindSelect.value as 'workflow' | 'aiApp',
+            ...(kindSelect.value === 'aiApp' ? { nodeInfoRaw: nodeInfoArea.value } : {})
+          });
+          toast(res.versionBumped ? `已登记为 v${res.workflow.version}` : '已登记', res.workflow.name);
+          nameInput.value = '';
+          idInput.value = '';
+          nodeInfoArea.value = '';
+          await renderSettingsPage(host.parentElement as HTMLElement);
+        } catch (e) {
+          out.className = 'err';
+          out.textContent = e instanceof ApiError ? e.display : e instanceof Error ? e.message : String(e);
+        }
+      }
+    },
+    '登记'
+  );
+
+  box.appendChild(fieldRow('名称', nameInput));
+  box.appendChild(fieldRow('平台', providerSelect));
+  box.appendChild(fieldRow('类型', kindSelect));
+  box.appendChild(kindHint);
+  box.appendChild(fieldRow('ID', idInput, '在平台页面的地址栏里，末尾那串 19 位数字。'));
+  box.appendChild(nodeInfoRow);
+  box.appendChild(h('div', { class: 'row gap' }, addBtn));
+  box.appendChild(out);
+  box.appendChild(
+    h(
+      'div',
+      { class: 'muted hint' },
+      '登记不会联网检查。登记完这条就会出现在上面的列表里，也能在「固定功能」和「自定义工作流」的下拉里选到。'
+    )
+  );
+  paintKind();
+  return box;
 }
 
 function workflowRow(w: WorkflowSummary, host: HTMLElement): HTMLElement {
   const actions = h('div', { class: 'row gap' });
-  actions.appendChild(
-    h(
-      'button',
-      {
-        class: 'btn-ghost',
-        type: 'button',
-        onclick: async () => {
-          try {
-            const rep = await api.dependencies(w.id);
-            toast(
-              rep.ok ? '依赖齐全' : '缺少依赖',
-              rep.ok ? w.name : `缺节点 ${rep.missingNodes.join(', ') || '无'}；缺模型 ${rep.missingModels.map((m) => m.name).join(', ') || '无'}`,
-              rep.ok ? 'info' : 'warn'
-            );
-          } catch (e) {
-            toast('依赖检查失败', e instanceof ApiError ? e.display : String(e), 'error');
-          }
-        }
-      },
-      '依赖检查'
-    )
-  );
-  // 绑定编辑只对导入的工作流开放：内置工作流的绑定是随内置图一起版本化的，
-  // 让用户改它等于改出厂配置，出了问题谁也说不清是哪一版的行为。
-  const editorHost = h('div', { class: 'wf-bindings-host hidden' });
-  if (w.source === 'imported') {
-    let loaded = false;
+  /*
+   * 云端工作流跑在平台上：本机没有图，节点和模型也都在那边。
+   * 「依赖检查」和「参数绑定」这两件事对它没有意义 —— 摆一个点下去
+   * 必然报错的按钮，等于让用户去撞一堵墙。所以只给本机图。
+   */
+  const isCloud = w.kind === 'cloud';
+  if (!isCloud)
     actions.appendChild(
       h(
         'button',
         {
           class: 'btn-ghost',
           type: 'button',
-          onclick: async (e: Event) => {
-            const btn = e.currentTarget as HTMLElement;
-            const open = editorHost.classList.contains('hidden');
-            toggleClass(editorHost, 'hidden', !open);
-            btn.textContent = open ? '收起绑定' : '参数绑定';
-            if (open && !loaded) {
-              loaded = true;
-              clear(editorHost);
-              editorHost.appendChild(await renderBindingEditor(w, host));
+          onclick: async () => {
+            try {
+              const rep = await api.dependencies(w.id);
+              toast(
+                rep.ok ? '依赖齐全' : '缺少依赖',
+                rep.ok
+                  ? w.name
+                  : `缺节点 ${rep.missingNodes.join(', ') || '无'}；缺模型 ${rep.missingModels.map((m) => m.name).join(', ') || '无'}`,
+                rep.ok ? 'info' : 'warn'
+              );
+            } catch (e) {
+              toast('依赖检查失败', e instanceof ApiError ? e.display : String(e), 'error');
             }
           }
         },
-        '参数绑定'
+        '依赖检查'
       )
     );
+  // 绑定编辑只对导入的工作流开放：内置工作流的绑定是随内置图一起版本化的，
+  // 让用户改它等于改出厂配置，出了问题谁也说不清是哪一版的行为。
+  const editorHost = h('div', { class: 'wf-bindings-host hidden' });
+  if (w.source === 'imported') {
+    let loaded = false;
+    if (!isCloud)
+      actions.appendChild(
+        h(
+          'button',
+          {
+            class: 'btn-ghost',
+            type: 'button',
+            onclick: async (e: Event) => {
+              const btn = e.currentTarget as HTMLElement;
+              const open = editorHost.classList.contains('hidden');
+              toggleClass(editorHost, 'hidden', !open);
+              btn.textContent = open ? '收起绑定' : '参数绑定';
+              if (open && !loaded) {
+                loaded = true;
+                clear(editorHost);
+                editorHost.appendChild(await renderBindingEditor(w, host));
+              }
+            }
+          },
+          '参数绑定'
+        )
+      );
     actions.appendChild(
       h(
         'button',
@@ -763,12 +1016,24 @@ function workflowRow(w: WorkflowSummary, host: HTMLElement): HTMLElement {
     h(
       'div',
       { class: 'wf-meta' },
-      h('div', { class: 'wf-name' }, `${w.name} `, h('span', { class: 'muted' }, `v${w.version}`)),
+      h(
+        'div',
+        { class: 'wf-name' },
+        // 徽章放在名字最前面：一眼分清这条是跑在本机还是跑在平台上。
+        // 这是用户提的第一个问题 ——「怎么区分新添加的是本地还是云端的」。
+        h('span', { class: isCloud ? 'wf-tag cloud' : 'wf-tag local' }, isCloud ? '云端' : '本机'),
+        ` ${w.name} `,
+        h('span', { class: 'muted' }, `v${w.version}`)
+      ),
       h(
         'div',
         { class: 'muted wf-sub' },
-        `${w.source === 'builtin' ? '内置' : '导入'} · ${w.nodeCount} 节点 · ${w.bindingCount} 条绑定` +
-          (w.featureId ? ` · 绑定 ${breadcrumb(w.featureId).slice(1).join('/')}` : '')
+        isCloud
+          ? // 云端条目没有节点数和绑定数可言，显示 0 只会让人以为导入失败了。
+            // 真正该给的信息是：跑在哪个平台、平台上的哪个 ID。
+            `${providerLabel(w.providerId)} · ID ${w.remoteId ?? '—'}`
+          : `${w.source === 'builtin' ? '内置' : '导入'} · ${w.nodeCount} 节点 · ${w.bindingCount} 条绑定` +
+            (w.featureId ? ` · 绑定 ${breadcrumb(w.featureId).slice(1).join('/')}` : '')
       ),
       w.notes ? h('div', { class: 'muted wf-notes' }, w.notes) : null
     ),
@@ -1049,7 +1314,11 @@ function providerCard(p: ProviderView, host: HTMLElement): HTMLElement {
     // 工作流型平台（RunningHub / LiblibAI）多一行「默认工作流」。
     // 按**能力**判断而不是按 id —— 这样再来一个工作流平台不用改这里。
     p.capabilities.includes('workflow') && p.kind !== 'comfyui'
-      ? fieldRow('默认工作流 ID', workflowInput, '从平台网站上你自己的应用页面复制；可被单个功能的绑定覆盖')
+      ? fieldRow(
+          '默认工作流 ID',
+          workflowInput,
+          '兜底值：某个功能在「固定功能」里没有单独绑云端工作流时，才用这里的 ID 提交。绑了就用绑的那个。留空也可以 —— 前提是每个功能都各自绑好。'
+        )
       : null,
     fieldRow('默认模型', modelSelect),
     actions,
@@ -1148,7 +1417,9 @@ async function renderDefaults(host: HTMLElement, settings: AppSettings): Promise
   const presets = await api.prompts();
   const list = h('div', { class: 'preset-list' });
   for (const p of presets) {
-    const ta = h('textarea', { class: 'input textarea', rows: '3' }) as HTMLTextAreaElement;
+    // rows 从 3 提到 8：这些提示词本来就是几百字的整段文字，
+    // 三行的框里改它等于隔着门缝看，用户反馈过输入区太小。
+    const ta = h('textarea', { class: 'input textarea', rows: '8' }) as HTMLTextAreaElement;
     ta.value = p.prompt;
     const row = h(
       'details',
@@ -1191,12 +1462,101 @@ async function renderDefaults(host: HTMLElement, settings: AppSettings): Promise
               },
               '恢复默认'
             )
-          : null
+          : // 出厂预设删不掉（服务端也会拒绝），自己加的才给删除按钮 ——
+            // 否则这一页就成了只进不出，加错一条就永远留在列表里。
+            h(
+              'button',
+              {
+                class: 'btn-ghost danger',
+                type: 'button',
+                onclick: async () => {
+                  try {
+                    await api.deletePrompt(p.id);
+                    toast('已删除', p.label);
+                    await renderSettingsPage(host.parentElement as HTMLElement);
+                  } catch (e) {
+                    toast('删除失败', e instanceof ApiError ? e.display : String(e), 'error');
+                  }
+                }
+              },
+              '删除'
+            )
       )
     );
     list.appendChild(row);
   }
-  host.appendChild(card(`内置提示词（${presets.length}）`, list));
+  host.appendChild(card(`提示词（${presets.length}）`, list));
+  host.appendChild(card('新增提示词', promptCreateBox(host)));
+}
+
+/**
+ * 「新增提示词」表单。
+ *
+ * 后端的 POST /v1/prompts 一直都在，设置页却从来没给过入口 —— 于是这一页
+ * 只能改现成的和恢复出厂文本，加不了自己的。用户直接反馈了这件事。
+ *
+ * scope 先固定为 ['*']（所有功能都能选到）。按功能限定作用域是另一件事，
+ * 需要一个功能多选控件，那个值得单独做；现在先让"能加"这条路通。
+ */
+function promptCreateBox(host: HTMLElement): HTMLElement {
+  const box = h('div', { class: 'wf-import' });
+  const label = h('input', { class: 'input', type: 'text', placeholder: '名字，比如「反推材质」' }) as HTMLInputElement;
+  const kind = h('select', { class: 'input select' }) as HTMLSelectElement;
+  for (const [v, t] of [
+    ['reverse', '反推（图 → 文）：让视觉模型描述输入图'],
+    ['stylize', '风格化：把输入图转成某种稿型'],
+    ['skill', '技能：给视觉模型的系统级指令']
+  ] as const) {
+    kind.appendChild(h('option', { value: v }, t));
+  }
+  const desc = h('input', { class: 'input', type: 'text', placeholder: '一句话说明它是干什么的（可留空）' }) as HTMLInputElement;
+  const text = h('textarea', {
+    class: 'input textarea',
+    rows: '8',
+    placeholder: '提示词正文'
+  }) as HTMLTextAreaElement;
+  const out = h('div', { class: 'muted' });
+
+  const addBtn = h(
+    'button',
+    {
+      class: 'btn-primary',
+      type: 'button',
+      onclick: async () => {
+        out.className = 'muted';
+        out.textContent = '';
+        if (!label.value.trim() || !text.value.trim()) {
+          out.className = 'err';
+          out.textContent = '名字和正文都要填。';
+          return;
+        }
+        try {
+          const res = await api.createPrompt({
+            label: label.value.trim(),
+            kind: kind.value,
+            scope: ['*'],
+            prompt: text.value,
+            ...(desc.value.trim() ? { description: desc.value.trim() } : {})
+          });
+          toast('已新增', res.preset.label);
+          await renderSettingsPage(host.parentElement as HTMLElement);
+        } catch (e) {
+          out.className = 'err';
+          out.textContent = e instanceof ApiError ? e.display : e instanceof Error ? e.message : String(e);
+        }
+      }
+    },
+    '新增'
+  );
+
+  box.appendChild(fieldRow('名字', label));
+  box.appendChild(fieldRow('类型', kind));
+  box.appendChild(fieldRow('说明', desc));
+  box.appendChild(fieldRow('正文', text));
+  box.appendChild(h('div', { class: 'row gap' }, addBtn));
+  box.appendChild(out);
+  box.appendChild(h('div', { class: 'muted hint' }, '新增的预设所有功能都能选到；出厂预设改坏了可以用它自己的「恢复默认」退回去。'));
+  return box;
 }
 
 /* ---------------- 关于 ---------------- */
@@ -1284,13 +1644,23 @@ async function renderAbout(host: HTMLElement): Promise<void> {
  * 所以默认给内置预设（节点绑定都对着云端真图核对过），
  * 手填 ID 作为高级选项保留，但会明确提示它需要自行完成绑定。
  */
-function renderRunningHubPicker(f: FeatureView): HTMLElement {
+function renderRunningHubPicker(f: FeatureView, workflows: WorkflowSummary[]): HTMLElement {
   const wrap = h('div', { class: 'rh-picker' });
   const current = f.binding?.remoteWorkflowId ?? '';
   const recommended = rhPresetsForFeature(f.id);
   const others = RUNNINGHUB_PRESETS.filter((p) => !recommended.includes(p));
   const known = rhPresetByWorkflowId(current);
-  const isCustom = !!current && !known;
+  /*
+   * 用户在「工作流」页登记过的 RunningHub 条目。
+   *
+   * 以前这个下拉里只有出厂预设，用户自己的工作流永远只能走
+   * 「自定义工作流 ID…」那条路 —— 每次换个功能就要重新手打 19 位数字，
+   * 打错了也没有任何提示。登记过的现在直接出现在这里，按名字选。
+   */
+  const mine = workflows.filter((w) => w.kind === 'cloud' && w.providerId === 'runninghub' && w.remoteId);
+  const mineHit = mine.find((w) => w.remoteId === current);
+  // 「自定义」现在只剩真正没登记过的那种情况
+  const isCustom = !!current && !known && !mineHit;
 
   const select = h('select', { class: 'input select' }) as HTMLSelectElement;
   const addOption = (value: string, label: string, selected: boolean): void => {
@@ -1300,6 +1670,8 @@ function renderRunningHubPicker(f: FeatureView): HTMLElement {
   };
 
   addOption('', '未绑定', !current);
+  // 自己登记的排在最前面：那是用户主动加的，比出厂预设更可能是他要的
+  for (const w of mine) addOption(w.remoteId!, `我的 · ${w.name}`, w.remoteId === current);
   if (recommended.length) {
     for (const p of recommended) addOption(p.workflowId, `★ ${p.label}`, p.workflowId === current);
   }
@@ -1324,9 +1696,16 @@ function renderRunningHubPicker(f: FeatureView): HTMLElement {
         h(
           'span',
           { class: 'warn-text' },
-          '自定义工作流没有内置绑定表：需要先在「工作流」里导入同一份图并完成参数绑定，否则提交会被拦下。'
+          '临时填一个 ID 只对这一个功能生效，别处看不到也选不到。要反复用的话，去「工作流」页的「添加云端工作流」登记一次，之后在这个下拉里按名字选。'
         )
       );
+      return;
+    }
+    // 用户自己登记的条目：出厂预设表里查不到它，但我们知道它的名字和 ID
+    const own = mine.find((w) => w.remoteId === v);
+    if (own) {
+      detail.appendChild(h('div', {}, `已登记的云端工作流 · ID ${own.remoteId}`));
+      if (own.notes) detail.appendChild(h('div', { class: 'rh-meta' }, own.notes));
       return;
     }
     const p = rhPresetByWorkflowId(v);

@@ -99,7 +99,8 @@ before(async () => {
     ephemeral: true,
     workflowsDir: resolve(here, '../../../workflows')
   });
-  PORT = Number(new URL(helper.url).port);
+  PORT = helper.port; // 不从 url 里抠：端口等于 80 时 URL 会规范化掉，Number('') === 0 → undici 报 bad port
+  if (!Number.isInteger(PORT) || PORT <= 0) throw new Error(`Helper 端口不可用：${PORT}（url=${helper.url}）`);
   token = helper.issueToken();
   await helper.recovered;
 
@@ -265,5 +266,91 @@ test('分节还在载入时先给占位，不是先空着', async () => {
   } finally {
     release?.();
     globalThis.fetch = realFetch;
+  }
+});
+
+/* ---------------- 工作流页：本机 vs 云端 ---------------- */
+
+test('云端工作流登记后出现在列表里，并且一眼能和本机图分开', async () => {
+  /*
+   * 用户在真机上问的就是这个：「怎么区分新添加的是本地工作流还是云端的
+   * 工作流的 api 呢」。在这之前无从区分 —— 云端 ID 根本进不了这张表，
+   * 只能在别处手打，打完不留痕。
+   */
+  await api('POST', '/v1/workflows/cloud', {
+    name: '界面测试用云端工作流',
+    providerId: 'runninghub',
+    remoteId: '7777777777777777777'
+  });
+
+  const host = await renderSettings('工作流');
+  const rows = host.querySelectorAll('.wf-row');
+  assert.ok(rows.length > 0, '工作流列表不该是空的');
+
+  const cloudRow = rows.find((r) => (r.textContent ?? '').includes('界面测试用云端工作流'));
+  assert.ok(cloudRow, '登记过的云端工作流应当出现在列表里');
+
+  const tag = cloudRow.querySelector('.wf-tag');
+  assert.ok(tag, '每一行都要有本机/云端徽章');
+  assert.equal(tag.textContent, '云端');
+  // 平台和 ID 要写出来 —— 光说"云端"，用户仍然不知道它指向哪一个
+  assert.match(cloudRow.textContent ?? '', /RunningHub/);
+  assert.match(cloudRow.textContent ?? '', /7777777777777777777/);
+
+  const builtinRow = rows.find((r) => (r.textContent ?? '').includes('内置') && r !== cloudRow);
+  if (builtinRow) {
+    assert.equal(builtinRow.querySelector('.wf-tag')?.textContent, '本机');
+  }
+});
+
+test('云端条目上不摆「依赖检查」和「参数绑定」这两个按钮', async () => {
+  /*
+   * 两个操作对云端条目都没有意义：图在平台那边，本机既查不了节点，
+   * 也绑不了参数。摆一个点下去必然报错的按钮，等于让用户去撞墙 ——
+   * 这跟 RunningHub 那个永远转不动的模型下拉是同一类毛病。
+   */
+  await api('POST', '/v1/workflows/cloud', {
+    name: '云端不该有这两个按钮',
+    providerId: 'runninghub',
+    remoteId: '8888888888888888888'
+  });
+
+  const host = await renderSettings('工作流');
+  const row = host
+    .querySelectorAll('.wf-row')
+    .find((r) => (r.textContent ?? '').includes('云端不该有这两个按钮'));
+  assert.ok(row, '找不到刚登记的那一行');
+
+  const labels = row.querySelectorAll('button').map((b) => b.textContent);
+  assert.ok(!labels.includes('依赖检查'), `云端条目不该有「依赖检查」，实际按钮：${labels.join('/')}`);
+  assert.ok(!labels.includes('参数绑定'), `云端条目不该有「参数绑定」，实际按钮：${labels.join('/')}`);
+  assert.ok(labels.includes('删除'), '删除还是要能删的');
+});
+
+test('本机 ComfyUI 的工作流下拉里不该混进云端条目', async () => {
+  /*
+   * 云端条目在本机 ComfyUI 的下拉里出现的话，选中后提交会被拒 ——
+   * ComfyUI 拿到的是一份空图。而报出来的错会指向图本身，
+   * 不会指向"你选错了类别"。
+   */
+  await api('POST', '/v1/workflows/cloud', {
+    name: '不该出现在本机下拉里',
+    providerId: 'runninghub',
+    remoteId: '6666666666666666666'
+  });
+
+  const host = await renderSettings('固定功能');
+  // 展开所有行，把懒建的控件都建出来
+  for (const btn of host.querySelectorAll('button').filter((b) => b.textContent === '编辑')) {
+    btn.dispatchEvent({ type: 'click', target: btn, currentTarget: btn });
+  }
+  await new Promise((r) => setTimeout(r, 300));
+
+  for (const sel of host.querySelectorAll('select')) {
+    const texts = sel.querySelectorAll('option').map((o) => o.textContent ?? '');
+    assert.ok(
+      !texts.some((t) => t.includes('不该出现在本机下拉里') && !t.startsWith('我的 · ')),
+      `云端条目只能以「我的 · …」出现在云端选择器里，不能进本机工作流下拉：${texts.join(' | ')}`
+    );
   }
 });

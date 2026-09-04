@@ -59,13 +59,51 @@ export interface ParamBinding {
   required: boolean;
 }
 
+/**
+ * 一条工作流是本机的图，还是云端平台上的一个 ID。
+ *
+ * `comfy` —— 一份完整的 ComfyUI 图，节点和参数都在本机，能扫描、能绑定、
+ *   能做依赖检查。内置的 12 份和用户导入的都是这一类。
+ * `cloud` —— 平台侧（RunningHub / LiblibAI）的一个工作流 / webapp ID。
+ *   本机**没有**图，所以扫不出字段、也做不了依赖检查；能做的只有记住
+ *   「这个名字对应那边的哪个 ID」，然后在绑定和自定义工作流里被选中。
+ *
+ * 为什么要让这两类共用一张表：用户视角里它们是同一件事 ——「我有哪些工作流可用」。
+ * 以前云端 ID 只能在两个地方手打（Provider 的默认 ID、绑定里的自定义 ID），
+ * 打完不留痕，换个功能要再打一遍，也没有任何地方能看到「我一共加过哪些」。
+ */
+export type WorkflowKind = 'comfy' | 'cloud';
+
 export interface WorkflowRecord {
   id: string;
   name: string;
   /** 语义化版本；同名工作流再次导入且内容变化 → 版本号递增，旧版本保留 */
   version: string;
   source: 'builtin' | 'imported';
-  /** 导入时的原始格式 */
+  /** 本机的图 还是 云端的一个 ID。见 WorkflowKind。 */
+  kind: WorkflowKind;
+  /** kind==='cloud' 时：这条属于哪个 Provider（runninghub / liblib） */
+  providerId: string | null;
+  /** kind==='cloud' 时：平台侧的工作流 / webapp ID */
+  remoteId: string | null;
+  /**
+   * kind==='cloud' 时：这个 ID 是平台上的哪一类东西。
+   *
+   * RunningHub 上「AI 应用」和「ComfyUI 工作流」的接口完全不同 ——
+   * 前者 POST /openapi/v2/run/ai-app/{id}（Bearer 认证、ID 在路径里），
+   * 后者 POST /task/openapi/create（apiKey 在 body、ID 在 body）。
+   * 只存一个 ID 是分不出该往哪儿发的。
+   */
+  remoteKind: 'workflow' | 'aiApp' | null;
+  /**
+   * AI 应用的 nodeInfoList 模板（节点号 + 字段名 + 示例值）。
+   *
+   * 为什么要存：本机拉不到 AI 应用的图（工作流接口对它的 ID 回
+   * 380 WORKFLOW_NOT_EXISTS），节点号只存在于平台给每个应用单独生成的
+   * API 文档页里，没有公开接口能查 —— 只能由用户粘贴带进来。
+   */
+  nodeInfo: Array<{ nodeId: string; fieldName: string; description: string; defaultValue: string }> | null;
+  /** 导入时的原始格式；云端条目没有图，固定为 'api' 且 graph 为空 */
   format: 'api' | 'ui';
   graph: ComfyApiGraph;
   bindings: ParamBinding[];

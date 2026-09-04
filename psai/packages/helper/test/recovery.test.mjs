@@ -32,6 +32,16 @@ let helper;
 let token;
 
 function url(path) {
+  /*
+   * PORT 是模块级的，而这个文件里有好几个用例会**重启 Helper** 并重新给它赋值。
+   * 只要有一处重启失败、或者赋值和使用之间穿插了别的用例，PORT 就可能还停在
+   * 初值 0 —— 那时 fetch 抛的是 undici 的一句 `bad port`，跟真正的原因
+   * （某次重启没起来）隔着十万八千里，整个文件的用例一起变红而没人知道为什么。
+   * 这个 flake 已经出现过三轮，两次都没能从日志里定位。就地说清楚。
+   */
+  if (!Number.isInteger(PORT) || PORT <= 0) {
+    throw new Error(`测试用的 Helper 端口无效：PORT=${PORT}。多半是某次重启 Helper 没成功，或者赋值前就发了请求。`);
+  }
   return `http://127.0.0.1:${PORT}${path}`;
 }
 
@@ -108,7 +118,8 @@ async function waitFor(jobId, predicate, timeoutMs = 20000) {
 
 async function boot() {
   helper = await startHelper({ dataDir, port: 0, ephemeral: true });
-  PORT = Number(new URL(helper.url).port);
+  PORT = helper.port; // 不从 url 里抠：端口等于 80 时 URL 会规范化掉，Number('') === 0 → undici 报 bad port
+  if (!Number.isInteger(PORT) || PORT <= 0) throw new Error(`Helper 端口不可用：${PORT}（url=${helper.url}）`);
   token = helper.issueToken();
   // 等恢复跑完再断言，否则会读到恢复中途的状态
   await helper.recovered;

@@ -87,7 +87,8 @@ before(async () => {
   // 就是用户本机真实 ComfyUI（127.0.0.1:8188），十几个测试 Helper
   // 一起去敲它，既不可靠也不礼貌 —— 见 config.ts 里 probeOnStart 的说明。
   helper = await startHelper({ port: 0, dataDir, ephemeral: true, workflowsDir: resolve(here, '../../../workflows') });
-  PORT = Number(new URL(helper.url).port);
+  PORT = helper.port; // 不从 url 里抠：端口等于 80 时 URL 会规范化掉，Number('') === 0 → undici 报 bad port
+  if (!Number.isInteger(PORT) || PORT <= 0) throw new Error(`Helper 端口不可用：${PORT}（url=${helper.url}）`);
   dom = installUxpDom();
   const outfile = join(dataDir, 'controls.test.mjs');
   await bundle(outfile);

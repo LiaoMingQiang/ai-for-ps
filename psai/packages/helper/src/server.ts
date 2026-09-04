@@ -24,7 +24,8 @@ import {
   PROVIDERS,
   findProvider,
   filterModelsByScope,
-  isModelScope
+  isModelScope,
+  parseRhNodeInfo
 } from '@psai/shared';
 import type {
   ErrorCode,
@@ -507,6 +508,9 @@ export async function buildServer(d: ServerDeps): Promise<FastifyInstance> {
       name: w.name,
       version: w.version,
       source: w.source,
+      kind: w.kind,
+      providerId: w.providerId,
+      remoteId: w.remoteId,
       format: w.format,
       nodeCount: Object.keys(w.graph).length,
       outputNodeIds: w.outputNodeIds,
@@ -556,6 +560,53 @@ export async function buildServer(d: ServerDeps): Promise<FastifyInstance> {
     }
   });
 
+  /**
+   * 登记一条云端工作流（RunningHub / LiblibAI 的工作流 / webapp ID）。
+   *
+   * 和 /import 分成两个路由而不是共用一个：两者的必填项、校验、失败原因
+   * 完全不同 —— 一个要图，一个要平台和 ID。挤在一起就得靠 if 分叉，
+   * 错误信息也只能说得含糊。
+   */
+  app.post('/v1/workflows/cloud', async (req, reply) => {
+    try {
+      const body = (req.body ?? {}) as {
+        name?: string;
+        providerId?: string;
+        remoteId?: string;
+        notes?: string;
+        remoteKind?: 'workflow' | 'aiApp';
+        /** AI 应用：用户从平台 API 页面复制来的「请求示例」原文 */
+        nodeInfoRaw?: string;
+      };
+      /*
+       * AI 应用的节点参数表由用户粘贴带进来，在这里解析。
+       *
+       * 解析放服务端而不是界面层：解析失败要说清怎么办，而那句话
+       * 该和存储层的校验用同一套口径 —— 两边各写一套的话，
+       * 界面放行的东西存储层可能照样拒，用户会看到两条互相矛盾的提示。
+       */
+      let nodeInfo: ReturnType<typeof parseRhNodeInfo> | undefined;
+      if (body.remoteKind === 'aiApp') {
+        try {
+          nodeInfo = parseRhNodeInfo(String(body.nodeInfoRaw ?? ''));
+        } catch (e) {
+          throw new PsaiError('JOB_PARAM_INVALID', e instanceof Error ? e.message : String(e));
+        }
+      }
+      const res = d.workflows.importCloud({
+        name: String(body.name ?? ''),
+        providerId: String(body.providerId ?? ''),
+        remoteId: String(body.remoteId ?? ''),
+        ...(body.remoteKind ? { remoteKind: body.remoteKind } : {}),
+        ...(nodeInfo ? { nodeInfo } : {}),
+        ...(body.notes ? { notes: body.notes } : {})
+      });
+      return { ok: true, workflow: res.workflow, versionBumped: res.versionBumped };
+    } catch (e) {
+      return fail(reply, e);
+    }
+  });
+
   app.put('/v1/workflows/:id/bindings', async (req, reply) => {
     try {
       const { id } = req.params as { id: string };
@@ -578,6 +629,15 @@ export async function buildServer(d: ServerDeps): Promise<FastifyInstance> {
   app.get('/v1/workflows/:id/dependencies', async (req, reply) => {
     try {
       const { id } = req.params as { id: string };
+      /*
+       * 云端工作流没有本机图，依赖检查无从谈起：节点装在平台那边，
+       * 模型也在平台那边。对着一份空图跑检查会得到「全部就绪」——
+       * 一个看起来通过、实际什么都没查的结论，比报错更糟。
+       */
+      const wf = d.workflows.get(id);
+      if (wf.kind === 'cloud') {
+        throw new PsaiError('JOB_PARAM_INVALID', '云端工作流跑在平台上，本机查不了它的节点和模型依赖');
+      }
       const comfy = d.providers.comfy();
       const nodes = await comfy.installedNodeTypes();
       const [checkpoints, loras, upscales, controlnets] = await Promise.all([

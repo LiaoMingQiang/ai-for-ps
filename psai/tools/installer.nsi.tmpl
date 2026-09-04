@@ -164,6 +164,22 @@ Section "AI for PS" SecMain
   ${EndIf}
   Sleep 600
 
+  ; 1b. 清掉**旧产品线**留下的开机自启。
+  ;
+  ;     0.9.2 之前用的是另一个插件 id（com.aiforps.plugin.ai），装在
+  ;     %LOCALAPPDATA%\AI-for-PS\helper\，自启项名字也不一样。上面的
+  ;     "卸载旧版本"只认本产品线的注册表键，够不到它。
+  ;
+  ;     留着的后果是具体的：下次登录时两个 Helper 一起起，谁先抢到
+  ;     34117 端口谁就活着，另一个因为单实例保护自己退掉。用户装了新版
+  ;     却可能一直在用旧后端 —— 面板上插件是新版号、Helper 是旧版号，
+  ;     而他刚刚才"更新过"。真机上就是这么发生的。
+  ;
+  ;     只删自启项，不删那个目录：里面可能有旧的日志和数据，
+  ;     不启动它就已经无害了。
+  DeleteRegValue HKCU "${RUN_KEY}" "AI-for-PS-Helper"
+  ${Log} "  已清除旧产品线的开机自启项（若存在）"
+
   ; 2. Helper 与内置工作流
   ${Log} "[2/6] 安装 Helper 与内置工作流"
   SetOutPath "$INSTDIR"

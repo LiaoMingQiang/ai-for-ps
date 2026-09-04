@@ -3,7 +3,7 @@
  * 页面结构对所有 17 个功能都一样，差异全部来自功能目录。
  */
 
-import { defaultValues, isTerminal, rhPresetByWorkflowId } from '@psai/shared';
+import { defaultValues, isTerminal, rhPresetByWorkflowId, paramsForWorkflowBindings } from '@psai/shared';
 import type { ModelScope } from '@psai/shared';
 import type { ParamSpec, WritebackMode, JobRecord, PhotoshopTarget } from '@psai/shared';
 import { h, clear, setAttr, toggleClass } from '../app/dom.js';
@@ -50,6 +50,22 @@ let modelsMeta: { total: number; scope: ModelScope } | null = null;
 let modelsUnsupported: { reason: string } | null = null;
 const modelsMetaByProvider: Record<string, { total: number; scope: ModelScope }> = {};
 let presetCache: Record<string, ParamContext['presets']> = {};
+/**
+ * 「自定义工作流」当前选中的那一份（工作流库里的 id）。
+ *
+ * 放模块级而不是每次渲染新建：切到历史页再切回来，用户不用重选一次。
+ * 只在插件重载时清空，这跟其它运行期缓存（runtimeOptions / presetCache）一致。
+ */
+let customWorkflowId: string | null = null;
+/**
+ * 当前那份自定义工作流按绑定算出来的参数控件。
+ *
+ * 缓存住，切页回来不用重拉一次 —— 也让重渲染的首帧就画对，
+ * 而不是先闪一下空的「参数设置」再补上。
+ */
+let customParamSpecs: ParamSpec[] | null = null;
+/** 选中的自定义工作流是云端条目时，它跑在哪个 Provider 上；本机图为 null。 */
+let customWorkflowProvider: string | null = null;
 
 /**
  * 只重画「结果」那一块的回调，由当前挂载的生成页登记。
@@ -232,9 +248,62 @@ export async function renderGeneratePage(host: HTMLElement, actionHost?: HTMLEle
     }
   };
 
-  let paramsBody = renderParams(view.params, paramCtx);
+  /*
+   * 「自定义工作流」的工作流选择器。
+   *
+   * 在这之前，这个功能是**跑不起来的**：它的 defaultWorkflowId 是 null，
+   * 设置页的「固定功能」又明确跳过它（那一节 `if (f.id === 'comfy.custom') continue`），
+   * 生成页也不发 workflowId —— 于是三条路都不通，导入的工作流没有任何途径
+   * 被选中执行。页面上只有一个空的「参数设置」，看起来像功能没做完。
+   *
+   * 只列本机图：这个功能挂在 comfyui 分支下，跑的是本机 ComfyUI。
+   * 云端工作流属于云端平台，在「设置 → 固定功能」里按功能绑定。
+   */
+  /**
+   * 选中的那份工作流决定参数区长什么样，所以选择器要能回头改参数区。
+   *
+   * 用一个后填的回调而不是直接闭包引用 paramsCard：卡片是在参数区之前
+   * 建出来的（它在页面上排在参数区上面），那时候 paramsCard 还不存在。
+   */
+  let applyCustomParams: ((specs: ParamSpec[]) => void) | null = null;
+  if (view.id === 'comfy.custom') {
+    host.appendChild(
+      customWorkflowCard((specs) => {
+        if (!current()) return;
+        applyCustomParams?.(specs);
+      })
+    );
+  }
+
+  let paramsBody = renderParams(customParamSpecs ?? view.params, paramCtx);
   const paramsCard = h('section', { class: 'card' }, h('h3', { class: 'card-title' }, '参数设置'), paramsBody);
   host.appendChild(paramsCard);
+
+  applyCustomParams = (specs) => {
+    customParamSpecs = specs;
+    /*
+     * 新出现的控件要有初值，否则滑杆停在 0、下拉停在空 ——
+     * 用户会以为这份工作流"参数是空的"，其实只是没人给默认值。
+     * 已经有值的键不动：他可能刚在上一份工作流里敲过提示词。
+     */
+    const have = paramsOf(view.id);
+    const fill: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(defaultValues(specs))) {
+      if (have[k] === undefined) fill[k] = v;
+    }
+    if (Object.keys(fill).length) setParams(view.id, { ...have, ...fill });
+
+    try {
+      const fresh = renderParams(specs, { ...paramCtx, options: runtimeOptions, modelsLoading: false });
+      // insertBefore + removeChild：UXP 没有 replaceChild，见下面那段注释
+      paramsCard.insertBefore(fresh, paramsBody);
+      paramsCard.removeChild(paramsBody);
+      paramsBody = fresh;
+      updateSubmitState();
+    } catch {
+      /* 换不上去就维持现状，至少界面是完整的 */
+    }
+  };
   refreshAspectHints(paramsCard, Number(paramsOf(view.id)['resolution'] ?? 1024));
 
   /*
@@ -405,12 +474,28 @@ export async function renderGeneratePage(host: HTMLElement, actionHost?: HTMLEle
         return;
       }
 
+      /*
+       * 「自定义工作流」必须带上选中的那一份。
+       *
+       * 不带的话 Helper 那边解析出来是 null（这个功能的 defaultWorkflowId 就是 null，
+       * 也没有固定功能绑定），提交会被 WORKFLOW_NOT_BOUND 拦下 ——
+       * 而用户明明在上面的下拉里选了一个，只是这个选择从来没被发出去。
+       */
+      if (view!.id === 'comfy.custom' && !customWorkflowId) {
+        toast('还没选工作流', '在上面的「选择工作流」里挑一份再提交', 'warn');
+        return;
+      }
+
       const job = await api.createJob({
         featureId: view!.id,
         params: paramsOf(view!.id),
         inputs,
         target,
-        writeback: { mode, layerName: `AI · ${view!.label}` }
+        writeback: { mode, layerName: `AI · ${view!.label}` },
+        ...(view!.id === 'comfy.custom' && customWorkflowId ? { workflowId: customWorkflowId } : {}),
+        // 云端条目要连后端一起指名：这个功能挂在 comfyui 分支下，
+        // 不指名会被解析成本机 ComfyUI，而要跑的图在平台那边。
+        ...(view!.id === 'comfy.custom' && customWorkflowProvider ? { providerId: customWorkflowProvider } : {})
       });
 
       setState({ activeJobId: job.id, jobs: [job, ...getState().jobs.filter((j) => j.id !== job.id)] });
@@ -758,6 +843,127 @@ export async function performWritebackDetailed(
     toast('写回失败', mutation.detail, 'error');
   }
   return { ok: mutation.ok, busy: false, detail: mutation.detail };
+}
+
+/**
+ * 「自定义工作流」的工作流选择卡片。
+ *
+ * 列表异步填：拉工作流要走一次 Helper，让它挡住首帧的话，慢的时候
+ * 用户看到的又是一张空白页 —— 那是上一版模型列表踩过的坑，不重复。
+ * 先画出卡片和「正在载入」，回来了再把下拉塞进去。
+ *
+ * 用 insertBefore + removeChild 换节点，不用 replaceChild —— UXP 的 DOM
+ * 子集里没有那个方法，调了会静默失败，界面就永远停在「正在载入」。
+ */
+function customWorkflowCard(onPick: (specs: ParamSpec[]) => void): HTMLElement {
+  const body = h('div', { class: 'wf-pick-body' });
+  let slot: HTMLElement = h('div', { class: 'muted' }, '正在载入工作流列表…');
+  body.appendChild(slot);
+
+  const swap = (next: HTMLElement): void => {
+    body.insertBefore(next, slot);
+    body.removeChild(slot);
+    slot = next;
+  };
+
+  void api
+    .workflows()
+    .then((local) => {
+      if (!local.length) {
+        swap(
+          h(
+            'div',
+            { class: 'muted' },
+            '工作流库是空的。到「设置 → 工作流」里导入一份 ComfyUI 的图，或者登记一条云端工作流。'
+          )
+        );
+        return;
+      }
+      // 上次选的那份可能已经被删了，别让选择器指着一个不存在的 id
+      if (customWorkflowId && !local.some((w) => w.id === customWorkflowId)) customWorkflowId = null;
+      if (!customWorkflowId) customWorkflowId = local[0]!.id;
+
+      const select = h('select', { class: 'input select' }) as HTMLSelectElement;
+      for (const w of local) {
+        // 两类混在一张单子里，所以每一项都要标清楚跑在哪儿 ——
+        // 否则用户没法判断这一份要不要占本机显卡。
+        const label =
+          w.kind === 'cloud'
+            ? `${w.name} v${w.version}（云端 · ${w.providerId ?? '未知平台'}）`
+            : `${w.name} v${w.version}（${w.source === 'builtin' ? '内置' : '导入'} · ${w.nodeCount} 节点）`;
+        const opt = h('option', { value: w.id }, label) as HTMLOptionElement;
+        if (w.id === customWorkflowId) opt.setAttribute('selected', '');
+        select.appendChild(opt);
+      }
+
+      /** 选中的那份跑在哪个后端；云端条目要把它一起发出去。 */
+      const syncProvider = (): void => {
+        const w = local.find((x) => x.id === customWorkflowId);
+        customWorkflowProvider = w?.kind === 'cloud' ? (w.providerId ?? null) : null;
+      };
+      const detail = h('div', { class: 'muted hint' });
+
+      /*
+       * 参数控件跟着选中的这份图走。
+       *
+       * 要拿完整记录（api.workflow）而不是列表里的摘要 —— 摘要只有
+       * bindingCount 一个数字，画不出控件；控件是由每条绑定的 paramId
+       * 决定的：绑了提示词就有提示词框，绑了重绘幅度就有那根滑杆。
+       *
+       * 拉不到就保持现状而不是清空：让用户对着一个空参数区，
+       * 比让他对着上一份的控件更没法办事。
+       */
+      const loadParams = (id: string): void => {
+        void api
+          .workflow(id)
+          .then((rec) => {
+            if (customWorkflowId !== id) return; // 期间又换了一份，这次的结果作废
+            onPick(paramsForWorkflowBindings(rec.bindings));
+          })
+          .catch(() => {
+            /* 保持现状 */
+          });
+      };
+
+      const paint = (): void => {
+        const w = local.find((x) => x.id === customWorkflowId);
+        clear(detail);
+        if (!w) return;
+        if (w.kind === 'cloud') {
+          detail.appendChild(h('div', {}, `跑在 ${w.providerId ?? '云端平台'} 上 · ID ${w.remoteId ?? '—'}，不占用本机显卡。`));
+          detail.appendChild(
+            h('div', {}, '参数由平台侧的工作流自己决定，本机这里只发图 —— 所以下面的参数区是空的。')
+          );
+        } else {
+          detail.appendChild(
+            h(
+              'div',
+              {},
+              w.bindingCount
+                ? `这份图有 ${w.bindingCount} 条参数绑定，下面的参数区会按它们生成。`
+                : '这份图没有参数绑定：会按导入时的原样跑，只把图填进去。绑定在「设置 → 工作流 → 参数绑定」里改。'
+            )
+          );
+        }
+        if (w.notes) detail.appendChild(h('div', {}, w.notes));
+      };
+      select.onchange = (e: Event): void => {
+        customWorkflowId = (e.target as HTMLSelectElement).value;
+        syncProvider();
+        paint();
+        loadParams(customWorkflowId);
+      };
+      const wrap = h('div', { class: 'wf-pick' }, select, detail);
+      swap(wrap);
+      syncProvider();
+      paint();
+      loadParams(customWorkflowId);
+    })
+    .catch((e: unknown) => {
+      swap(h('div', { class: 'err' }, `工作流列表拉取失败：${e instanceof ApiError ? e.display : String(e)}`));
+    });
+
+  return h('section', { class: 'card' }, h('h3', { class: 'card-title' }, '选择工作流'), body);
 }
 
 /* ---------------- 运行时数据 ---------------- */
