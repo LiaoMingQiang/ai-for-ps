@@ -511,6 +511,10 @@ export async function buildServer(d: ServerDeps): Promise<FastifyInstance> {
       kind: w.kind,
       providerId: w.providerId,
       remoteId: w.remoteId,
+      // 界面要靠它分辨这条是「AI 应用」还是「ComfyUI 工作流」——
+      // 两者接口不同，列表里不给的话前端只能猜
+      remoteKind: w.remoteKind,
+      nodeInfo: w.nodeInfo,
       format: w.format,
       nodeCount: Object.keys(w.graph).length,
       outputNodeIds: w.outputNodeIds,
@@ -577,6 +581,8 @@ export async function buildServer(d: ServerDeps): Promise<FastifyInstance> {
         remoteKind?: 'workflow' | 'aiApp';
         /** AI 应用：用户从平台 API 页面复制来的「请求示例」原文 */
         nodeInfoRaw?: string;
+        /** AI 应用：界面上逐项填好的节点表（不经过剪贴板，粘贴被截断时用这条） */
+        nodeInfo?: Array<{ nodeId?: unknown; fieldName?: unknown; description?: unknown; defaultValue?: unknown }>;
       };
       /*
        * AI 应用的节点参数表由用户粘贴带进来，在这里解析。
@@ -587,10 +593,31 @@ export async function buildServer(d: ServerDeps): Promise<FastifyInstance> {
        */
       let nodeInfo: ReturnType<typeof parseRhNodeInfo> | undefined;
       if (body.remoteKind === 'aiApp') {
-        try {
-          nodeInfo = parseRhNodeInfo(String(body.nodeInfoRaw ?? ''));
-        } catch (e) {
-          throw new PsaiError('JOB_PARAM_INVALID', e instanceof Error ? e.message : String(e));
+        /*
+         * 两条路都收：界面逐项填好的数组，或者整段 curl 原文。
+         *
+         * 为什么不能只留粘贴那条：真机上 UXP 的文本框粘贴会被截断
+         * （用户粘完只剩开头几行，解析必然失败），而那是宿主的行为，
+         * 我们改不了。逐项填写不经过剪贴板，是唯一稳的那条路。
+         */
+        if (Array.isArray(body.nodeInfo) && body.nodeInfo.length) {
+          nodeInfo = body.nodeInfo
+            .filter((f) => f && String(f.nodeId ?? '').trim() && String(f.fieldName ?? '').trim())
+            .map((f) => ({
+              nodeId: String(f.nodeId).trim(),
+              fieldName: String(f.fieldName).trim(),
+              description: String(f.description ?? ''),
+              defaultValue: String(f.defaultValue ?? '')
+            }));
+          if (!nodeInfo.length) {
+            throw new PsaiError('JOB_PARAM_INVALID', '节点参数表里每一行都要填「节点号」和「字段名」。');
+          }
+        } else {
+          try {
+            nodeInfo = parseRhNodeInfo(String(body.nodeInfoRaw ?? ''));
+          } catch (e) {
+            throw new PsaiError('JOB_PARAM_INVALID', e instanceof Error ? e.message : String(e));
+          }
         }
       }
       const res = d.workflows.importCloud({

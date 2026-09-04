@@ -87,6 +87,9 @@ async function api(method, path, body) {
     headers['Content-Type'] = 'application/json';
     payload = JSON.stringify(body);
   }
+  if (!Number.isInteger(PORT) || PORT <= 0) {
+    throw new Error(`测试用的 Helper 端口无效：PORT=${PORT}。多半是某次启动 Helper 没成功，或者在赋值前就发了请求。`);
+  }
   const res = await fetch(`http://127.0.0.1:${PORT}${path}`, { method, headers, body: payload });
   return res.json();
 }
@@ -353,4 +356,50 @@ test('本机 ComfyUI 的工作流下拉里不该混进云端条目', async () =>
       `云端条目只能以「我的 · …」出现在云端选择器里，不能进本机工作流下拉：${texts.join(' | ')}`
     );
   }
+});
+
+test('点「登记」真的会登记 —— 逐项填好的节点表要发得出去', async () => {
+  /*
+   * 真机上用户把表填对了（525/image、727/int/25），点「登记」**没有任何反应**：
+   * 不报错、不提示、列表也不多一条。这种"什么都没发生"最难查 ——
+   * 点击处理器里抛了异常，而异常被 async onclick 吞掉，界面上一片安静。
+   *
+   * 这条用例把整个动作走一遍：填表 → 点按钮 → 看服务端是不是真的收到了。
+   * 它是对着真实界面代码跑的，不是对着我脑子里以为的那份。
+   */
+  const host = await renderSettings('工作流');
+
+  const nameIn = host.querySelectorAll('input').find((i) => (i.getAttribute('placeholder') ?? '').includes('起个名字'));
+  const idIn = host.querySelectorAll('input').find((i) => (i.getAttribute('placeholder') ?? '').includes('webapp'));
+  const kindSel = host.querySelectorAll('select').find((s) =>
+    (s.textContent ?? '').includes('AI 应用')
+  );
+  assert.ok(nameIn && idIn && kindSel, '名称 / ID / 类型 三个控件都该在');
+
+  nameIn.value = '点击测试用应用';
+  idIn.value = '1892509998193545100';
+  kindSel.value = 'aiApp';
+  kindSel.dispatchEvent({ type: 'change', target: kindSel, currentTarget: kindSel });
+  await new Promise((r) => setTimeout(r, 50));
+
+  // 节点表：界面默认摆一行空的，填进去
+  const rowsHost = host.querySelector('.rh-node-rows');
+  assert.ok(rowsHost, '节点参数表该在');
+  const firstRow = rowsHost.children[0];
+  assert.ok(firstRow, '默认该有一行');
+  const ins = firstRow.children.filter((c) => c.tagName === 'INPUT');
+  assert.equal(ins.length, 3, `一行该有三个输入框，实际 ${ins.length}`);
+  ins[0].value = '525';
+  ins[1].value = 'image';
+
+  const addBtn = host.querySelectorAll('button').find((b) => b.textContent === '登记');
+  assert.ok(addBtn, '找不到「登记」按钮');
+  addBtn.dispatchEvent({ type: 'click', target: addBtn, currentTarget: addBtn });
+  await new Promise((r) => setTimeout(r, 800));
+
+  const list = (await api('GET', '/v1/workflows')).workflows;
+  const made = list.find((w) => w.name === '点击测试用应用');
+  assert.ok(made, `点了「登记」之后服务端应当有这条记录。列表里现有：${list.map((w) => w.name).join('、')}`);
+  assert.equal(made.remoteKind, 'aiApp');
+  assert.equal(made.nodeInfo?.[0]?.fieldName, 'image');
 });

@@ -178,6 +178,9 @@ async function upload(png, mask, w, h) {
     fd.append('maskWidth', String(w));
     fd.append('maskHeight', String(h));
   }
+  if (!Number.isInteger(PORT) || PORT <= 0) {
+    throw new Error(`测试用的 Helper 端口无效：PORT=${PORT}。多半是某次启动 Helper 没成功，或者在赋值前就发了请求。`);
+  }
   const res = await fetch(`http://127.0.0.1:${PORT}/v1/assets`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}` },

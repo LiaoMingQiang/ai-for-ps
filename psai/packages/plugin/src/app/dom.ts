@@ -27,8 +27,38 @@ export function h<K extends keyof HTMLElementTagNameMap>(
 ): HTMLElementTagNameMap[K] {
   const el = document.createElement(tag);
   if (attrs) applyAttrs(el, attrs);
+  if (tag === 'input' || tag === 'textarea') liftLengthLimit(el, attrs);
   append(el, children);
   return el;
+}
+
+/**
+ * UXP 的 `<input>` / `<textarea>` **默认最多只收 256 个字符**，超出的直接吞掉。
+ *
+ * 这个上限不在我们代码里 —— 全库没有一处 maxlength，是宿主的默认值。
+ * 表现极具迷惑性：粘一段长文进去只进去开头一截，没有任何报错，
+ * 看起来像"粘贴失败"或者"这个框坏了"。真机上连着坑了几轮：
+ *   ComfyUI 的工作流 JSON（几十 KB）永远只进去开头
+ *   RunningHub 的请求示例 curl 粘不全，于是解析不出 nodeInfoList
+ *   提示词写长一点就被截断，而右下角的计数器停在 256 —— 那就是证据
+ *
+ * 所以在唯一的创建点统一解开：调用方没有显式给 maxlength 时，
+ * 给一个足够大的值。显式给了的（真要限长的场合）原样尊重。
+ *
+ * 上限取 100 万：ComfyUI 导出的大图也就几百 KB，留足余量；
+ * 又不至于大到让宿主为一个输入框预分配离谱的内存。
+ */
+const UXP_DEFAULT_MAXLENGTH = 1_000_000;
+
+function liftLengthLimit(el: HTMLElement, attrs: Attrs | null): void {
+  if (attrs && ('maxlength' in attrs || 'maxLength' in attrs)) return;
+  try {
+    el.setAttribute('maxlength', String(UXP_DEFAULT_MAXLENGTH));
+    // 属性和 IDL 属性在 UXP 上不一定互通，两边都写一次
+    (el as unknown as { maxLength?: number }).maxLength = UXP_DEFAULT_MAXLENGTH;
+  } catch {
+    /* 宿主不认这个属性就算了，至少不能因此建不出控件 */
+  }
 }
 
 /** SVG 元素必须用命名空间创建，否则在 UXP 里不渲染。 */

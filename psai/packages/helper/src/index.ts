@@ -219,7 +219,30 @@ export async function startHelper(overrides: Partial<HelperConfig> = {}): Promis
     migration: { fromVersion, toVersion, backupPath }
   });
 
-  await app.listen({ host: cfg.host, port: cfg.port });
+  /*
+   * 系统分配的端口可能正好落在 WHATWG 的禁用端口表上（见 BAD_PORTS）。
+   * 撞上之后 Helper 自己好好的，插件却一个请求都发不出去 —— undici 直接
+   * 拒连、报 `bad port`。所以只在 port=0（系统分配）时重试换一个：
+   * 用户显式指定的端口不动，那是他的决定，硬改反而更难查。
+   *
+   * 重试上限 8 次：禁用表一共几十个端口，动态范围里连撞八次的概率
+   * 低到可以忽略；真撞满了就带着这个端口继续跑，并明确警告 ——
+   * 起不来比"起来了但连不上"更容易查。
+   */
+  for (let attempt = 0; ; attempt++) {
+    await app.listen({ host: cfg.host, port: cfg.port });
+    const addr = app.server.address();
+    const got = addr && typeof addr === 'object' ? addr.port : NaN;
+    if (cfg.port !== 0 || !isBadPort(got) || attempt >= 7) {
+      if (isBadPort(got)) {
+        log.warn(`分配到的端口 ${got} 在 WHATWG 禁用端口表上，浏览器与 Node 的 fetch 会拒连；已重试 ${attempt} 次仍未换开`);
+      }
+      break;
+    }
+    log.info(`分配到的端口 ${got} 是 WHATWG 禁用端口（fetch 会拒连），换一个重试`);
+    await app.close();
+  }
+
   const server = app.server;
   events.attach(server as unknown as ReturnType<typeof createServer>);
 
@@ -480,6 +503,59 @@ function reexecWithProxySupport(): boolean {
   process.exit(r.status ?? 0);
 }
 
+/**
+ * WHATWG 的「禁用端口」表。
+ *
+ * 浏览器和 undici（Node 的 fetch）**拒绝**连接这些端口，报的是一句
+ * `bad port` —— 连 TCP 都不会去连。这批端口历来被用作其它协议
+ * （6667 是 IRC、2049 是 NFS、5060 是 SIP……），为了防跨协议攻击被写死拒掉。
+ *
+ * 为什么 Helper 要管这件事：以 port 0 启动时端口由系统分配，
+ * 而有些机器的动态端口范围被调得很低（本机就分到过 6667 和 10705），
+ * 正好撞上这张表。撞上之后 Helper 自己跑得好好的，
+ * 插件却一个请求都发不出去 —— 报错是 `fetch failed`，
+ * 底下那句 `bad port` 藏在 cause 里，跟"端口被占""没配对"看起来毫无区别。
+ *
+ * 这个 flake 前后犯过五次，每次都是整批用例一起红、重跑又好，
+ * 一直没定位到；直到日志里那行 `Helper 已就绪 http://127.0.0.1:6667`
+ * 和这张表对上号。
+ *
+ * 表按 WHATWG URL 规范的 bad port list 抄写。
+ */
+const BAD_PORTS = new Set([
+  1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53, 69, 77, 79, 87, 95, 101, 102, 103,
+  104, 109, 110, 111, 113, 115, 117, 119, 123, 135, 137, 139, 143, 161, 179, 389, 427, 465, 512, 513,
+  514, 515, 526, 530, 531, 532, 540, 548, 554, 556, 563, 587, 601, 636, 989, 990, 993, 995, 1719,
+  1720, 1723, 2049, 3659, 4045, 4190, 5060, 5061, 6000, 6566, 6665, 6666, 6667, 6668, 6669, 6679,
+  6697, 10080
+]);
+
+export function isBadPort(port: number): boolean {
+  return BAD_PORTS.has(port);
+}
+
+/**
+ * 把一行文字压成纯 ASCII，供 NSIS 显示。
+ *
+ * 非 ASCII 一律换成 '?'，**但 ASCII 范围内的字符全部原样留住** ——
+ * 尤其是反斜杠。中文 Windows 上 GBK 双字节字符的第二字节可能正好是
+ * 0x5C，解码时被当成路径分隔符吃掉，报错里的路径就会缺一段，
+ * 看的人根本对不上是哪个目录。真机上出过：
+ * 「C:\Users\藍鎳槤鍾卜AppData\Roaming\...」—— 用户名和 AppData 之间
+ * 的那个反斜杠没了。
+ *
+ * 这不是"翻译"，只是保证这行字在任何代码页下都不会变成乱码。
+ * 真正给人看的中文细节在日志文件里，路径会一并打出来。
+ */
+export function toAsciiSafe(text: string): string {
+  let out = '';
+  for (const ch of text) {
+    const c = ch.codePointAt(0) ?? 0;
+    out += c >= 0x20 && c <= 0x7e ? ch : '?';
+  }
+  return out.slice(0, 600);
+}
+
 const cliArgs = process.argv.slice(2);
 if (cliArgs.some((a) => a.startsWith('--'))) {
   runCli(cliArgs)
@@ -487,10 +563,25 @@ if (cliArgs.some((a) => a.startsWith('--'))) {
       if (!handled) process.exit(2);
     })
     .catch((e) => {
-      // 安装器靠退出码判断成败，靠 stderr 给用户看原因。
-      // 这里绝不能吞异常：装失败却报成功，用户会在 Photoshop 里
-      // 对着一个根本没装上的插件找半天。
-      console.error(`ERROR ${e instanceof Error ? e.message : String(e)}`);
+      /*
+       * 安装器靠退出码判断成败，靠这里的输出给用户看原因。
+       * 绝不能吞异常：装失败却报成功，用户会在 Photoshop 里对着一个
+       * 根本没装上的插件找半天。
+       *
+       * 但**输出必须是纯 ASCII**。
+       *
+       * NSIS 用 nsExec::ExecToStack 捕获这段文字，再原样塞进 MessageBox。
+       * 它按系统 ANSI 代码页解码，而我们写的是 UTF-8 —— 在中文 Windows 上
+       * 就成了乱码。真机上出过：用户名是中文的那台机器，报错里出现了
+       * 「藍鎳槤鍾卜AppData」这种东西，而且**用户名和 AppData 之间的反斜杠
+       * 没了** —— GBK 双字节字符的第二字节撞上 0x5C，正好被当成路径分隔符
+       * 吃掉。结果是一条既看不懂、路径又是错的报错。
+       *
+       * 所以：给 NSIS 的是 ASCII 摘要 + 日志文件路径，中文细节写进日志。
+       * 日志由我们自己写，编码可控。
+       */
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error(`ERROR ${toAsciiSafe(msg)}`);
       process.exit(1);
     });
 } else if (shouldAutoStart()) {

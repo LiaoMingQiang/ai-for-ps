@@ -441,6 +441,8 @@ export const api = {
     remoteKind?: 'workflow' | 'aiApp';
     /** AI 应用：从平台 API 页面复制来的「请求示例」原文，服务端解析出 nodeInfoList */
     nodeInfoRaw?: string;
+    /** AI 应用：界面上逐项填好的节点表。UXP 粘贴会被截断，所以这条才是主路径 */
+    nodeInfo?: Array<{ nodeId: string; fieldName: string; defaultValue: string }>;
   }) =>
     request<{ workflow: WorkflowSummary; versionBumped: boolean }>('POST', '/v1/workflows/cloud', input),
   deleteWorkflow: (id: string) => request<{ ok: true }>('DELETE', `/v1/workflows/${encodeURIComponent(id)}`),

@@ -17,7 +17,8 @@ import {
   rhPostUrl,
   findProvider,
   BINDABLE_PARAMS,
-  SEMANTIC_TO_PARAM
+  SEMANTIC_TO_PARAM,
+  parseRhNodeInfo
 } from '@psai/shared';
 import type { AppSettings, SettingsPatch, WritebackMode, ComfyMode } from '@psai/shared';
 import { h, clear, formatBytes, formatDuration, formatTime, toggleClass } from '../app/dom.js';
@@ -843,7 +844,27 @@ async function cloudWorkflowBox(host: HTMLElement): Promise<HTMLElement> {
 
   const nameInput = h('input', { class: 'input', type: 'text', placeholder: '给它起个名字，比如「老照片修复」' }) as HTMLInputElement;
   const providerSelect = h('select', { class: 'input select' }) as HTMLSelectElement;
-  for (const p of providers) providerSelect.appendChild(h('option', { value: p.id }, p.label));
+  /*
+   * 第一项必须显式标 selected，并且自己记住当前值。
+   *
+   * UXP 上 `<select>` 没有任何 option 带 selected 时，`.value` 读回来是**空串** ——
+   * 界面上明明显示着「RunningHub 云端」，发出去的 providerId 却是 ''，
+   * 服务端报「未知的 Provider：」，冒号后面什么都没有。真机上就是这么卡住的。
+   * 这个仓库里别处的 select（nav.ts、page-generate.ts）本来就都标了，
+   * 是我新写这两个时漏了。
+   *
+   * 除了标 selected，再用一个变量跟着 onchange 走 —— 提交时读变量不读 .value，
+   * 就算宿主的回读行为再变也不受影响。
+   */
+  let providerId = providers[0]?.id ?? '';
+  for (const [i, p] of providers.entries()) {
+    const opt = h('option', { value: p.id }, p.label) as HTMLOptionElement;
+    if (i === 0) opt.setAttribute('selected', '');
+    providerSelect.appendChild(opt);
+  }
+  providerSelect.onchange = (e: Event): void => {
+    providerId = (e.target as HTMLSelectElement).value || providerId;
+  };
   const idInput = h('input', { class: 'input', type: 'text', placeholder: '平台上的工作流 / webapp ID' }) as HTMLInputElement;
   const out = h('div', { class: 'muted' });
 
@@ -856,30 +877,172 @@ async function cloudWorkflowBox(host: HTMLElement): Promise<HTMLElement> {
    * 而那时候报出来的错会指向"没有参数绑定"这种完全不相干的原因。
    */
   const kindSelect = h('select', { class: 'input select' }) as HTMLSelectElement;
-  kindSelect.appendChild(h('option', { value: 'workflow' }, 'ComfyUI 工作流（地址里带 /workflow/）'));
+  let remoteKind: 'workflow' | 'aiApp' = 'workflow';
+  const wfOpt = h('option', { value: 'workflow' }, 'ComfyUI 工作流（地址里带 /workflow/）') as HTMLOptionElement;
+  wfOpt.setAttribute('selected', '');
+  kindSelect.appendChild(wfOpt);
   kindSelect.appendChild(h('option', { value: 'aiApp' }, 'AI 应用（地址里带 /ai-detail/）'));
 
   const nodeInfoArea = h('textarea', {
     class: 'input textarea json-area',
     rows: '10',
-    placeholder: '把应用 API 页面上「提交请求 → 请求示例」那段 curl 整个粘贴到这里'
+    placeholder: '可选：粘贴那段 curl 后点「解析」。UXP 的文本框粘长文常被截断，粘不全就用「从文件读」或直接手填下面两列'
   }) as HTMLTextAreaElement;
-  const nodeInfoRow = fieldRow(
-    '请求示例',
-    nodeInfoArea,
-    'AI 应用的节点号没有任何接口能查到，只能从平台的 API 页面复制过来 —— 少了它，提交会拿作者的示例图出图，结果和你的输入无关。'
+
+  /*
+   * 逐项填写的节点表。
+   *
+   * 为什么这才是主路径：真机上 UXP 的文本框**粘贴会被截断** —— 用户把
+   * 整段 curl 粘进来，只进去开头几行（而且换行也被吃掉），解析必然失败，
+   * 报出来的是「没能找到 nodeInfoList」，看起来像我们不认他的格式。
+   * 那是宿主的行为，我们改不了。
+   *
+   * 一个 AI 应用通常也就两三个字段，手填两行比跟剪贴板较劲可靠得多。
+   * 粘贴那条留着当便利：能粘全就点「解析」自动填，粘不全就手填。
+   */
+  const rowsHost = h('div', { class: 'rh-node-rows' });
+  /*
+   * 每一行把自己的三个输入框登记在这里，读值时直接从这儿取。
+   *
+   * 原来是回头遍历 DOM、按 `c.tagName === 'INPUT'` 把输入框挑出来。
+   * 那样写在真机上会静悄悄地失效：UXP 的 DOM 是子集，元素上不一定有
+   * tagName（旁边 page-comfyweb.ts 里那处就是写成 `el.tagName?.` 的），
+   * 取不到就一个都挑不出来 —— 节点表发出去是空的，服务端报错，
+   * 而错误提示恰好在按钮下面一行、被卷出可视区，看起来就是"点了没反应"。
+   *
+   * 现在不做任何 DOM 反查：建行的时候就把引用存下来。
+   */
+  const rowFields = new Map<HTMLElement, { nid: HTMLInputElement; fname: HTMLInputElement; dval: HTMLInputElement }>();
+  const mkRow = (init?: { nodeId: string; fieldName: string; defaultValue: string }): HTMLElement => {
+    const nid = h('input', { class: 'input', type: 'text', placeholder: '节点号，如 525' }) as HTMLInputElement;
+    const fname = h('input', { class: 'input', type: 'text', placeholder: '字段名，如 image' }) as HTMLInputElement;
+    const dval = h('input', { class: 'input', type: 'text', placeholder: '默认值（可留空）' }) as HTMLInputElement;
+    if (init) {
+      nid.value = init.nodeId;
+      fname.value = init.fieldName;
+      dval.value = init.defaultValue;
+    }
+    const row = h('div', { class: 'rh-node-row' }, nid, fname, dval);
+    rowFields.set(row, { nid, fname, dval });
+    row.appendChild(
+      h(
+        'button',
+        {
+          class: 'btn-ghost danger',
+          type: 'button',
+          onclick: () => {
+            rowsHost.removeChild(row);
+            rowFields.delete(row);
+            if (!rowFields.size) rowsHost.appendChild(mkRow());
+          }
+        },
+        '删'
+      )
+    );
+    return row;
+  };
+  rowsHost.appendChild(mkRow());
+
+  const readRows = (): Array<{ nodeId: string; fieldName: string; defaultValue: string }> => {
+    const rows: Array<{ nodeId: string; fieldName: string; defaultValue: string }> = [];
+    for (const { nid, fname, dval } of rowFields.values()) {
+      if (!nid.value.trim() || !fname.value.trim()) continue;
+      rows.push({ nodeId: nid.value.trim(), fieldName: fname.value.trim(), defaultValue: dval.value ?? '' });
+    }
+    return rows;
+  };
+
+  const parseBtn = h(
+    'button',
+    {
+      class: 'btn-ghost',
+      type: 'button',
+      onclick: () => {
+        out.className = 'muted';
+        try {
+          const fields = parseRhNodeInfo(nodeInfoArea.value);
+          clear(rowsHost);
+          rowFields.clear();
+          for (const f of fields) rowsHost.appendChild(mkRow(f));
+          out.className = 'ok';
+          out.textContent = `解析出 ${fields.length} 个字段，已填到下面 —— 核对一下再登记。`;
+        } catch (e) {
+          out.className = 'err';
+          out.textContent = `${e instanceof Error ? e.message : String(e)}（UXP 的文本框粘贴常常会被截断，粘不全就直接在下面手填，一个应用通常只有两三行。）`;
+        }
+      }
+    },
+    '解析'
+  );
+
+  const addRowBtn = h(
+    'button',
+    { class: 'btn-ghost', type: 'button', onclick: () => rowsHost.appendChild(mkRow()) },
+    '添加一行'
+  );
+
+  /*
+   * 从文件读那段 curl。
+   *
+   * 粘贴在 UXP 里会被截断，手填又要抄数字 —— 存成文件再选进来是第三条路：
+   * 不经过剪贴板，也不用一个字一个字抄。用户把网页上那段 curl 复制到
+   * 记事本存一下就行，扩展名随便。
+   */
+  const pickBtn = h(
+    'button',
+    {
+      class: 'btn-ghost',
+      type: 'button',
+      onclick: async () => {
+        out.className = 'muted';
+        try {
+          const picked = await bridge.pickJsonFile();
+          if (!picked) return;
+          const fields = parseRhNodeInfo(picked.text);
+          clear(rowsHost);
+          rowFields.clear();
+          for (const f of fields) rowsHost.appendChild(mkRow(f));
+          out.className = 'ok';
+          out.textContent = `已从 ${picked.name} 读出 ${fields.length} 个字段，核对一下再登记。`;
+        } catch (e) {
+          out.className = 'err';
+          out.textContent = e instanceof Error ? e.message : String(e);
+        }
+      }
+    },
+    '从文件读'
+  );
+
+  const nodeInfoRow = h(
+    'div',
+    { class: 'rh-nodeinfo' },
+    fieldRow('请求示例（可选，粘不全就手填）', nodeInfoArea),
+    h('div', { class: 'row gap' }, pickBtn, parseBtn, addRowBtn),
+    h(
+      'div',
+      { class: 'muted hint' },
+      '节点参数表：只填「节点号」和「字段名」两列（默认值可留空）。' +
+        '照着应用 API 页面「请求示例」里的 nodeInfoList 抄即可 —— 通常只有两三行，' +
+        '比如 525 / image 和 727 / int。fieldValue 里那串图片文件名是作者的示例图，不用填。' +
+        '嫌抄麻烦就把那段 curl 存成 txt，点「从文件读」。'
+    ),
+    rowsHost
   );
   const kindHint = h('div', { class: 'muted hint' });
 
   const paintKind = (): void => {
-    const isApp = kindSelect.value === 'aiApp';
+    const isApp = remoteKind === 'aiApp';
     toggleClass(nodeInfoRow, 'hidden', !isApp);
     clear(kindHint);
     kindHint.textContent = isApp
-      ? '在应用页点右上角「API」进到接口页，那里有这段 curl。'
+      ? '在应用页点右上角「API」进到接口页，「提交请求 → 请求示例」里有节点号和字段名。'
       : '工作流要先在 RunningHub 上保存并成功跑过一次，平台才会给出它的接口格式；否则登记后提交会报「尚未保存或未运行」。';
   };
-  kindSelect.onchange = paintKind;
+  kindSelect.onchange = (e: Event): void => {
+    const v = (e.target as HTMLSelectElement).value;
+    if (v === 'aiApp' || v === 'workflow') remoteKind = v;
+    paintKind();
+  };
 
   const addBtn = h(
     'button',
@@ -892,10 +1055,11 @@ async function cloudWorkflowBox(host: HTMLElement): Promise<HTMLElement> {
         try {
           const res = await api.addCloudWorkflow({
             name: nameInput.value.trim(),
-            providerId: providerSelect.value,
+            providerId,
             remoteId: idInput.value.trim(),
-            remoteKind: kindSelect.value as 'workflow' | 'aiApp',
-            ...(kindSelect.value === 'aiApp' ? { nodeInfoRaw: nodeInfoArea.value } : {})
+            remoteKind,
+            // 逐项填的优先：它不经过剪贴板，是唯一不会被 UXP 截断的那条
+            ...(remoteKind === 'aiApp' ? { nodeInfo: readRows() } : {})
           });
           toast(res.versionBumped ? `已登记为 v${res.workflow.version}` : '已登记', res.workflow.name);
           nameInput.value = '';
@@ -903,8 +1067,17 @@ async function cloudWorkflowBox(host: HTMLElement): Promise<HTMLElement> {
           nodeInfoArea.value = '';
           await renderSettingsPage(host.parentElement as HTMLElement);
         } catch (e) {
+          const text = e instanceof ApiError ? e.display : e instanceof Error ? e.message : String(e);
           out.className = 'err';
-          out.textContent = e instanceof ApiError ? e.display : e instanceof Error ? e.message : String(e);
+          out.textContent = text;
+          /*
+           * 同时弹 toast。
+           *
+           * 这段红字在「登记」按钮**下面**，而这张表很长 —— 真机上按钮
+           * 正好在可视区底部，报错被卷出屏幕，用户看到的是"点了没反应"。
+           * toast 浮在最上层，不受滚动位置影响。
+           */
+          toast('登记失败', text, 'error');
         }
       }
     },

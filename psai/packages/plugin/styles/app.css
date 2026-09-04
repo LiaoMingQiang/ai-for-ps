@@ -2312,3 +2312,35 @@ summary:focus-visible {
   font-size: 11px;
   line-height: 1.45;
 }
+
+/* AI 应用的节点参数表：一行 = 节点号 / 字段名 / 默认值 / 删 */
+.rh-node-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+/* UXP 没有 flex 自动最小尺寸，纵向容器的子项不写这条会被压扁、文字重叠 */
+.rh-node-rows > * {
+  flex-shrink: 0;
+}
+.rh-node-row {
+  display: flex;
+  gap: 5px;
+  align-items: center;
+}
+/* UXP 没有 flex 自动最小尺寸，不写 flex-shrink 子项会被挤成一条缝 */
+.rh-node-row > * {
+  flex-shrink: 0;
+}
+.rh-node-row > input {
+  flex: 1 1 0;
+  min-width: 0;
+}
+.rh-nodeinfo {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.rh-nodeinfo > * {
+  flex-shrink: 0;
+}

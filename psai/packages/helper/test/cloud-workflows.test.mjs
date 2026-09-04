@@ -39,6 +39,9 @@ async function call(method, path, body) {
     headers['Content-Type'] = 'application/json';
     payload = JSON.stringify(body);
   }
+  if (!Number.isInteger(PORT) || PORT <= 0) {
+    throw new Error(`测试用的 Helper 端口无效：PORT=${PORT}。多半是某次启动 Helper 没成功，或者在赋值前就发了请求。`);
+  }
   const res = await fetch(`http://127.0.0.1:${PORT}${path}`, { method, headers, body: payload });
   return { status: res.status, body: await res.json() };
 }
@@ -386,4 +389,56 @@ test('RunningHub 的两个实测错误码被翻译，且保留平台原文', asy
     assert.match(text, expect, `「${platformMsg}」应当被翻译成能照着做的话，实际：${text}`);
     assert.match(text, new RegExp(platformMsg), '平台原文要保留，方便对着平台文档查');
   }
+});
+
+/* ---------------- 逐项填写的节点表（粘贴被截断时唯一稳的那条路） ---------------- */
+
+test('直接传节点表数组也能登记 —— 不必经过剪贴板', async () => {
+  /*
+   * 真机上 UXP 的文本框粘贴会被截断：整段 curl 粘进去只剩开头几行，
+   * 解析必然失败，报出来的是「没能找到 nodeInfoList」，看起来像我们不认
+   * 他的格式。那是宿主的行为，改不了 —— 所以界面改成逐项填写，
+   * 这条路径必须在服务端也走得通。
+   */
+  const res = await call('POST', '/v1/workflows/cloud', {
+    name: '手填节点表的应用',
+    providerId: 'runninghub',
+    remoteId: '1892509998193545299',
+    remoteKind: 'aiApp',
+    nodeInfo: [
+      { nodeId: '525', fieldName: 'image', defaultValue: '' },
+      { nodeId: '727', fieldName: 'int', defaultValue: '25' }
+    ]
+  });
+  assert.equal(res.body.ok, true, JSON.stringify(res.body));
+  assert.equal(res.body.workflow.nodeInfo.length, 2);
+  assert.equal(res.body.workflow.nodeInfo[0].fieldName, 'image');
+  assert.equal(res.body.workflow.nodeInfo[1].defaultValue, '25');
+});
+
+test('节点表里空行被丢掉，全空则明确报错', async () => {
+  // 界面上默认摆着一行空的，用户只填了一行时另一行不该让整次登记失败。
+  const ok = await call('POST', '/v1/workflows/cloud', {
+    name: '带空行的应用',
+    providerId: 'runninghub',
+    remoteId: '1892509998193545288',
+    remoteKind: 'aiApp',
+    nodeInfo: [
+      { nodeId: '525', fieldName: 'image' },
+      { nodeId: '', fieldName: '' },
+      { nodeId: '  ', fieldName: 'x' }
+    ]
+  });
+  assert.equal(ok.body.ok, true, JSON.stringify(ok.body));
+  assert.equal(ok.body.workflow.nodeInfo.length, 1);
+
+  const bad = await call('POST', '/v1/workflows/cloud', {
+    name: '全空的应用',
+    providerId: 'runninghub',
+    remoteId: '1892509998193545277',
+    remoteKind: 'aiApp',
+    nodeInfo: [{ nodeId: '', fieldName: '' }]
+  });
+  assert.notEqual(bad.body.ok, true);
+  assert.match(JSON.stringify(bad.body), /节点号|字段名|请求示例/);
 });

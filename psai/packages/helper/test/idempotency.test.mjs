@@ -37,6 +37,9 @@ let dataDir;
 let token;
 
 function url(path) {
+  if (!Number.isInteger(PORT) || PORT <= 0) {
+    throw new Error(`测试用的 Helper 端口无效：PORT=${PORT}。多半是某次启动 Helper 没成功，或者在赋值前就发了请求。`);
+  }
   return `http://127.0.0.1:${PORT}${path}`;
 }
 

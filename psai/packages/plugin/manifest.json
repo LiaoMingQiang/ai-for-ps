@@ -2,7 +2,7 @@
   "manifestVersion": 5,
   "id": "com.aiforps.psai",
   "name": "AI for PS",
-  "version": "0.9.7",
+  "version": "0.9.11",
   "main": "index.html",
   "host": {
     "app": "PS",

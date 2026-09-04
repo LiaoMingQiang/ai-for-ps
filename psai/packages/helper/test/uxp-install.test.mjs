@@ -266,3 +266,4 @@ test('host 写成数组时也能取到 minVersion', () => {
   assert.equal(hostMinVersionOf({ id: 'a', name: 'a', version: '1', host: [{ app: 'PS', minVersion: '24.1.0' }] }), '24.1.0');
   assert.equal(hostMinVersionOf({ id: 'a', name: 'a', version: '1' }), '25.2.0', '没写就用兜底值');
 });
+

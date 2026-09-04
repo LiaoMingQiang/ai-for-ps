@@ -951,8 +951,16 @@ export async function pickImageFile(): Promise<{ bytes: ArrayBuffer; name: strin
  */
 export async function pickJsonFile(): Promise<{ text: string; name: string } | null> {
   requirePs();
+  /*
+   * 也收 txt / curl / 无扩展名。
+   *
+   * 除了 ComfyUI 导出的图，这个选择器还要接 RunningHub 的「请求示例」——
+   * 用户从网页复制那段 curl 之后，粘进 UXP 的文本框会被截断（宿主行为，
+   * 改不了），存成文件再选进来是唯一不经过剪贴板、也不用手打的路。
+   * 存文件时扩展名是什么全看他随手怎么存，所以别只认 json。
+   */
   const entry = (await localFileSystem!.getFileForOpening({
-    types: ['json'],
+    types: ['json', 'txt', 'curl', 'sh', 'text', ''],
     allowMultiple: false
   })) as { read(opts?: { format?: unknown }): Promise<string>; name: string } | null;
   if (!entry) return null;

@@ -160,11 +160,33 @@ class Element extends Node {
     if (this.tagName !== 'SELECT') return this._value ?? this.getAttribute('value') ?? '';
     if (this._value !== undefined && this._value !== '') return this._value;
     const opts = this.querySelectorAll('option');
-    const picked = opts.find((o) => o.hasAttribute('selected')) ?? opts[0];
+    /*
+     * **没有任何 option 标 selected 时返回空串，不退回第一个。**
+     *
+     * 这是照着真机改的：UXP 上这种 select 的 .value 读出来就是空串。
+     * 桩原来会好心地退回 opts[0]，于是"忘了标 selected"这个 bug
+     * 在测试里永远看不见 —— 真机上界面显示着「RunningHub 云端」，
+     * 发出去的 providerId 却是 ''，服务端报「未知的 Provider：」。
+     * 桩比真机宽容，等于把这类 bug 放行到用户那里。
+     */
+    const picked = opts.find((o) => o.hasAttribute('selected'));
     return picked ? (picked.getAttribute('value') ?? picked.textContent) : '';
   }
   set value(v) {
-    this._value = String(v);
+    /*
+     * 照抄 UXP 的 256 字符默认上限。
+     *
+     * 真机上 input/textarea 默认最多收 256 个字符，超出的**静默丢掉**：
+     * 没有报错、没有事件，粘一段长文进去只进去开头一截。
+     * 这个行为连着坑了几轮（工作流 JSON 粘不全、curl 解析不出 nodeInfoList、
+     * 提示词被截断），而桩不限长，所以测试里一次都没照出来。
+     *
+     * 显式设过 maxlength 的按设的来 —— 产品代码正是靠这条解开限制的。
+     */
+    const s = String(v);
+    const declared = Number(this.getAttribute('maxlength'));
+    const limit = Number.isFinite(declared) && declared > 0 ? declared : 256;
+    this._value = this.tagName === 'SELECT' ? s : s.slice(0, limit);
   }
 
   setAttribute(name, value) {

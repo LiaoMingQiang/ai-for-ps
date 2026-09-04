@@ -196,8 +196,49 @@ export function installPlugin(opts: {
   }
 
   // 2. 拷贝新版本
-  mkdirSync(target, { recursive: true });
-  cpSync(src, target, { recursive: true });
+  try {
+    mkdirSync(target, { recursive: true });
+    cpSync(src, target, { recursive: true });
+  } catch (e) {
+    /*
+     * 真机上有一台机器卡在这里，报的是 Node 的原话
+     * 「EIO, Access is denied. '\\?\C:\Users\...\External\com.aiforps.psai_0.9.7'」。
+     * 那句话对用户毫无用处：他既不知道 EIO 是什么，也不知道下一步该做什么。
+     *
+     * 这一层不猜原因，只把**能查到的事实**摆出来 —— 目标在不在、
+     * 父目录能不能写、Photoshop 是不是开着 —— 再按事实给出对应的做法。
+     * 猜一个原因写死在文案里，猜错的时候比不说更糟。
+     */
+    const code = (e as { code?: string }).code ?? '';
+    const parent = externalDir(root);
+    const facts: string[] = [];
+    facts.push(existsSync(target) ? '目标目录已存在' : '目标目录不存在');
+    facts.push(existsSync(parent) ? `父目录存在（${parent}）` : `父目录不存在（${parent}）`);
+    let parentWritable = false;
+    try {
+      const probe = join(parent, `.psai-write-probe-${process.pid}`);
+      mkdirSync(parent, { recursive: true });
+      writeFileSync(probe, 'x');
+      rmSync(probe, { force: true });
+      parentWritable = true;
+    } catch {
+      parentWritable = false;
+    }
+    facts.push(parentWritable ? '父目录可写' : '父目录**不可写**');
+
+    const advice = !parentWritable
+      ? '当前账号对这个目录没有写权限。若 AppData 被重定向到 OneDrive 或网络盘，请先暂停同步再装；' +
+        '也可能是安全软件在拦截对 Adobe 插件目录的写入。'
+      : '目录可写却仍然被拒，最常见的原因是 **Photoshop 正开着**占用着这个插件目录。' +
+        '请完全退出 Photoshop（确认任务管理器里没有 Photoshop 进程）后重新安装。';
+
+    throw new Error(
+      `复制插件文件失败（${code || '未知错误码'}）：${target}\n` +
+        `  事实：${facts.join('；')}\n` +
+        `  建议：${advice}\n` +
+        `  原始错误：${String(e)}`
+    );
+  }
   log(`  已复制插件文件`);
 
   // 3. 合并注册表：同 id 的旧记录替换掉，别人的原样保留
