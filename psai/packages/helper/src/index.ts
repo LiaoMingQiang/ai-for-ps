@@ -491,6 +491,71 @@ async function runCli(argv: string[]): Promise<boolean> {
  * 只看 https/http/all，不看 NO_PROXY —— 后者是"哪些地址不走代理"，
  * 由 Node 自己处理（本机 127.0.0.1 默认就在里面，所以本地 ComfyUI 不受影响）。
  */
+/**
+ * 从 Windows 的系统代理设置里读代理地址。
+ *
+ * 为什么必须读注册表：Windows 上大多数代理软件（Clash / v2ray / 各种加速器）
+ * 只写 WinINET 的这组设置，**不设 HTTP_PROXY / HTTPS_PROXY 环境变量**。
+ * 而我们原来只看环境变量 —— 于是在这类机器上：
+ *   系统代理开着，浏览器、curl 都通；
+ *   我们那句"检测到代理就重启"从来不触发（envProxy() 永远返回 null）；
+ *   Node 的 fetch 直连超时，界面报「拉取模型失败 / fetch failed」。
+ *
+ * 真机实测（用户机器，ProxyEnable=1、ProxyServer=127.0.0.1:4780）：
+ *   直连 https://ai.comfly.org/v1/models  → Connect Timeout Error
+ *   带上这个代理                          → HTTP 401（通了，只是缺 key）
+ *
+ * 用 reg query 而不是引第三方库：它是 Windows 自带的，SEA 打包也不受影响。
+ * 读不到就当没有 —— 宁可不走代理，也不能因为读注册表失败而起不来。
+ */
+function windowsSystemProxy(): { proxy: string; noProxy: string } | null {
+  if (process.platform !== 'win32') return null;
+  try {
+    const key = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings';
+    const r = spawnSync('reg', ['query', key], { encoding: 'utf8', windowsHide: true, timeout: 5000 });
+    if (r.status !== 0 || !r.stdout) return null;
+
+    if (!/ProxyEnable\s+REG_DWORD\s+0x1/i.test(r.stdout)) return null;
+
+    const raw = /ProxyServer\s+REG_SZ\s+(.+)/i.exec(r.stdout)?.[1]?.trim();
+    if (!raw) return null;
+
+    /*
+     * ProxyServer 有两种写法：
+     *   "127.0.0.1:4780"                            所有协议共用
+     *   "http=127.0.0.1:1080;https=127.0.0.1:1080"  按协议分开
+     * 后者取 https 那条（我们打的全是 https）；都没有就取第一条。
+     */
+    let hostPort = raw;
+    if (raw.includes('=')) {
+      const parts: Record<string, string> = {};
+      for (const seg of raw.split(';')) {
+        const i = seg.indexOf('=');
+        if (i > 0) parts[seg.slice(0, i).trim().toLowerCase()] = seg.slice(i + 1).trim();
+      }
+      hostPort = parts['https'] ?? parts['http'] ?? Object.values(parts)[0] ?? '';
+    }
+    if (!hostPort) return null;
+    const proxy = /^\w+:\/\//.test(hostPort) ? hostPort : `http://${hostPort}`;
+
+    /*
+     * 绕过表。必须带上本机地址 —— 否则本机 ComfyUI（127.0.0.1:8188）
+     * 和 Helper 自己的端口都会被塞进代理，那是纯粹的自伤。
+     * `<local>` 是 WinINET 的写法，Node 不认，换成明确的几个。
+     */
+    const ov = /ProxyOverride\s+REG_SZ\s+(.+)/i.exec(r.stdout)?.[1]?.trim() ?? '';
+    const extra = ov
+      .split(';')
+      .map((x) => x.trim())
+      .filter((x) => x && x !== '<local>');
+    const noProxy = ['localhost', '127.0.0.1', '::1', ...extra].join(',');
+
+    return { proxy, noProxy };
+  } catch {
+    return null;
+  }
+}
+
 function envProxy(): string | null {
   for (const k of ['HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy', 'ALL_PROXY', 'all_proxy']) {
     const v = process.env[k];
@@ -524,13 +589,30 @@ function envProxy(): string | null {
 function reexecWithProxySupport(): boolean {
   if (process.env['PSAI_PROXY_REEXEC'] === '1') return false;
   if (process.env['NODE_USE_ENV_PROXY']) return false;
-  const proxy = envProxy();
+  /*
+   * 两个来源都看：环境变量优先（那是用户显式设的，尊重他），
+   * 没有再读 Windows 的系统代理设置 —— 后者才是这台机器上的实际情况。
+   */
+  const fromEnv = envProxy();
+  const fromSystem = fromEnv ? null : windowsSystemProxy();
+  const proxy = fromEnv ?? fromSystem?.proxy ?? null;
   if (!proxy) return false;
 
-  console.log(`检测到系统代理 ${proxy}，正在以代理模式重启 Helper（Node 的 fetch 默认不走代理）`);
+  console.log(
+    `检测到${fromEnv ? '环境变量里的' : '系统设置里的'}代理 ${proxy}，` +
+      '正在以代理模式重启 Helper（Node 的 fetch 默认不走代理）'
+  );
   const r = spawnSync(process.execPath, process.argv.slice(1), {
     stdio: 'inherit',
-    env: { ...process.env, NODE_USE_ENV_PROXY: '1', PSAI_PROXY_REEXEC: '1' }
+    env: {
+      ...process.env,
+      // 从系统设置读来的要显式写进环境变量，NODE_USE_ENV_PROXY 才看得到
+      ...(fromSystem ? { HTTPS_PROXY: fromSystem.proxy, HTTP_PROXY: fromSystem.proxy } : {}),
+      // 本机地址一律不走代理，否则本机 ComfyUI 和 Helper 自己都会被绕进去
+      ...(fromSystem ? { NO_PROXY: fromSystem.noProxy, no_proxy: fromSystem.noProxy } : {}),
+      NODE_USE_ENV_PROXY: '1',
+      PSAI_PROXY_REEXEC: '1'
+    }
   });
   process.exit(r.status ?? 0);
 }

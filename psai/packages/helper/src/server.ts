@@ -452,6 +452,40 @@ export async function buildServer(d: ServerDeps): Promise<FastifyInstance> {
         reason = '未配置任何闭源模型 Provider';
       }
 
+      /*
+       * 闭源模型这一族：**Provider 配好了不等于这个功能能跑**。
+       *
+       * 真机上出过一次很难查的状态：设置页里「闭源模型 / 文生图」显示绿色的
+       * 「就绪」，点生成却立刻报 WORKFLOW_NOT_BOUND —— 因为它绑的是 LiblibAI，
+       * 而 LiblibAI 要么给一个云端工作流 uuid、要么给一个托管模型，两个都没填。
+       * 密钥是配好的，所以 ps.configured 为真，上面那几道全都放行了。
+       *
+       * 「界面说能用、点下去必然失败」比直接标成未就绪坏得多：用户会反复
+       * 怀疑是自己参数填错了，而真正缺的东西界面上一个字都没提。
+       *
+       * 所以这里补一道：以工作流为单位的平台（LiblibAI / RunningHub），
+       * 走闭源模型功能时必须有一个能提交的东西 ——
+       * 绑定里的模型、绑定里的云端工作流、或者 Provider 上的默认值。
+       */
+      if (ready && f.engine !== 'comfy-workflow' && providerId && ps) {
+        const desc = findProvider(providerId);
+        const workflowStyle = !!desc && desc.capabilities.includes('workflow') && desc.kind !== 'comfyui';
+        if (workflowStyle) {
+          const pset = d.settings.providerSettings(providerId);
+          const hasSomething =
+            !!b?.model?.trim() ||
+            !!b?.remoteWorkflowId?.trim() ||
+            !!pset.defaultModel?.trim() ||
+            !!pset.defaultWorkflowId?.trim();
+          if (!hasSomething) {
+            ready = false;
+            reason =
+              `${desc!.label} 还没有可提交的目标：要么在这一行绑一个云端工作流 / 模型，` +
+              `要么在「推荐平台」里给它填一个默认工作流 ID 或默认模型。`;
+          }
+        }
+      }
+
       return {
         id: f.id,
         label: f.label,
