@@ -251,6 +251,20 @@ export class WorkflowStore {
      * 却带着 SUCCESS 状态回来的图，而且是花了钱才拿到的。
      * 这种假成功比登记时就被拦下难查得多，所以拦在这里。
      */
+    /*
+     * 「AI 应用」是 RunningHub 独有的东西（它有一套 v2 接口：
+     * /openapi/v2/run/ai-app/{id}）。别的平台没有这个概念 ——
+     * 让用户在 LiblibAI 下面选「AI 应用」，存进去的节点表不会有任何人读，
+     * 提交时按工作流那条路走，报出来的错跟真正的原因毫无关系。
+     * 所以在这里拦死，而不是等到提交。
+     */
+    if (input.remoteKind === 'aiApp' && input.providerId !== 'runninghub') {
+      throw new PsaiError(
+        'JOB_PARAM_INVALID',
+        `「AI 应用」是 RunningHub 特有的类型，${desc.label} 没有这个概念。请把类型改成「云端工作流」。`
+      );
+    }
+
     if (input.remoteKind === 'aiApp' && !(input.nodeInfo && input.nodeInfo.length)) {
       throw new PsaiError(
         'JOB_PARAM_INVALID',

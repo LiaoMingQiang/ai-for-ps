@@ -17,6 +17,7 @@
 
 import { createServer } from 'node:http';
 import { makePng } from './comfy-stub.mjs';
+import { listenSafe } from './listen-safe.mjs';
 
 export async function startCloudStub(port = 0, behavior = {}) {
   const state = {
@@ -147,8 +148,8 @@ export async function startCloudStub(port = 0, behavior = {}) {
     });
   });
 
-  await new Promise((resolve) => server.listen(port, '127.0.0.1', resolve));
-  const actualPort = server.address().port;
+  // 避开 WHATWG 禁用端口：撞上的话调用方用 fetch 根本连不进来（见 listen-safe.mjs）
+  const actualPort = await listenSafe(server, port, '127.0.0.1');
 
   return {
     url: `http://127.0.0.1:${actualPort}/v1`,

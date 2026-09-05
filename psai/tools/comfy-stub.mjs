@@ -8,6 +8,7 @@ import { createServer } from 'node:http';
 import { WebSocketServer } from 'ws';
 import { randomUUID, createHash } from 'node:crypto';
 import { deflateSync } from 'node:zlib';
+import { listenSafe } from './listen-safe.mjs';
 
 /** 生成一张真实可解析的 PNG（纯色方块）。资产库会解析它的 IHDR，所以必须是合法 PNG。 */
 export function makePng(width = 64, height = 64, rgb = [80, 140, 240]) {
@@ -329,11 +330,16 @@ export async function startComfyStub(port, behavior = {}) {
     });
   });
 
-  await new Promise((resolve) => server.listen(port, '127.0.0.1', resolve));
-  // 端口以**实际绑上的**为准：传 0 时由系统分配一个空闲端口。
-  // 直接回传入参的话，传 0 的调用方会拿到 http://127.0.0.1:0 —— 一个连不上的地址，
-  // 而报错要等到第一次请求才出现，看起来像别的毛病。
-  const boundPort = server.address()?.port ?? port;
+  /*
+   * 端口以**实际绑上的**为准，而且要避开 WHATWG 的禁用端口。
+   *
+   * 传 0 时由系统分配。直接回传入参的话，传 0 的调用方会拿到
+   * http://127.0.0.1:0 —— 一个连不上的地址，报错要等到第一次请求才出现。
+   *
+   * 避让是后补的：桩曾经绑到 6679（在禁用表上），Helper 用 fetch 连它
+   * 直接被拒，autowriteback 整个文件 28 条一起挂，报的是笼统的 fetch failed。
+   */
+  const boundPort = await listenSafe(server, port, '127.0.0.1');
 
   return {
     port: boundPort,

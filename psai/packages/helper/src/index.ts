@@ -229,18 +229,50 @@ export async function startHelper(overrides: Partial<HelperConfig> = {}): Promis
    * 低到可以忽略；真撞满了就带着这个端口继续跑，并明确警告 ——
    * 起不来比"起来了但连不上"更容易查。
    */
-  for (let attempt = 0; ; attempt++) {
-    await app.listen({ host: cfg.host, port: cfg.port });
-    const addr = app.server.address();
-    const got = addr && typeof addr === 'object' ? addr.port : NaN;
-    if (cfg.port !== 0 || !isBadPort(got) || attempt >= 7) {
-      if (isBadPort(got)) {
-        log.warn(`分配到的端口 ${got} 在 WHATWG 禁用端口表上，浏览器与 Node 的 fetch 会拒连；已重试 ${attempt} 次仍未换开`);
+  /*
+   * port=0 时先**试探**出一个不在禁用表上的端口，再让 Fastify 去监听它。
+   *
+   * 不能"先 listen、发现坏了再 close 重来"：Fastify 的实例 close() 之后
+   * 就废了，不能再 listen —— 那样写出来的结果是撞上禁用端口时整个 Helper
+   * 直接不可用，比原来的问题更糟。（这一版写错过一次，测试立刻照出来了：
+   * 日志里那行"换一个重试"之后，整个文件的用例一起挂。）
+   *
+   * 所以用一个临时的 net 服务器去问系统要端口，拿到好的就放掉、
+   * 立刻让 Fastify 绑上去。中间有极小的竞态窗口（放掉到绑上之间别人可能抢走），
+   * 所以 listen 失败时整轮重来。
+   */
+  if (cfg.port === 0) {
+    const { createServer: createNetServer } = await import('node:net');
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const probe = createNetServer();
+      const got = await new Promise<number>((resolve, reject) => {
+        probe.once('error', reject);
+        probe.listen(0, cfg.host, () => {
+          const a = probe.address();
+          resolve(a && typeof a === 'object' ? a.port : NaN);
+        });
+      });
+      await new Promise<void>((r) => probe.close(() => r()));
+      if (!isBadPort(got)) {
+        cfg.port = got;
+        break;
       }
-      break;
+      log.info(`系统分配的端口 ${got} 在 WHATWG 禁用端口表上（fetch 会拒连），另换一个`);
     }
-    log.info(`分配到的端口 ${got} 是 WHATWG 禁用端口（fetch 会拒连），换一个重试`);
-    await app.close();
+    // 八次都撞上就退回 0，交给系统随便给一个 —— 起不来比"起来了但连不上"更糟
+  }
+
+  try {
+    await app.listen({ host: cfg.host, port: cfg.port });
+  } catch (e) {
+    // 试探与正式绑定之间被别人抢走了：退回让系统当场分配
+    if ((e as { code?: string }).code === 'EADDRINUSE' && cfg.port !== 0) {
+      log.warn(`端口 ${cfg.port} 在试探之后被占用，改由系统分配`);
+      cfg.port = 0;
+      await app.listen({ host: cfg.host, port: 0 });
+    } else {
+      throw e;
+    }
   }
 
   const server = app.server;

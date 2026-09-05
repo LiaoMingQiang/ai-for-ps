@@ -88,7 +88,43 @@ export function sanitizeExternalText(text: string, max = 600): string {
     .replace(/\b(?:ASIA|AKIA|LTAI)[A-Z0-9]{8,}/g, 'REDACTED');
 
   return out;
+}/**
+ * 比 sanitizeExternalText 更狠一档：把 URL 的**整个查询串**去掉，只留主机和路径。
+ *
+ * safeEndpoint 有意保留参数名（`?AccessKey=REDACTED&Signature=REDACTED`），
+ * 排查时能看出是哪一套鉴权。日志里这样很有用，但有些文本会进 error_json ——
+ * 而 error_json 会出现在诊断包、截图、工单里，那里连参数名都不该有：
+ * 光看到 `?AccessKey=&Signature=` 就已经泄露了"这个账号用签名鉴权"这件事，
+ * 而且一旦哪天 redact 漏了一处，值就跟着出去了。
+ *
+ * 所以给用户看的错误消息用这一档：留下 host + path 足够定位是打哪个接口去的，
+ * 查询串一个字不留。
+ */
+export function endpointOnly(text: string, max = 300): string {
+  /*
+   * 不用正则替换。
+   *
+   * 正则那版实测不生效：同一个式子在外面手工 replace 能去掉查询串，
+   * 放进这个函数里就去不掉。源码、编译产物、清理重建都核对过，看起来一模一样，
+   * 没查出原因 —— 而这是条安全相关的代码，「看起来对但实际没生效」
+   * 是最不能接受的状态（credential-leak 用例正是这么把它逮住的）。
+   *
+   * 改成按空白切词、在词内定位 http:// 再截断。注意不能要求整个词以 http 开头：
+   * 真机上那句话是「…没等到回复（http://…?AccessKey=…」，URL 前面粘着一个全角括号。
+   */
+  return sanitizeExternalText(text, max)
+    .split(/(\s+)/)
+    .map((tok) => {
+      const lower = tok.toLowerCase();
+      const at = Math.max(lower.indexOf('http://'), lower.indexOf('https://'));
+      if (at < 0) return tok;
+      const q = tok.indexOf('?', at);
+      return q >= 0 ? tok.slice(0, q) : tok;
+    })
+    .join('');
 }
+
+
 
 /** 用户在请求发出**之前**就取消了。和超时区分开，上层要据此判"确定没花钱"。 */
 export class RequestAbortedError extends Error {

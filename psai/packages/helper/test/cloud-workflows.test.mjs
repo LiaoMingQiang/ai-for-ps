@@ -442,3 +442,38 @@ test('节点表里空行被丢掉，全空则明确报错', async () => {
   assert.notEqual(bad.body.ok, true);
   assert.match(JSON.stringify(bad.body), /节点号|字段名|请求示例/);
 });
+
+/* ---------------- 「AI 应用」只属于 RunningHub ---------------- */
+
+test('在别的平台下选「AI 应用」被拦下，并说清该选什么', async () => {
+  /*
+   * AI 应用是 RunningHub 独有的（它有一套 v2 接口 /openapi/v2/run/ai-app/{id}）。
+   * LiblibAI 没有这个概念 —— 让它存进去的话，那份节点表不会有任何人读，
+   * 提交时按工作流那条路走，报出来的错跟真正的原因毫无关系。
+   *
+   * 界面上这个类型选择器现在只对 RunningHub 出现；这条守的是服务端那一侧，
+   * 免得界面改坏了就直接漏过去。
+   */
+  const res = await call('POST', '/v1/workflows/cloud', {
+    name: 'Liblib 不该有 AI 应用',
+    providerId: 'liblib',
+    remoteId: 'some-uuid',
+    remoteKind: 'aiApp',
+    nodeInfo: [{ nodeId: '1', fieldName: 'image' }]
+  });
+  assert.notEqual(res.body.ok, true);
+  assert.match(JSON.stringify(res.body), /RunningHub 特有|云端工作流/);
+});
+
+test('LiblibAI 登记云端工作流照常可用', async () => {
+  // 拦掉 aiApp 不能把 LiblibAI 正常那条路也堵上。
+  const res = await call('POST', '/v1/workflows/cloud', {
+    name: 'Liblib 的一份工作流',
+    providerId: 'liblib',
+    remoteId: 'e10adc3949ba59abbe56e057f20f883e',
+    remoteKind: 'workflow'
+  });
+  assert.equal(res.body.ok, true, JSON.stringify(res.body));
+  assert.equal(res.body.workflow.providerId, 'liblib');
+  assert.equal(res.body.workflow.remoteKind, 'workflow');
+});

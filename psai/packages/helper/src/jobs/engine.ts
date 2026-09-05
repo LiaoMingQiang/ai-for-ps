@@ -9,7 +9,7 @@
  */
 
 import { randomUUID, createHash } from 'node:crypto';
-import { RequestAbortedError, sanitizeExternalText } from '../providers/http.js';
+import { RequestAbortedError, sanitizeExternalText, endpointOnly } from '../providers/http.js';
 import {
   PsaiError,
   toErrorShape,
@@ -38,6 +38,18 @@ import type {
 import type { Db } from '../db.js';
 import { withTransaction } from '../db.js';
 import type { Logger } from '../log.js';
+/*
+ * 把 details 端给用户之前必须过一遍脱敏。
+ *
+ * 用 sanitizeExternalText 而不是 log 那边的 redact()：redact 只打码**值**、
+ * 保留 `?AccessKey=` 这类参数名（日志里方便定位是哪一处）。但这条消息会进
+ * error_json，再出现在诊断包、截图、工单里 —— LiblibAI 的整套鉴权就在
+ * URL 查询串上，连参数名带出去都不行。sanitizeExternalText 会把整个查询串
+ * 换成安全的端点标签。
+ *
+ * 这一条是 credential-leak 用例当场拦下来的：我第一版直接把 details 拼进去，
+ * 签名参数立刻漏了出来。（sanitizeExternalText 在文件顶部已经 import 过。）
+ */
 import type { AssetStore } from '../assets.js';
 import type { SettingsStore } from '../settings.js';
 import type { PromptStore } from '../prompts.js';
@@ -651,7 +663,19 @@ export class JobEngine {
           toErrorShape(
             new PsaiError(
               'SUBMISSION_UNKNOWN',
-              `请求已经发往 ${job.providerId}，但没等到回复（${shape.message}）。` +
+              /*
+               * **要带上 details，不能只有 message。**
+               *
+               * message 是错误码的通用文案（「服务返回了无法解析的响应」这种），
+               * 真正有诊断价值的东西在 details 里 —— 比如平台到底回了什么、
+               * 打的是哪个接口。丢掉它，用户和我们看到的都只是一句
+               * "出错了"，完全无从下手。
+               *
+               * 真机上就吃过这个亏：LiblibAI 连着四次 submission_unknown，
+               * 界面上只有那句通用话，而 jsonOf 其实已经把响应原文的前 300 字
+               * 放进 details 了，一路传到这里被丢掉。
+               */
+              `请求已经发往 ${job.providerId}，但没等到回复（${endpointOnly(shape.details ?? shape.message)}）。` +
                 '平台可能已经接单并计费，也可能没有 —— 本地无法判断。' +
                 '请先到平台账单确认，再决定是否重跑；直接重跑有重复扣费的风险。'
             )

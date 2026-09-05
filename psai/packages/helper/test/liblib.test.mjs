@@ -95,10 +95,23 @@ test('模型/模板不存在要指路到设置，而不是报一个看不懂的�
   // 真机：{"code":200001,"msg":"model.notExist"}
   const a = explainLiblibCode(200001, 'model.notExist', '/api/model/version/get');
   assert.equal(a.code, 'PROVIDER_MODEL_UNAVAILABLE');
-  // 真机：{"code":100000,"msg":"参数无效: template not found, templateUuid: x"}
+  /*
+   * 同一句 template not found，两条路的含义完全不同，指引也必须不同：
+   *
+   *   /comfyui/app  templateUuid 是**平台常量**（我们自己填的）。实探过：
+   *                 填对了平台的报错会推进到 get workflow (version) failed。
+   *                 所以要让用户把设置里那栏清空，而不是叫他去平台找一个
+   *                 界面上根本不展示的值 —— 用户就是卡在这儿反复问"在哪儿找"。
+   *   /webui/*      templateUuid 就是他自己选的托管模型，那才该去 liblib.art 复制。
+   *
+   * 混着说的话，跑托管模型的人会被指去"清空一个常量"，而那栏跟他无关。
+   */
   const b = explainLiblibCode(100000, '参数无效: template not found, templateUuid: x', '/api/generate/comfyui/app');
   assert.equal(b.code, 'PROVIDER_MODEL_UNAVAILABLE');
-  assert.match(String(b.details ?? b.message), /liblib\.art/, '要告诉用户 uuid 去哪儿复制');
+  assert.match(String(b.details ?? b.message), /清空|平台侧常量/, 'ComfyUI 那条路要让用户清空设置，别去平台找');
+
+  const c = explainLiblibCode(100000, '参数无效: template not found, templateUuid: x', '/api/generate/webui/text2img');
+  assert.match(String(c.details ?? c.message), /liblib\.art/, '托管模型那条路才是"去平台复制 uuid"');
 });
 
 test('路由不存在要说成"插件侧的问题"，别让用户去改自己的参数', () => {

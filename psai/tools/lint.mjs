@@ -164,6 +164,33 @@ for (const f of [...tsFiles, ...mjsFiles]) {
   }
 }
 
+/*
+ * 工具类必须能赢过组件类。
+ *
+ * `.hidden { display: none }` 和 `.setting { display: flex }` 都是单类选择器，
+ * 同权重时**后写的赢**。真机上出过：.setting 写在 .hidden 后面，于是
+ * 任何 .setting 行加上 hidden 都藏不住 —— JS 那边 toggleClass 明明调了、
+ * 类也加上了，查半天都在怀疑逻辑，其实是 CSS 顺序。
+ *
+ * 靠"记得把工具类写在最后"是靠不住的，所以让 lint 盯着：这几个
+ * 切换显隐的工具类必须带 !important。
+ */
+{
+  const css = readFileSync(resolve(root, 'packages/plugin/styles/app.css'), 'utf8');
+  for (const cls of ['hidden']) {
+    const m = new RegExp(String.raw`^\.${cls}\s*\{([^}]*)\}`, 'm').exec(css);
+    if (!m) {
+      problems.push(`packages/plugin/styles/app.css: 找不到 .${cls} 这条工具类`);
+      continue;
+    }
+    if (!/display:\s*none\s*!important/.test(m[1])) {
+      problems.push(
+        `packages/plugin/styles/app.css: .${cls} 的 display 必须带 !important —— ` +
+          `否则写在它后面的组件类（如 .setting { display: flex }）会赢，元素藏不住`
+      );
+    }
+  }
+}
 
 /* ---- 统一收尾：所有检查跑完再报告，不能先喊 OK 再喊 FAIL ---- */
 if (problems.length) {

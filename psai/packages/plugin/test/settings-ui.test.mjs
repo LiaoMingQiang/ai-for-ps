@@ -370,7 +370,9 @@ test('点「登记」真的会登记 —— 逐项填好的节点表要发得出
   const host = await renderSettings('工作流');
 
   const nameIn = host.querySelectorAll('input').find((i) => (i.getAttribute('placeholder') ?? '').includes('起个名字'));
-  const idIn = host.querySelectorAll('input').find((i) => (i.getAttribute('placeholder') ?? '').includes('webapp'));
+  // 按"整条网址"找 —— placeholder 改过一次（原来写的是 webapp），
+  // 用例跟着改是对的，但这说明按文案找控件很脆
+  const idIn = host.querySelectorAll('input').find((i) => (i.getAttribute('placeholder') ?? '').includes('整条网址'));
   const kindSel = host.querySelectorAll('select').find((s) =>
     (s.textContent ?? '').includes('AI 应用')
   );
@@ -402,4 +404,42 @@ test('点「登记」真的会登记 —— 逐项填好的节点表要发得出
   assert.ok(made, `点了「登记」之后服务端应当有这条记录。列表里现有：${list.map((w) => w.name).join('、')}`);
   assert.equal(made.remoteKind, 'aiApp');
   assert.equal(made.nodeInfo?.[0]?.fieldName, 'image');
+});
+
+test('平台切到 LiblibAI 时，「类型」那一行必须消失', async () => {
+  /*
+   * 真机上没消失：平台显示 LiblibAI，「类型」还摆着「AI 应用」——
+   * 而那个类型是 RunningHub 独有的，对 LiblibAI 根本不成立。
+   *
+   * 查过三轮都没查到：CSS 里 .hidden 已经带 !important，插件版本也是新的，
+   * 代码顺序也对。所以直接对着真实界面代码跑一遍，看类到底加没加上。
+   */
+  const host = await renderSettings('工作流');
+  const selects = host.querySelectorAll('select');
+  const provSel = selects.find((s) => (s.textContent ?? '').includes('RunningHub'));
+  const kindSel = selects.find((s) => (s.textContent ?? '').includes('AI 应用'));
+  assert.ok(provSel && kindSel, '平台与类型两个下拉都该在');
+
+  const findKindRow = () =>
+    host.querySelectorAll('.setting').find((r) => (r.textContent ?? '').includes('类型'));
+  assert.ok(findKindRow(), 'RunningHub 时「类型」那一行应当在');
+
+  provSel.value = 'liblib';
+  provSel.dispatchEvent({ type: 'change', target: provSel, currentTarget: provSel });
+  await new Promise((r) => setTimeout(r, 100));
+
+  /*
+   * 断言的是**节点从树上消失**，不是"带了 hidden 类"。
+   *
+   * 真机上试过靠 CSS 类藏：类加上了、.hidden 也带了 !important、
+   * 插件版本也对 —— 那两块就是不消失，而同一份代码在替身上是好的。
+   * 差别在宿主那一层，我没能定位。所以改成摘节点；用例也跟着改，
+   * 断言 hidden 类等于又把宿主的样式行为当成前提。
+   */
+  assert.equal(findKindRow(), undefined, '切到 LiblibAI 之后「类型」那一行必须从 DOM 里摘掉');
+
+  provSel.value = 'runninghub';
+  provSel.dispatchEvent({ type: 'change', target: provSel, currentTarget: provSel });
+  await new Promise((r) => setTimeout(r, 100));
+  assert.ok(findKindRow(), '切回 RunningHub 要能插回来');
 });

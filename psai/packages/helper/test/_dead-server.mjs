@@ -17,6 +17,7 @@
  */
 
 import { createServer } from 'node:net';
+import { listenSafe } from '../../../tools/listen-safe.mjs';
 
 export async function startDeadServer() {
   const sockets = new Set();
@@ -29,11 +30,9 @@ export async function startDeadServer() {
     sockets.delete(sock);
   });
   srv.on('error', () => {});
-  await new Promise((resolve, reject) => {
-    srv.once('error', reject);
-    srv.listen(0, '127.0.0.1', resolve);
-  });
-  const { port } = srv.address();
+  // 这个桩要的是"连上就被掐断"，不是"根本连不上" —— 绑到禁用端口的话
+  // undici 压根不会去连，那条用例测的就不是它想测的东西了
+  const port = await listenSafe(srv, 0, '127.0.0.1');
   return {
     port,
     url: `http://127.0.0.1:${port}`,

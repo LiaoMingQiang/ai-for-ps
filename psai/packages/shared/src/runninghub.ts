@@ -505,3 +505,49 @@ export function pickRhImageField(fields: readonly RhNodeField[]): RhNodeField | 
     null
   );
 }
+
+/* ============================ 从网址里认 ID ============================ */
+
+/**
+ * 用户粘进来的可能是整条网址，也可能就是那串 ID。两种都认。
+ *
+ * 各平台把 ID 藏在完全不同的地方，让用户自己去抠是不合理的：
+ *
+ *   RunningHub 工作流   .../zh-cn/workflow/2095750596867792898
+ *   RunningHub AI 应用  .../zh-cn/ai-detail/1892509998193545217
+ *   LiblibAI 工作流     .../comfy?open=...&comfyuuid=6a40234cc28b49de806ed9bac9eeb555
+ *
+ * LiblibAI 尤其隐蔽 —— 它页面上根本没有展示工作流 ID 的地方，只有在线
+ * ComfyUI 打开那份工作流时地址栏里的 comfyuuid 参数。用户找不到是正常的。
+ *
+ * 认不出来就原样返回（去掉首尾空白）：也许他粘的本来就是纯 ID，
+ * 交给服务端去判合不合法，比在这里猜错更好。
+ */
+export function extractCloudWorkflowId(raw: string): string {
+  const text = raw.trim();
+  if (!text) return '';
+  // 不像网址就当成 ID 本身
+  if (!/[?/=]/.test(text)) return text;
+
+  // LiblibAI：comfyuuid=<32 位十六进制>
+  const liblib = /[?&]comfyuuid=([0-9a-f]{16,})/i.exec(text);
+  if (liblib?.[1]) return liblib[1];
+
+  // RunningHub：/workflow/<数字> 或 /ai-detail/<数字>
+  const rh = /\/(?:workflow|ai-detail|ai-app)\/(\d{6,})/.exec(text);
+  if (rh?.[1]) return rh[1];
+
+  /*
+   * 认不出就**不猜**，原样返回。
+   *
+   * 这里原来有个兜底：挑网址里最长的那串十六进制。真机上立刻出事 ——
+   * 用户粘的是 liblib.art/lib3?uuid=a9c9…&modelInfo=6a40…，两个参数都是
+   * 32 位十六进制，兜底取了前面那个（页面 uuid），而工作流 uuid 是后面那个。
+   * 界面还理直气壮地报了一句「已从网址里认出 ID」。
+   *
+   * 猜错的代价不是报错，是拿着一个错 ID 去提交，平台回一句「工作流不存在」——
+   * 跟真正的原因（取错了参数）毫无关系。认不出来交给用户自己填，
+   * 比给他一个看起来对的错答案强得多。
+   */
+  return text;
+}

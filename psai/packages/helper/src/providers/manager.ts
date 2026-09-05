@@ -12,7 +12,7 @@ import { ComfyUiAdapter } from './comfyui.js';
 import { OpenAiCompatibleAdapter } from './openai.js';
 import { GeminiAdapter } from './gemini.js';
 import { RunningHubAdapter } from './runninghub.js';
-import { LiblibAdapter } from './liblib.js';
+import { LiblibAdapter, LIBLIB_DEFAULT_COMFY_TEMPLATE } from './liblib.js';
 import type { SettingsStore } from '../settings.js';
 import type { CredentialStore } from '../credentials.js';
 import type { Logger } from '../log.js';
@@ -77,7 +77,21 @@ export class ProviderManager {
             // 平台侧 ComfyUI 应用模板 id —— 和工作流 uuid 是两个值。
             // 走凭据存储只是图省事（它本来就是个不该外传的账号相关常量），
             // 真机上把工作流 uuid 当它发会直接被回 template not found。
-            comfyTemplateUuid: this.credentials.get(desc.id, 'comfyTemplateUuid') ?? '',
+            /*
+             * 没填就用平台常量。
+             *
+             * templateUuid 是**平台侧 ComfyUI 应用模板的常量**，不是用户
+             * 自己的东西 —— 实探过：拿它和另一个候选去打，平台的报错都从
+             * 「template not found」推进到了「get workflow (version) failed」，
+             * 也就是模板这一关过了、卡在工作流那一侧。而拿工作流 uuid 冒充它
+             * 会直接被判 template not found。
+             *
+             * 既然是常量，就不该让用户去找。原来空着必须手填，而那个值
+             * 在 LiblibAI 的界面上根本没有明确的展示入口，用户直接卡死在这儿。
+             * 仍然允许手填覆盖：万一平台换了常量，不用等我们发版。
+             */
+            comfyTemplateUuid:
+              this.credentials.get(desc.id, 'comfyTemplateUuid')?.trim() || LIBLIB_DEFAULT_COMFY_TEMPLATE,
             timeoutMs
           };
           if (existing instanceof LiblibAdapter) existing.updateOptions(opts);

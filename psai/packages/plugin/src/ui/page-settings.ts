@@ -18,7 +18,8 @@ import {
   findProvider,
   BINDABLE_PARAMS,
   SEMANTIC_TO_PARAM,
-  parseRhNodeInfo
+  parseRhNodeInfo,
+  extractCloudWorkflowId
 } from '@psai/shared';
 import type { AppSettings, SettingsPatch, WritebackMode, ComfyMode } from '@psai/shared';
 import { h, clear, formatBytes, formatDuration, formatTime, toggleClass } from '../app/dom.js';
@@ -864,8 +865,30 @@ async function cloudWorkflowBox(host: HTMLElement): Promise<HTMLElement> {
   }
   providerSelect.onchange = (e: Event): void => {
     providerId = (e.target as HTMLSelectElement).value || providerId;
+    paintKind();
   };
-  const idInput = h('input', { class: 'input', type: 'text', placeholder: '平台上的工作流 / webapp ID' }) as HTMLInputElement;
+  const idInput = h('input', {
+    class: 'input',
+    type: 'text',
+    placeholder: '直接粘整条网址也行，或者填那串 ID'
+  }) as HTMLInputElement;
+  /*
+   * 粘进来的整条网址当场换成 ID。
+   *
+   * 各平台把 ID 藏在完全不同的地方，LiblibAI 尤其隐蔽 —— 页面上根本没有
+   * 展示工作流 ID 的地方，只有在线 ComfyUI 打开那份图时地址栏里的
+   * comfyuuid 参数。让用户自己去 URL 里抠一段十六进制，抠错了（比如抠成
+   * 旁边那个长得一模一样的 comfyOid）报的错还会指向别处。
+   */
+  idInput.onchange = (e: Event): void => {
+    const el = e.target as HTMLInputElement;
+    const id = extractCloudWorkflowId(el.value);
+    if (id !== el.value.trim()) {
+      el.value = id;
+      out.className = 'ok';
+      out.textContent = `已从网址里认出 ID：${id}`;
+    }
+  };
   const out = h('div', { class: 'muted' });
 
   /*
@@ -878,6 +901,21 @@ async function cloudWorkflowBox(host: HTMLElement): Promise<HTMLElement> {
    */
   const kindSelect = h('select', { class: 'input select' }) as HTMLSelectElement;
   let remoteKind: 'workflow' | 'aiApp' = 'workflow';
+  const kindRow = fieldRow('类型', kindSelect);
+  /*
+   * 摘挂节点需要一个"插回哪儿"的锚点：占位用的空 div 一直留在树上，
+   * 要露出来时插到它前面。没有锚点的话，插回去的位置会跑到末尾，
+   * 表单顺序就乱了。
+   */
+  const kindAnchor = h('div', { class: 'row-anchor' });
+  const nodeInfoAnchor = h('div', { class: 'row-anchor' });
+  const setRowVisible = (row: HTMLElement, on: boolean, anchor: HTMLElement): void => {
+    const parent = anchor.parentElement;
+    if (!parent) return;
+    const mounted = row.parentElement === parent;
+    if (on && !mounted) parent.insertBefore(row, anchor);
+    else if (!on && mounted) parent.removeChild(row);
+  };
   const wfOpt = h('option', { value: 'workflow' }, 'ComfyUI 工作流（地址里带 /workflow/）') as HTMLOptionElement;
   wfOpt.setAttribute('selected', '');
   kindSelect.appendChild(wfOpt);
@@ -1031,12 +1069,40 @@ async function cloudWorkflowBox(host: HTMLElement): Promise<HTMLElement> {
   const kindHint = h('div', { class: 'muted hint' });
 
   const paintKind = (): void => {
-    const isApp = remoteKind === 'aiApp';
-    toggleClass(nodeInfoRow, 'hidden', !isApp);
+    /*
+     * 「AI 应用」是 RunningHub 独有的（它有一套 v2 接口）。别的平台没有
+     * 这个概念，所以类型选择器只对 RunningHub 出现 —— 让用户在 LiblibAI 下面
+     * 选一个不存在的类型，是在请他填一份没人会读的表。
+     *
+     * 提示文案也跟着平台走：原来那两句写死的「地址里带 /workflow/」
+     * 是 RunningHub 的 URL 形态，对 LiblibAI 完全不成立。
+     */
+    const isRh = providerId === 'runninghub';
+    if (!isRh && remoteKind === 'aiApp') remoteKind = 'workflow';
+
+    /*
+     * **把节点从 DOM 里摘掉，而不是加一个 hidden 类。**
+     *
+     * 真机上 toggleClass 那条路失败过：类加上了、CSS 里 .hidden 也带了
+     * !important、插件版本也是新的 —— 界面上那两块就是不消失。
+     * 而同一份界面代码在测试替身上是好的，所以差别在宿主那一层，
+     * 我没能定位到底是什么。
+     *
+     * 与其继续猜 UXP 的样式行为，不如换成一个不依赖样式的做法：
+     * 该藏就 removeChild，该露再插回原位。节点不在树上，宿主再怎么算样式
+     * 都不会把它画出来。
+     */
+    setRowVisible(kindRow, isRh, kindAnchor);
+
+    const isApp = isRh && remoteKind === 'aiApp';
+    setRowVisible(nodeInfoRow, isApp, nodeInfoAnchor);
     clear(kindHint);
     kindHint.textContent = isApp
       ? '在应用页点右上角「API」进到接口页，「提交请求 → 请求示例」里有节点号和字段名。'
-      : '工作流要先在 RunningHub 上保存并成功跑过一次，平台才会给出它的接口格式；否则登记后提交会报「尚未保存或未运行」。';
+      : isRh
+        ? '工作流要先在 RunningHub 上保存并成功跑过一次，平台才会给出它的接口格式；否则登记后提交会报「尚未保存或未运行」。'
+        : 'LiblibAI 的工作流要先「发布为应用」才有可调用的 uuid；它和「ComfyUI 模板 ID」是两个值，' +
+          '后者填在「推荐平台 → LiblibAI」那张卡片里，两个都要有才提交得出去。';
   };
   kindSelect.onchange = (e: Event): void => {
     const v = (e.target as HTMLSelectElement).value;
@@ -1086,10 +1152,19 @@ async function cloudWorkflowBox(host: HTMLElement): Promise<HTMLElement> {
 
   box.appendChild(fieldRow('名称', nameInput));
   box.appendChild(fieldRow('平台', providerSelect));
-  box.appendChild(fieldRow('类型', kindSelect));
+  box.appendChild(kindRow);
+  box.appendChild(kindAnchor);
   box.appendChild(kindHint);
-  box.appendChild(fieldRow('ID', idInput, '在平台页面的地址栏里，末尾那串 19 位数字。'));
+  box.appendChild(
+    fieldRow(
+      'ID',
+      idInput,
+      'RunningHub：地址末尾那串 19 位数字。LiblibAI：页面上不展示，在「在线 ComfyUI」打开那份工作流后，' +
+        '地址栏里的 comfyuuid 参数就是（注意别取成旁边那个长得很像的 comfyOid）。整条网址粘进来会自动认。'
+    )
+  );
   box.appendChild(nodeInfoRow);
+  box.appendChild(nodeInfoAnchor);
   box.appendChild(h('div', { class: 'row gap' }, addBtn));
   box.appendChild(out);
   box.appendChild(

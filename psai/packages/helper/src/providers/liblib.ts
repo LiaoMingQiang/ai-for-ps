@@ -51,6 +51,18 @@ import { emptyProgress } from './types.js';
 import { httpFetch, jsonOf, normalizeBaseUrl, ensureOk, sanitizeExternalText } from './http.js';
 import type { Logger } from '../log.js';
 
+/**
+ * LiblibAI 云端 ComfyUI 的模板常量。
+ *
+ * 实探得出（用户真账号）：填这个值时平台的报错是「get workflow version failed」，
+ * 也就是**模板这一关过了**；而填工作流 uuid 会直接被判「template not found」。
+ * 所以它是平台侧的常量，不是每个用户各自不同的东西。
+ *
+ * 之所以要写死一个默认值：LiblibAI 的界面上没有展示它的地方，
+ * 让用户去找一个找不到的东西，等于把这条路堵死。用户仍可在设置里覆盖。
+ */
+export const LIBLIB_DEFAULT_COMFY_TEMPLATE = '4df2efa0f18d46dc9758803e478eb51c';
+
 export interface LiblibOptions {
   baseUrl: string;
   accessKey: string | null;
@@ -304,10 +316,15 @@ export class LiblibAdapter implements ProviderAdapter {
   private async submitWorkflow(workflowUuid: string, ctx: SubmitContext): Promise<SubmitResult> {
     const templateUuid = this.opts.comfyTemplateUuid.trim();
     if (!templateUuid) {
+      /*
+       * 正常走不到这里：manager 会在没配时填上平台常量。
+       * 留着是防有人显式把它清成空白 —— 那时候要说清它在哪儿填，
+       * 而且**别再指错页签**（原来写的是「设置 → 云端」，实际在「推荐平台」）。
+       */
       throw new PsaiError(
         'WORKFLOW_NOT_BOUND',
-        'LiblibAI 云端工作流还需要一个「ComfyUI 模板 ID」。它在工作流页面「查看 API 参数」里的参数示例中，' +
-          '是 templateUuid 那一项 —— 和工作流 ID 是两个值。填到「设置 → 云端 → LiblibAI」里。'
+        'LiblibAI 云端工作流需要一个「ComfyUI 模板 ID」，而它被清空了。' +
+          '留空即可 —— 我们会用平台常量。要手填就填到「设置 → 推荐平台 → LiblibAI」那张卡片里。'
       );
     }
 
@@ -599,9 +616,40 @@ export function explainLiblibCode(code: number, rawMsg: string, uri: string): Ps
     return new PsaiError('PROVIDER_BAD_RESPONSE', `LiblibAI 接口 ${uri} 不存在（${msg}）—— 这是插件侧的问题，请反馈。`);
   }
   if (/template not found/i.test(msg)) {
+    /*
+     * 同一句 template not found，两条路含义完全不同，得按接口分开说：
+     *
+     *   /comfyui/app  —— templateUuid 是**平台常量**（我们自己填的），
+     *                    用户不该去找它；填错了就把设置里那栏清空。
+     *   /webui/*      —— templateUuid 就是用户选的那个托管模型，
+     *                    要告诉他去 liblib.art 上复制。
+     *
+     * 混着说的话，跑托管模型的人会被指去"清空一个常量"，而那栏跟他无关。
+     */
+    const isComfyApp = /comfyui\/app/i.test(uri);
     return new PsaiError(
       'PROVIDER_MODEL_UNAVAILABLE',
-      `LiblibAI：${msg}。工作流/模型 uuid 要从 liblib.art 上你自己的应用页面复制，填错了平台找不到。`
+      isComfyApp
+        ? `LiblibAI：${msg}。这里的 templateUuid 是平台侧常量、不是你的工作流 ID —— ` +
+          `把「设置 → 推荐平台 → LiblibAI」的「ComfyUI 模板 ID」清空即可，我们会自动填。`
+        : `LiblibAI：${msg}。工作流/模型 uuid 要从 liblib.art 上你自己的应用页面复制，填错了平台找不到。`
+    );
+  }
+  /*
+   * 模板这一关过了、卡在工作流那一侧。
+   *
+   * 实探出来的两句原文：get workflow failed / get workflow version failed。
+   * 它们的共同含义是"这个 workflowUuid 平台取不到可运行的版本" ——
+   * 最常见的原因是那份工作流还没**发布为应用**（草稿没有可调用的版本）。
+   *
+   * 原样端出这两句英文，用户完全看不出下一步该做什么。
+   */
+  if (/get workflow(\s+version)?\s+failed/i.test(msg)) {
+    return new PsaiError(
+      'WORKFLOW_NOT_FOUND',
+      `LiblibAI 找不到这份工作流可运行的版本（平台原文：${msg}）。` +
+        `最常见的原因是它还没「发布为应用」—— 草稿状态的工作流没有可调用的版本。` +
+        `请到 liblib.art 上把这份工作流发布之后再试；也顺便核对一下 ID 是不是取成了地址里的 comfyOid（那个和 comfyuuid 长得一样）。`
     );
   }
   if (code === CODE.PARAM_INCOMPLETE || code === CODE.PARAM_INVALID) {

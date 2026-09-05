@@ -527,8 +527,19 @@ body {
 .btn-enhance {
   color: var(--accent);
 }
-.prompt-undo.hidden {
-  display: none;
+.prompt-undo/*
+ * 工具类必须赢过组件类。
+ *
+ * 这条原来只是 `display: none`，而 `.setting { display: flex }` 写在文件
+ * **更后面** —— 同样是单类选择器时后写的赢，于是任何 .setting 行加上
+ * hidden 都藏不住。真机上表现为：平台选了 LiblibAI，本该消失的「类型」
+ * 选择器还杵在那儿，而且还显示着一个对该平台不成立的选项。
+ *
+ * 这类"藏不住"的 bug 很隐蔽：JS 那边 toggleClass 明明调了、类也加上了，
+ * 查半天都在怀疑逻辑，其实是 CSS 顺序。
+ */
+.hidden {
+  display: none !important;
 }
 
 /* 滑杆 */
